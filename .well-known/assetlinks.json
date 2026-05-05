@@ -1,0 +1,9 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.abtechnologies.fitHer",
+    "sha256_cert_fingerprints":
+    ["5F:FD:6D:DD:71:4B:6D:02:E0:10:8E:9A:2B:F3:EB:4B:ED:22:33:8C:E8:8A:08:D7:A7:99:2A:DE:C2:51:39:86"]
+  }
+}]

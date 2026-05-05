@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls *)",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root testing -e \"DELETE FROM UserCycleData WHERE userId = 181; DELETE FROM WeeklyCheckins WHERE userId = 181 AND weekDate >= DATE_FORMAT\\(DATE_SUB\\(CURDATE\\(\\), INTERVAL 14 DAY\\), '%Y-%m-%d'\\);\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root testing)",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root testing -e \"SELECT \\(SELECT COUNT\\(*\\) FROM Goals WHERE userId = 181 AND status = 'active'\\) AS goals_expect_1, \\(SELECT COUNT\\(*\\) FROM DailyCheckins WHERE userId = 181 AND note = 'SEED-USER181-WEEK1'\\) AS daily_expect_6, \\(SELECT COUNT\\(*\\) FROM ClassAttendances WHERE user_id = 181 AND attended_at >= DATE_SUB\\(CURDATE\\(\\), INTERVAL 7 DAY\\)\\) AS classes_expect_5, \\(SELECT lastPeriodDate FROM UserCycleData WHERE userId = 181 LIMIT 1\\) AS lpd_expect_recent;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT weekday, COUNT\\(*\\) AS rows_per_day FROM ClassSchedules GROUP BY weekday ORDER BY FIELD\\(weekday,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'\\);\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT * FROM Times; SHOW INDEXES FROM Times; SHOW INDEXES FROM Slots;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing)",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT id, \\\\`start\\\\`, \\\\`end\\\\`, type FROM Slots ORDER BY id LIMIT 7;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT id, \\\\`start\\\\`, \\\\`end\\\\`, type FROM Slots WHERE TimeId=1 ORDER BY id;\")",
+      "Read(//c/Users/dell/Desktop/dev/fit_her-main/**)",
+      "Bash(/c/flutter/bin/flutter analyze *)",
+      "Bash(/c/flutter/bin/flutter test *)",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SHOW COLUMNS FROM Users WHERE Field IN \\('freeze','freezingDays','usedFreezeOption','frozenAt'\\);\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SHOW COLUMNS FROM UserPlans WHERE Field IN \\('usedFreezeOption','expireDate'\\);\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT COUNT\\(*\\) AS total_users, SUM\\(CASE WHEN freeze=1 THEN 1 ELSE 0 END\\) AS currently_frozen, SUM\\(CASE WHEN freezingDays IS NOT NULL AND freezingDays>0 THEN 1 ELSE 0 END\\) AS has_freezingDays, SUM\\(CASE WHEN usedFreezeOption=1 THEN 1 ELSE 0 END\\) AS used_freeze_option FROM Users;\")",
+      "Bash(node -e ' *)",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT \\\\`start\\\\`, COUNT\\(*\\) AS cnt FROM Slots GROUP BY \\\\`start\\\\` ORDER BY \\\\`start\\\\`;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT id, \\\\`start\\\\`, \\\\`end\\\\`, type, TimeId FROM Slots WHERE TimeId = 1 ORDER BY \\\\`start\\\\`;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -h 127.0.0.1 -u root -t testing -e \"SELECT id, \\\\`start\\\\`, \\\\`end\\\\`, TimeId FROM Slots WHERE TimeId = 1 ORDER BY \\\\`start\\\\`;\")",
+      "Bash(curl -s --max-time 5 http://localhost:9000/admin/server-time)",
+      "Bash(grep -E \"\\\\.js$\")",
+      "Bash(node -c helper/timeFormats.js)",
+      "Bash(node -c helper/autoEndSessions.js)",
+      "Bash(node -c helper/autoEndExpiredAppointments.js)",
+      "Bash(node -c models/Appointments.js)",
+      "Bash(node -c controllers/FrontSite/appointmentController.js)",
+      "Bash(node scripts/backfill_slotdiet_canonical_format.js)",
+      "Bash(node -c controllers/FrontSite/dietController.js)",
+      "Bash(node -c routes/FrontSite/dietRoutes.js)",
+      "Bash(node -c models/SlotDiet.js)",
+      "Bash(node -c migrations/20260503130000-drop-isAvailble-from-slotdiets.js)",
+      "Bash(flutter analyze *)",
+      "Bash(node -c helper/freezeGate.js)",
+      "Bash(node -c controllers/Admin/AdminController.js)"
+    ]
+  }
+}
