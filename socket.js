@@ -23,16 +23,30 @@ io.on("connection", (socket) => {
 
   // Community feed room — clients call joinCommunity once they open the feed
   // so newPost / postApproved / postDeleted reach only interested clients.
-  socket.on("joinCommunity", () => socket.join("community"));
-  socket.on("leaveCommunity", () => socket.leave("community"));
+  socket.on("joinCommunity", () => {
+    socket.join("community");
+    console.log(`📡 ${socket.id} joined room community`);
+  });
+  socket.on("leaveCommunity", () => {
+    socket.leave("community");
+    console.log(`📡 ${socket.id} left room community`);
+  });
 
   // Per-post room — used while a client has a single post / its replies open.
   // Scopes replyWithUser and toggleLike events to viewers of that post.
   socket.on("joinPost", (postId) => {
-    if (postId !== undefined && postId !== null) socket.join(`post_${postId}`);
+    if (postId !== undefined && postId !== null) {
+      const room = `post_${postId}`;
+      socket.join(room);
+      console.log(`📡 ${socket.id} joined room ${room}`);
+    }
   });
   socket.on("leavePost", (postId) => {
-    if (postId !== undefined && postId !== null) socket.leave(`post_${postId}`);
+    if (postId !== undefined && postId !== null) {
+      const room = `post_${postId}`;
+      socket.leave(room);
+      console.log(`📡 ${socket.id} left room ${room}`);
+    }
   });
 
   socket.on("getSlot", async (data) => {
@@ -53,6 +67,10 @@ io.on("connection", (socket) => {
       console.error("❌ Error fetching slot:", error);
       socket.emit("slotError", { message: "Failed to fetch slot." });
     }
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log(`🔌 User disconnected: ${socket.id} (${reason})`);
   });
 });
 
