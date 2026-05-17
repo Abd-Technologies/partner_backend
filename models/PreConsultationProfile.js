@@ -82,6 +82,29 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: [],
       },
 
+      /**
+       * Number of meals per day for this user's diet plan. Drives the
+       * meal-template pattern in services/ai/constants/mealTemplates.js
+       * (3 → b/l/d, 4 → +afternoon snack, 5 → +mid morning, 6 → +evening
+       * snack). Set during the consultation and editable later by the
+       * dietitian. Valid: 3, 4, 5, or 6.
+       */
+      mealsPerDay: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        defaultValue: 5,
+        validate: {
+          isAllowedCount(value) {
+            if (value == null) return; // nullable
+            if (![3, 4, 5, 6].includes(value)) {
+              throw new Error(
+                `mealsPerDay must be 3, 4, 5, or 6 — got ${value}`
+              );
+            }
+          },
+        },
+      },
+
       // ── Audit ──────────────────────────────────────────────────────
       // Multi-step form auto-save (per locked Decision 5) — UI shows
       // resume vs restart based on whether the form is complete.

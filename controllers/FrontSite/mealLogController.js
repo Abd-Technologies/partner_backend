@@ -2,7 +2,17 @@ const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
 const { MealLog } = require("../../models");
 
-const VALID_MEAL_TYPES = new Set(["breakfast", "lunch", "dinner"]);
+// Phase F.2 — kept in lockstep with services/ai/constants/mealTemplates.js
+// VALID_MEAL_TYPES on the AI service. Migration 20260508120000 extends
+// the DB ENUM to match.
+const VALID_MEAL_TYPES = new Set([
+  "breakfast",
+  "mid_morning",
+  "lunch",
+  "afternoon_snack",
+  "evening_snack",
+  "dinner",
+]);
 const VALID_STATUSES = new Set([
   "pending",
   "followed",
@@ -85,15 +95,20 @@ exports.upsertMealLog = async (req, res) => {
       );
     }
 
-    // Reason-code validation per status.
-    const reasonCode = body.reasonCode;
+    // Reason-code validation per status. Phase F.2 surfaces no reason
+    // picker on the user's per-meal flow (just 3 buttons), so we default
+    // to "other" when no code is sent. The legacy bottom-sheet flow
+    // still passes a real code and the whitelist check applies to it.
+    let reasonCode = body.reasonCode;
     if (status === "alternative") {
+      if (reasonCode == null) reasonCode = "other";
       if (!ALTERNATIVE_REASONS.has(reasonCode)) {
         return res.json(
           ApiResponse("0", "Invalid reasonCode for alternative meal", {})
         );
       }
     } else if (status === "skipped") {
+      if (reasonCode == null) reasonCode = "other";
       if (!SKIPPED_REASONS.has(reasonCode)) {
         return res.json(
           ApiResponse("0", "Invalid reasonCode for skipped meal", {})
@@ -106,6 +121,13 @@ exports.upsertMealLog = async (req, res) => {
         ? body.alternativeText.slice(0, 255)
         : null;
 
+    // Phase F.2 — optional FK to the structured-plan meal this log was
+    // made against. Validated as an int when present; ignored otherwise.
+    const dietPlanMealId =
+      typeof body.dietPlanMealId === "number" && Number.isInteger(body.dietPlanMealId)
+        ? body.dietPlanMealId
+        : null;
+
     const [row, created] = await MealLog.findOrCreate({
       where: { userId, date, mealType },
       defaults: {
@@ -115,18 +137,24 @@ exports.upsertMealLog = async (req, res) => {
         status,
         reasonCode: reasonCode || null,
         alternativeText,
+        dietPlanMealId,
         firstLoggedAt: new Date(),
         editCount: 0,
       },
     });
 
     if (!created) {
-      await row.update({
+      const updates = {
         status,
         reasonCode: reasonCode || null,
         alternativeText,
         editCount: (row.editCount || 0) + 1,
-      });
+      };
+      // Only overwrite dietPlanMealId when explicitly provided so a
+      // legacy log doesn't silently lose its (already-null) link, and
+      // a new V2 log doesn't lose its FK on a status edit.
+      if (dietPlanMealId !== null) updates.dietPlanMealId = dietPlanMealId;
+      await row.update(updates);
     }
 
     return res.json(
