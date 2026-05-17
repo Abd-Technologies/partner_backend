@@ -235,6 +235,10 @@ exports.createReply = async (req, res) => {
     const io = getIO();
     console.log('[posts] emitting replyWithUser', reply.id);
     io.to(`post_${postId}`).emit('replyWithUser', replyWithUser);
+    io.to('community').emit('replyCreated', {
+      postId: Number(postId),
+      reply: replyWithUser,
+    });
 
     return res
       .status(201)
