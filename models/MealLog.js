@@ -20,9 +20,29 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATEONLY,
         allowNull: false,
       },
+      // Phase F.2 — extended from 3 to 6 values to mirror
+      // services/ai/constants/mealTemplates.js VALID_MEAL_TYPES so
+      // users on a 4/5/6-meal-per-day structured plan can log every
+      // slot. Migration 20260508120000-extend-meal-log-meal-types.js
+      // brings the DB into line. Existing breakfast/lunch/dinner rows
+      // remain valid (the new values are additive).
       mealType: {
-        type: DataTypes.ENUM('breakfast', 'lunch', 'dinner'),
+        type: DataTypes.ENUM(
+          'breakfast',
+          'mid_morning',
+          'lunch',
+          'afternoon_snack',
+          'evening_snack',
+          'dinner'
+        ),
         allowNull: false,
+      },
+      // Phase F.2 — optional FK to the structured-plan meal this log
+      // was made against. NULL on legacy logs; populated on new logs
+      // from V2TodayMealsSection. ON DELETE SET NULL on the DB side.
+      dietPlanMealId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
       },
       // pending: not yet logged for current day (no row needed unless we
       // pre-create them via cron — we don't). followed/alternative/skipped
@@ -73,6 +93,13 @@ module.exports = (sequelize, DataTypes) => {
   MealLog.associate = (models) => {
     MealLog.belongsTo(models.User, { foreignKey: 'userId' });
     models.User.hasMany(MealLog, { foreignKey: 'userId' });
+    // Phase F.2 — wired only when DietPlanMeal exists (Phase B+).
+    // Defensive: lets this model load even before the V2 plan tables
+    // are created on a fresh DB.
+    if (models.DietPlanMeal) {
+      MealLog.belongsTo(models.DietPlanMeal, { foreignKey: 'dietPlanMealId' });
+      models.DietPlanMeal.hasMany(MealLog, { foreignKey: 'dietPlanMealId' });
+    }
   };
 
   return MealLog;

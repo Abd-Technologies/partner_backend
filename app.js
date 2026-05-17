@@ -50,7 +50,11 @@ const progressSubmissionAdminRoutes = require('./routes/Admin/progressSubmission
 const consultationBookingRoutes = require('./routes/FrontSite/consultationBooking')
 const escalationRoutes = require('./routes/FrontSite/escalation')
 const escalationAdminRoutes = require('./routes/Admin/escalation')
+const metricsAdminRoutes = require('./routes/Admin/metrics')
 const trialRoutes = require('./routes/FrontSite/trial')
+const dietPlanAdminRoutes = require('./routes/Admin/dietPlan')
+const magicLinkRoutes = require('./routes/FrontSite/magicLink')
+const dietPlanUserRoutes = require('./routes/FrontSite/dietPlan')
 
 
 
@@ -243,6 +247,10 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 app.use("/users", userRoute);
 app.use("/admin", AdminRoute);
+// Magic payment links — registers /admin/magic-links (rep-only) and
+// /magic-links/:token (+/redeem) public endpoints. Routes file mounts
+// at the root so it can expose both /admin/* and /magic-links/* paths.
+app.use("/", magicLinkRoutes);
 app.use("/country", contriesRoute);
 app.use('/duration/create', priceDurationRoutes);
 app.use('/api/priceingRoutes', priceingRoutes);
@@ -265,7 +273,10 @@ app.use('/admin/users', progressSubmissionAdminRoutes);
 app.use('/users', consultationBookingRoutes);
 app.use('/users/escalations', escalationRoutes);
 app.use('/admin/escalations', escalationAdminRoutes);
+app.use('/admin/metrics', metricsAdminRoutes);
 app.use('/trial', trialRoutes);
+app.use('/admin/diet-plan', dietPlanAdminRoutes);
+app.use('/users/diet-plan', dietPlanUserRoutes);
 
 
 

@@ -73,6 +73,12 @@ const { Op } = require("sequelize");
 const sequelize = require("sequelize");
 const { response } = require("../../routes/Admin/admin");
 const sendNotification = require("../../helper/notification");
+const { extractSlipData } = require("../../helper/visionOCR");
+const { applyPlanApproval } = require("../../helper/applyPlanApproval");
+
+// OCR auto-approval thresholds (same as magic link flow)
+const OCR_AUTO_APPROVE_MIN_CONFIDENCE = 0.75;
+const OCR_AMOUNT_TOLERANCE_PKR        = 50;
 function generateOTP() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
@@ -404,6 +410,11 @@ async function login(req, res) {
         weight: user.weight,
         useNewPaidHome: user.useNewPaidHome ?? false,
         useNewUnpaidHome: user.useNewUnpaidHome ?? false,
+        // Phase F.3 — surfaced so Flutter can cache the user's IANA
+        // zone for "today's meals" math instead of a device-local
+        // shortcut. Backend remains source of truth; the Flutter
+        // TimezoneSyncService PATCHes back when the device drifts.
+        timeZone: user.timeZone || 'Asia/Karachi',
       };
       const response = ApiResponse("1", "Login Successfully!", data);
       return res.json(response);
@@ -453,6 +464,8 @@ async function socialLogin(req, res) {
         weight: user.weight,
         useNewPaidHome: user.useNewPaidHome ?? false,
         useNewUnpaidHome: user.useNewUnpaidHome ?? false,
+        // Phase F.3 — see login() above for rationale.
+        timeZone: user.timeZone || 'Asia/Karachi',
       };
 
       const response = ApiResponse("1", "Login Successfully!", data);
@@ -3481,30 +3494,123 @@ async function addImage(req, res) {
     // Normalize path (important for Windows compatibility)
     const imagePath = uploadedImage.path.replace(/\\/g, "/");
 
-    // Create new image record
+    // ─── Run OCR on the uploaded slip ───
+    let ocrResult = null;
+    try {
+      ocrResult = await extractSlipData(imagePath, { amount: parseInt(price, 10) });
+    } catch (err) {
+      console.warn('OCR failed (non-fatal) in addImage:', err.message);
+    }
+
+    // ─── Duplicate detection — has this transaction ref ever been used? ───
+    if (ocrResult?.refNumber) {
+      const dup = await PlanImage.findOne({
+        attributes: ['id', 'UserId', 'createdAt'],
+        where: { ocrTransactionId: ocrResult.refNumber },
+      });
+      if (dup) {
+        console.warn(`⚠️ Duplicate transaction ID in addImage: ${ocrResult.refNumber} already used by PlanImage id=${dup.id}`);
+        return res.status(200).json(ApiResponse('0',
+          'This payment slip has already been used. Each transaction can only be redeemed once. Contact support if you believe this is an error.',
+          { duplicateOf: dup.id }
+        ));
+      }
+    }
+
+    // ─── Decide auto-approve vs admin queue ───
+    let autoApproved = false;
+    let approvalReason = null;
+    const expectedAmount = parseInt(price, 10);
+
+    if (ocrResult && ocrResult.confidence >= OCR_AUTO_APPROVE_MIN_CONFIDENCE) {
+      if (ocrResult.amount &&
+          Math.abs(ocrResult.amount - expectedAmount) <= OCR_AMOUNT_TOLERANCE_PKR) {
+        autoApproved = true;
+        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified`;
+      } else if (ocrResult.amount && ocrResult.amount > expectedAmount) {
+        autoApproved = true;
+        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward`;
+      }
+    }
+
+    // Create the PlanImage row
     const newImage = new PlanImage();
-    newImage.PlanId = planId;
-    newImage.UserId = userId;
-    newImage.image = imagePath;
-    newImage.PriceDurationId = durationId;
-    newImage.status = true;
-    newImage.price = price;
+    newImage.PlanId           = planId;
+    newImage.UserId           = userId;
+    newImage.image            = imagePath;
+    newImage.PriceDurationId  = durationId;
+    newImage.status           = true;
+    newImage.price            = price;
+    // Extended fields
+    newImage.paidAmount       = ocrResult?.amount && autoApproved ? ocrResult.amount : expectedAmount;
+    newImage.uploadSource     = 'user_app';
+    newImage.ocrData          = ocrResult ? {
+      amount:     ocrResult.amount,
+      amounts:    ocrResult.amounts,
+      date:       ocrResult.date,
+      bank:       ocrResult.bank,
+      sender:     ocrResult.sender,
+      refNumber:  ocrResult.refNumber,
+      rawText:    ocrResult.rawText?.slice(0, 1000),
+      autoApproved,
+      approvalReason,
+    } : null;
+    newImage.ocrConfidence    = ocrResult?.confidence || null;
+    newImage.ocrAmount        = ocrResult?.amount     || null;
+    newImage.ocrBank          = ocrResult?.bank       || null;
+    newImage.ocrDate          = ocrResult?.date       || null;
+    newImage.ocrSender        = ocrResult?.sender     || null;
+    newImage.ocrTransactionId = ocrResult?.refNumber  || null;
 
     await newImage.save();
 
-    // Notify the admin
-    const admin = await User.findOne({ where: { userType: "Admin" } });
-
-    if (admin?.deviceToken) {
-      const notification = {
-        title: "Approve Request",
-        body: "A new user image request has been received.",
-      };
-
-      await sendNotification([admin.deviceToken], notification);
+    // ─── Auto-activate the plan if OCR auto-approved it ───
+    let activationResult = null;
+    if (autoApproved) {
+      try {
+        activationResult = await applyPlanApproval(newImage, { approvalSource: 'auto' });
+        if (!activationResult.ok) {
+          console.warn('Auto-activation failed in addImage, falling back to admin:', activationResult.error);
+          autoApproved = false;
+          approvalReason = `Auto-approve failed: ${activationResult.error} — admin review required`;
+        }
+      } catch (err) {
+        console.error('Auto-activation error in addImage:', err);
+        autoApproved = false;
+      }
     }
 
-    return res.status(200).json(ApiResponse("1", "Image uploaded successfully.", {}));
+    // ─── Notify admin only if NOT auto-approved (no need to bother admin when system handled it) ───
+    if (!autoApproved) {
+      const admin = await User.findOne({ where: { userType: "Admin" } });
+      if (admin?.deviceToken) {
+        const notification = {
+          title: "Approve Request",
+          body: "A new user image request has been received.",
+        };
+        await sendNotification([admin.deviceToken], notification);
+      }
+    }
+
+    // ─── User-facing response — different message based on outcome ───
+    const userMessage = autoApproved
+      ? 'Payment verified — your plan is now active!'
+      : 'Payment slip received. Our team is verifying and you will be notified shortly.';
+
+    return res.status(200).json(ApiResponse("1", userMessage, {
+      autoApproved,
+      verificationStatus: autoApproved ? 'verified' : 'pending_review',
+      userPlanActivated:  !!activationResult?.ok,
+      userPlanId:         activationResult?.userPlanId || null,
+      planImageId:        newImage.id,
+      ocrSummary: ocrResult ? {
+        confidence: ocrResult.confidence,
+        amount:     ocrResult.amount,
+        bank:       ocrResult.bank,
+        date:       ocrResult.date,
+        refNumber:  ocrResult.refNumber,
+      } : null,
+    }));
 
   } catch (error) {
     console.error("Error in addImage:", error);
@@ -4119,13 +4225,13 @@ async function dietPlanDetails(req, res) {
     let bookedSlot;
     let responseArray = [];
     //if (!appointAdded) {
-      // Fetch available slots if no appointment exists
+      // Fetch available slots if no appointment exists.
+      // isAvailble was dropped (migration 20260503130000) — it was a
+      // dead column that was never written. Availability is determined
+      // by the Appointment table (booked vs not), not a slot flag.
       const slots = await SlotDiet.findAll({
-        where: {
-          dietitionId: planDetails.dietitianId,
-          [Op.or]: [{ isAvailble: null }, { isAvailble: true }],
-        },
-        attributes: ["id", "start", "end", "dietitionLink",],
+        where: { dietitionId: planDetails.dietitianId },
+        attributes: ["id", "start", "end", "dietitionLink"],
         include: [
           {
             model: TimeDietition,
@@ -4157,11 +4263,9 @@ async function dietPlanDetails(req, res) {
   //  }
 if(appointAdded) {
      
+      // isAvailble was dropped (migration 20260503130000) — same as above.
       bookedSlot = await SlotDiet.findOne({
-        where: {
-          id: appointAdded.timeSlotId,
-          [Op.or]: [{ isAvailble: null }, { isAvailble: true }],
-        },
+        where: { id: appointAdded.timeSlotId },
         attributes: ["id", "start", "end", "dietitionLink"],
         include: [
           {
@@ -4708,9 +4812,74 @@ async function getFreeTrialUserById(req, res) {
 
 
 
+/**
+ * me — verify the bearer JWT and return the current user's profile.
+ *
+ * Used by external systems (CRM dashboard) to verify a session and
+ * fetch role / userType without duplicating auth logic.
+ *
+ * Auth: validateToken middleware → req.user = { id, email } from JWT
+ * Returns: { id, firstName, lastName, email, userType, status, timeZone, isAdmin, isSalesRep }
+ */
+async function me(req, res) {
+  try {
+    const userId = req.user && req.user.id;
+    if (!userId) {
+      return res.status(401).json(ApiResponse("0", "Invalid token payload", {}));
+    }
+
+    const user = await User.findOne({
+      where: { id: userId },
+      attributes: [
+        "id",
+        "firstName",
+        "lastName",
+        "email",
+        "userType",
+        "status",
+        "timeZone",
+        "phone",
+      ],
+    });
+
+    if (!user) {
+      return res.status(404).json(ApiResponse("0", "User not found", {}));
+    }
+
+    const userType = user.userType || "";
+    const isAdmin    = userType === "Admin";
+    const isSalesRep = userType === "Customer_Support_Representative";
+
+    // Only Admin and Customer_Support_Representative are allowed to use CRM-side APIs.
+    // Other userTypes (User, Trainer, Dietition, Gynaecologist, etc.) get a flag of false
+    // so the CRM frontend can show an "access denied" screen instead of a broken dashboard.
+    const allowedInCrm = isAdmin || isSalesRep;
+
+    return res.json(
+      ApiResponse("1", "Current user", {
+        id:         user.id,
+        firstName:  user.firstName,
+        lastName:   user.lastName,
+        email:      user.email,
+        phone:      user.phone,
+        userType:   user.userType,
+        status:     user.status,
+        timeZone:   user.timeZone || "Asia/Karachi",
+        isAdmin,
+        isSalesRep,
+        allowedInCrm,
+      })
+    );
+  } catch (err) {
+    console.error("Error in /admin/me:", err);
+    return res.status(500).json(ApiResponse("0", "Internal server error", { error: err.message }));
+  }
+}
+
 module.exports = {
   registration,
   login,
+  me,
   add_plan,
   update_plan,
   edit_plan,

@@ -131,9 +131,31 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: true,
         },
 	  
-	 timeZone: {
-      type: DataTypes.STRING,
-      allowNull: true, // or false if required
+    /**
+     * IANA timezone name. Drives push notifications, "today's meals",
+     * streak resets, and any cycle/meal scheduling done by the
+     * dietitian. NEVER store offsets (e.g. "+05:00") or abbreviations
+     * (e.g. "PKT") — only IANA zone names like "Asia/Karachi",
+     * "Europe/London", "America/New_York".
+     *
+     * Field name is camelCase (`timeZone`) for backward-compat: legacy
+     * controllers (AdminController, DashboardController, crownjobfunction)
+     * already read `user.timeZone`. Spec called for `timezone` lowercase
+     * but renaming would require touching those controllers — out of
+     * scope for Phase B per the "don't modify controllers" rule.
+     */
+    timeZone: {
+      type: DataTypes.STRING(50),
+      allowNull: false,
+      defaultValue: 'Asia/Karachi',
+      validate: {
+        isValidIana(value) {
+          const moment = require('moment-timezone');
+          if (!moment.tz.zone(value)) {
+            throw new Error(`Invalid IANA timezone: ${value}`);
+          }
+        },
+      },
     },
   caloriesCounter: {
     type: DataTypes.INTEGER,

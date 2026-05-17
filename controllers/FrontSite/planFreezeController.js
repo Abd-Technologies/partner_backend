@@ -4,15 +4,17 @@ const ApiResponse = require("../../helper/ApiResponse");
 const sendNotification = require("../../helper/notification");
 
 // User-button freeze flow. Decisions baked in (see docs/Freeze_Logic_Audit.md):
-//   • Unlimited freezes per plan
+//   • Unlimited freezes per plan, no cooldown — the cumulative cap
+//     (totalFrozenDays ≤ originalDurationDays) is the only abuse guard.
+//     The math is correct under rapid toggling: spentDays ≈ 0 on a
+//     near-instant unfreeze means full refund, so loops don't extend
+//     the plan beyond original duration.
 //   • Cumulative cap = original plan duration in days
-//   • 1-day cooldown after unfreeze before user can freeze again
 //   • Auto-cancel pending/confirmed/In-Progress appointments inside the
 //     freeze window, with FCM to user and dietitian
 //   • Auto-unfreeze cron flips back to active when frozenAt + freezeDays
 //     elapses (sets unfrozenBy = NULL as the audit signal for cron-driven)
 
-const COOLDOWN_DAYS = 1;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // Picks the user's currently-active plan. "Active" = expireDate in the
@@ -62,22 +64,6 @@ exports.freezePlan = async (req, res) => {
     if (plan.frozenAt) {
       await t.rollback();
       return res.json(ApiResponse("0", "Plan is already frozen", {}));
-    }
-
-    // Cooldown check — using lastUnfrozenAt, not the legacy User.updatedAt
-    // (which any save mutates and so was unreliable in the v1 flow).
-    if (plan.lastUnfrozenAt) {
-      const cooldownEnds = shiftDate(plan.lastUnfrozenAt, COOLDOWN_DAYS);
-      if (cooldownEnds > new Date()) {
-        await t.rollback();
-        return res.json(
-          ApiResponse(
-            "0",
-            `Please wait until ${cooldownEnds.toISOString().slice(0, 10)} before freezing again (1-day cooldown).`,
-            {}
-          )
-        );
-      }
     }
 
     // Snapshot originalDurationDays on first freeze. After this row is
@@ -260,12 +246,6 @@ exports.freezeStatus = async (req, res) => {
     if (plan.frozenAt) {
       canFreezeNow = false;
       blockedReason = "Already frozen";
-    } else if (plan.lastUnfrozenAt) {
-      const cooldownEnds = shiftDate(plan.lastUnfrozenAt, COOLDOWN_DAYS);
-      if (cooldownEnds > now) {
-        canFreezeNow = false;
-        blockedReason = `Cooldown until ${cooldownEnds.toISOString().slice(0, 10)}`;
-      }
     } else if (remainingFreezeBudget === 0) {
       blockedReason = "No freeze days remaining on this plan";
     }
@@ -283,7 +263,6 @@ exports.freezeStatus = async (req, res) => {
         totalFrozenDays: plan.totalFrozenDays || 0,
         originalDurationDays,
         remainingFreezeBudget,
-        cooldownDays: COOLDOWN_DAYS,
         canFreezeNow,
         blockedReason,
       })

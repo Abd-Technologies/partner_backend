@@ -430,7 +430,12 @@ router.post(
 router.put('/updateDietPlanStatus/:id', asyncMiddleware(adminController.updateDietPlanStatus));
 router.get('/getDietPlanStatus', asyncMiddleware(adminController.getDietPlanStatus));
 
-
+// ─── Identity / session helper ──────────────────────────────────────────────
+// Used by the CRM dashboard (and any external system) to verify a session JWT
+// issued by /admin/login and fetch the current user's profile + role.
+// Auth: validateToken middleware → verifies with JWT_ACCESS_SECRET.
+// Header: accessToken: <jwt>
+router.get("/me", validateToken, asyncMiddleware(adminController.me));
 
 
 
