@@ -1493,7 +1493,7 @@ async function addDietPdf(req, res) {
           title: "Diet Plan Updated",
           body: "Your diet plan has been updated.",
         };
-        sendNotification([user.deviceToken], notification);
+        sendNotification([user.deviceToken], notification, { type: "dietPlanUpdated" });
       }
 
       // Return success response for update
@@ -1527,7 +1527,7 @@ async function addDietPdf(req, res) {
           title: "Diet Plan Added",
           body: "Your diet plan has been added.",
         };
-        sendNotification([user.deviceToken], notification);
+        sendNotification([user.deviceToken], notification, { type: "dietPlanAdded" });
       }
 
       // Return success response for new entry
@@ -1932,11 +1932,12 @@ async function update_dietition_link(req, res) {
     // Send notification if deviceToken exists
     if (user.deviceToken) {
       let notification = {
-        title: "Class link Added",
+        title: "Class Link Added",
         body: "Join the session now",
 
       };
       let data = {
+        type: "classLinkAdded",
         isTrainer: false, // Adding isTrainer flag in the notification payload
       };
       sendNotification([user.deviceToken], notification, data);
@@ -1999,11 +2000,12 @@ async function update_trainer_link(req, res) {
     // Send notification if deviceToken exists
     if (user.deviceToken) {
       let notification = {
-        title: "Trainer link Added",
+        title: "Class Link Added",
         body: "Join the session now",
 
       };
       let data = {
+        type: "trainerLinkAdded",
         isTrainer: true, // Adding isTrainer flag in the notification payload
       };
       sendNotification([user.deviceToken], notification, data);
@@ -2333,7 +2335,7 @@ async function addUser(req, res) {
             title: "A New user Assigned to you",
             body: `${firstName} ${lastName} has been added to your users list`,
           };
-          sendNotification([supporter.deviceToken], notification);
+          sendNotification([supporter.deviceToken], notification, { type: "csrUserAssigned" });
         }
 
       }
@@ -2520,7 +2522,11 @@ async function addAnnouncement(req, res) {
     // Send notifications if tokens exist
     if (deviceTokens.length > 0) {
       const notification = { title, body, };
-      await sendNotification(deviceTokens, notification,{"annoucement":JSON.stringify(true)});
+      await sendNotification(deviceTokens, notification, {
+        type: "announcement",
+        announcement: JSON.stringify(true),
+        annoucement: JSON.stringify(true),
+      });
     }
 
     return res.json(ApiResponse("1", "Announcement sent successfully", { announcementId: announcement.id }));
@@ -2749,9 +2755,13 @@ async function updateTrainerJoin(req, res) {
 
 async function sendNotificaionTest(req, res) {
   try {
-    const deviceTokens = [
-      "eCQHsEekS0WCoCP-Uo5COs:APA91bECgcdRpfGOVJbl-z7Og2bGJmTGD8YlpIr6MDvwCya61AHm8WAefiMC9si0KwaQwxlURMz43UoHeLrPNdj45YVXKo0lbw21qdCRZsZcdQvRHyhN2M4",
-    ];
+    const tokenFromRequest = req.body?.deviceToken || req.query?.deviceToken;
+    const tokenFromEnv = process.env.NOTIFICATION_TEST_TOKEN;
+    const deviceTokens = [tokenFromRequest || tokenFromEnv].filter(Boolean);
+
+    if (deviceTokens.length === 0) {
+      return res.json(ApiResponse("0", "Set NOTIFICATION_TEST_TOKEN or pass deviceToken", {}));
+    }
 
     const notification = {
       title: "Class Link Added",
@@ -2759,6 +2769,7 @@ async function sendNotificaionTest(req, res) {
 
     };
     const data = {
+      type: "trainerLinkAdded",
       isTrainer: "true", // Include additional data if necessary
     };
 
@@ -2798,10 +2809,10 @@ async function updateDietitionLink(req, res) {
     await slot.save();
 
     let notification = {
-      title: "Class link Added",
+      title: "Class Link Added",
       body: "Join the session now",
     };
-    sendNotification([user.deviceToken], notification);
+    sendNotification([user.deviceToken], notification, { type: "classLinkAdded", isTrainer: "false" });
     const response = ApiResponse("1", "Link updated successfully", {});
     return res.json(response);
   } else {
@@ -3329,10 +3340,10 @@ async function syncrhonize(req, res) {
       (deviceToken) => deviceToken !== null
     );
     let notiData = {
-      title: "Announcements",
+      title: "Plan expiring soon",
       body: "Your Plan is about to expire",
     };
-    sendNotification(validDeviceTokens, notiData);
+    sendNotification(validDeviceTokens, notiData, { type: "planExpiring" });
     let response = ApiResponse("1", "DAta", {});
     return res.json(response);
   } catch (error) {
@@ -3588,7 +3599,7 @@ async function addImage(req, res) {
           title: "Approve Request",
           body: "A new user image request has been received.",
         };
-        await sendNotification([admin.deviceToken], notification);
+        await sendNotification([admin.deviceToken], notification, { type: "paymentApprovalRequest" });
       }
     }
 
@@ -3684,7 +3695,7 @@ try {
         title: "Request Rejected",
         body: "Sorry, your plan request has been rejected.",
       };
-      sendNotification([user.deviceToken], rejectionNotification);
+      sendNotification([user.deviceToken], rejectionNotification, { type: "paymentRejected" });
     }
 
     return res.json(ApiResponse("1", "Plan image rejected and notification sent to User", {}));
@@ -3767,7 +3778,7 @@ try {
       title: "Congratulations!",
       body: "Your package has been approved. Enjoy the best services.",
     };
-    sendNotification([user.deviceToken], approvalNotification);
+    sendNotification([user.deviceToken], approvalNotification, { type: "paymentApproved" });
   }
 
   return res.json(ApiResponse("1", "Plan approved and assigned to user", {}));
@@ -3801,7 +3812,7 @@ async function sendNotification_to_all_users(req, res) {
     };
 
     // Send notification
-    sendNotification(validDeviceTokens, notification);
+    sendNotification(validDeviceTokens, notification, { type: "announcement" });
 
     // Create and send response
     let response = ApiResponse("1", "Notification sent successfully", {});

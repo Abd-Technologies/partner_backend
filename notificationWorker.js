@@ -57,7 +57,14 @@ notificationQueue.process(5, async (job) => {
       title: title ?? "Class Link Added",
       body: body ?? "Join the session now",
     };
-    const dataPayload = data ?? { isTrainer: "true" };
+    const defaultType = notification.title === "Trainer has Joined"
+      ? "classStart"
+      : "trainerLinkAdded";
+    const dataPayload = data ?? { type: defaultType, isTrainer: "true" };
+    const tokens = Array.isArray(deviceTokens) ? deviceTokens.filter(Boolean) : [];
+    if (tokens.length === 0) {
+      return console.log("No device tokens found.");
+    }
 
     // Chunk to avoid FCM errors
   //  const chunks = [];
@@ -65,11 +72,7 @@ notificationQueue.process(5, async (job) => {
     //  chunks.push(tokens.slice(i, i + 500));
   //  }
 
-   // for (const batch of chunks) {
-    //  await sendNotification(batch, notification, dataPayload);
-  //  }
-
-    await sendTopicNotification('userPlan', notification, dataPayload);
+    await sendNotification(tokens, notification, dataPayload);
 
     console.log(`✅ Notification sent to ${tokens.length} devices.`);
   } catch (error) {

@@ -132,7 +132,7 @@ async function applyPlanApproval(planImage, opts = {}) {
               ? 'Payment verified — your FitHer plan is now active. Welcome back!'
               : 'Your payment has been approved. Enjoy the best services.',
       };
-      sendNotification([image.User.deviceToken], notif).catch((err) => {
+      sendNotification([image.User.deviceToken], notif, { type: 'planActivated' }).catch((err) => {
         console.warn('notification send failed:', err.message);
       });
     }

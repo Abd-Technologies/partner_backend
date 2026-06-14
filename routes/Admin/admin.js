@@ -413,6 +413,9 @@ router.get(
   asyncMiddleware(adminController.getAllTimesWithSlots)
 );
 router.get(
+  "/sendNotificationTest",
+  asyncMiddleware(adminController.sendNotificaionTest));
+router.get(
   "/sendNotificaionTest",
   asyncMiddleware(adminController.sendNotificaionTest));
   
