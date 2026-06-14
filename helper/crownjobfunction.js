@@ -12,8 +12,8 @@ const redis = new Redis();
 /**
  * 🔹 Prevent duplicate notifications (per user & slot)
  */
-async function alreadyNotified(userId, slotId, slotEnd) {
-  const key = `notified:${userId}:${slotId}`;
+async function alreadyNotified(userId, slotId, reminderType, slotEnd) {
+  const key = `notified:${userId}:${slotId}:${reminderType}`;
   const exists = await redis.get(key);
   if (exists) return true;
 
@@ -63,29 +63,31 @@ async function getTodaySlotsForUser(user, timeRecord, isFreeTrial) {
 }
 
 /**
- * 🔹 Decide which upcoming slot to notify
- * Rules:
- * 1. First slot → 20 minutes before start.
- * 2. Next slots → right after previous ends.
+ * 🔹 Decide which upcoming class reminder to send.
+ * Cron runs every 3 minutes, so each window is 3 minutes wide.
  */
-function pickNextSlot(slotsToday, nowTimestamp) {
+function pickClassReminder(slotsToday, nowTimestamp) {
   if (!slotsToday || slotsToday.length === 0) return null;
 
-  const firstSlot = slotsToday[0];
-  const startMinus20 = firstSlot.start - 20 * 60 * 1000;
+  for (const slot of slotsToday) {
+    const minutesUntilStart = (slot.start - nowTimestamp) / (60 * 1000);
 
-  // Case 1: First slot → notify 20 minutes before
-  if (nowTimestamp >= startMinus20 && nowTimestamp < firstSlot.start) {
-    return firstSlot;
-  }
+    if (minutesUntilStart <= 45 && minutesUntilStart > 42) {
+      return {
+        slot,
+        reminderType: "classPrep",
+        title: "Class Reminder",
+        body: `Your class "${slot.description}" starts in 45 minutes.`,
+      };
+    }
 
-  // Case 2: If a slot just ended → notify next one
-  for (let i = 0; i < slotsToday.length - 1; i++) {
-    const currentSlot = slotsToday[i];
-    const nextSlot = slotsToday[i + 1];
-
-    if (nowTimestamp > currentSlot.end && nowTimestamp < nextSlot.start) {
-      return nextSlot;
+    if (minutesUntilStart <= 10 && minutesUntilStart > 7) {
+      return {
+        slot,
+        reminderType: "classStart",
+        title: "Upcoming Class",
+        body: `Your class "${slot.description}" is starting soon!`,
+      };
     }
   }
 
@@ -120,26 +122,27 @@ async function sendUpcomingSlotNotificationsPerUser() {
       if (!timeRecord) continue;
 
       const slotsToday = await getTodaySlotsForUser(user, timeRecord, userPlan.Plan.title === "Free Trial");
-      const upcomingSlot = pickNextSlot(slotsToday, nowTimestamp);
+      const reminder = pickClassReminder(slotsToday, nowTimestamp);
 
-      if (!upcomingSlot) continue;
+      if (!reminder) continue;
 
-      if (await alreadyNotified(user.id, upcomingSlot.id, upcomingSlot.end)) {
+      if (await alreadyNotified(user.id, reminder.slot.id, reminder.reminderType, reminder.slot.end)) {
         continue; // avoid duplicate
       }
 
       const trainer = await User.findOne({
         attributes: ['id', 'firstName', 'lastName', 'email'],
-        where: { id: upcomingSlot.trainerId },
+        where: { id: reminder.slot.trainerId },
       });
 
       const notification = {
-        title: 'Upcoming Class',
-        body: `Your class "${upcomingSlot.description}" is starting soon!`,
+        title: reminder.title,
+        body: reminder.body,
       };
 
       const dataPayload = {
-        upcomingSlot: JSON.stringify(upcomingSlot),
+        type: reminder.reminderType,
+        upcomingSlot: JSON.stringify(reminder.slot),
         trainer: JSON.stringify(trainer ?? {}),
       };
 
@@ -189,23 +192,24 @@ async function sendUpcomingSlotNotificationToUser(userId) {
     if (!timeRecord) return null;
 
     const slotsToday = await getTodaySlotsForUser(user, timeRecord, userPlan.Plan.title === "Free Trial");
-    const slot = pickNextSlot(slotsToday, nowTimestamp);
+    const reminder = pickClassReminder(slotsToday, nowTimestamp);
 
-    if (!slot) return null;
+    if (!reminder) return null;
 
-  //  if (await alreadyNotified(user.id, slot.id, slot.end)) {
+  //  if (await alreadyNotified(user.id, reminder.slot.id, reminder.reminderType, reminder.slot.end)) {
    //   return null; // already sent
    // }
 
     const trainer = await User.findOne({
       attributes: ['id', 'firstName', 'lastName', 'email'],
-      where: { id: slot.trainerId },
+      where: { id: reminder.slot.trainerId },
     });
 
 
 
     const dataPayload = {
-      upcomingSlot: JSON.stringify(slot),
+      type: reminder.reminderType,
+      upcomingSlot: JSON.stringify(reminder.slot),
       trainer: JSON.stringify(trainer ?? {}),
     };
 

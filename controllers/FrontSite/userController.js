@@ -1,4 +1,4 @@
-const { User, OtpData, UserProfile, Plan, BlackList, ShippingSchedule, Service, Time, UserPlan, Category, Contact, UserCycleData, DailyCheckin, WeeklyCheckin, NotificationPreference, PcosScreening, HealthScreening } = require("../../models");
+const { User, OtpData, UserProfile, Plan, BlackList, ShippingSchedule, Service, Time, UserPlan, Category, Contact, UserCycleData, DailyCheckin, WeeklyCheckin, NotificationPreference, UserNotification, PcosScreening, HealthScreening } = require("../../models");
 const ApiResponse = require("../../helper/ApiResponse");
 const bcrypt = require("bcryptjs");
 const { sign } = require("jsonwebtoken");
@@ -805,6 +805,86 @@ async function save_notification_preferences(req, res) {
   }
 }
 
+async function update_device_token(req, res) {
+  try {
+    const { deviceToken } = req.body;
+    if (!deviceToken) {
+      return res.json(ApiResponse("0", "deviceToken is required", {}));
+    }
+
+    await User.update(
+      { deviceToken: null },
+      {
+        where: {
+          deviceToken,
+          id: { [Sequelize.Op.ne]: req.user.id },
+        },
+      }
+    );
+
+    const user = await User.findByPk(req.user.id);
+    if (!user) {
+      return res.json(ApiResponse("0", "User not found", {}));
+    }
+
+    user.deviceToken = deviceToken;
+    await user.save();
+
+    return res.json(ApiResponse("1", "Device token updated", {}));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
+  }
+}
+
+async function get_notifications(req, res) {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 30, 100);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+    const { rows, count } = await UserNotification.findAndCountAll({
+      where: { userId: req.user.id },
+      order: [['sentAt', 'DESC']],
+      limit,
+      offset,
+    });
+
+    return res.json(ApiResponse("1", "Notifications", {
+      notifications: rows,
+      total: count,
+      limit,
+      offset,
+    }));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
+  }
+}
+
+async function mark_notifications_read(req, res) {
+  try {
+    const { notificationIds, markAll } = req.body;
+    const where = {
+      userId: req.user.id,
+      readAt: null,
+    };
+
+    if (!markAll) {
+      if (!Array.isArray(notificationIds) || notificationIds.length === 0) {
+        return res.json(ApiResponse("0", "notificationIds or markAll is required", {}));
+      }
+      where.id = { [Sequelize.Op.in]: notificationIds };
+    }
+
+    const [updated] = await UserNotification.update(
+      { readAt: new Date() },
+      { where }
+    );
+
+    return res.json(ApiResponse("1", "Notifications marked read", { updated }));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
+  }
+}
+
 // ─── PaidHomeScreenV2 — Phase B2.7 ──────────────────────────────────────
 
 const { currentWeekMonday } = require("../../helper/dateUtils");
@@ -956,6 +1036,9 @@ module.exports = {
   get_weekly_checkins_recent,
   get_notification_preferences,
   save_notification_preferences,
+  update_device_token,
+  get_notifications,
+  mark_notifications_read,
   save_target_weight,
   save_weight_log,
   set_feature_flag,

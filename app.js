@@ -80,6 +80,7 @@ const moment = require("moment");
 const { autoEndExpiredSessions, GRACE_MINUTES } = require("./helper/autoEndSessions");
 const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("./helper/autoEndExpiredAppointments");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
+const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
 const popupEligibility = require("./helper/popupEligibility");
 
 
@@ -98,6 +99,25 @@ cron.schedule(
       await sendUpcomingSlotNotificationsPerUser();
     } catch (error) {
       console.error("Error in 3-minute job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Missed-session recovery. Runs hourly and sends at most one nudge per
+// user/local day after their final scheduled class has been over for 30
+// minutes and no attendance was recorded. Preference-gated by
+// NotificationPreference.missedRecovery in helper/notification.js.
+cron.schedule(
+  "17 * * * *",
+  async () => {
+    try {
+      const sent = await sendMissedSessionRecovery();
+      if (sent > 0) {
+        console.log(`[missed-recovery] Sent ${sent} reminder(s)`);
+      }
+    } catch (error) {
+      console.error("Error in missed-session-recovery job:", error);
     }
   },
   { timezone: CRON_TZ }

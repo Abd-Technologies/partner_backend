@@ -279,7 +279,7 @@ async function sendFreezeNotifications(userId, days, willResumeOn, cancelledAppt
     await sendNotification([user.deviceToken], {
       title: "Plan Paused",
       body: `Your plan is paused until ${willResumeOn.toISOString().slice(0, 10)}. Resume any time from your profile.`,
-    });
+    }, { type: "planPaused" });
   }
   if (cancelledAppts.length > 0 && dietitianIds.length > 0) {
     const dietitians = await User.findAll({ where: { id: { [Op.in]: dietitianIds } } });
@@ -288,7 +288,7 @@ async function sendFreezeNotifications(userId, days, willResumeOn, cancelledAppt
         await sendNotification([d.deviceToken], {
           title: "Appointment Cancelled",
           body: `${user?.firstName ?? "A user"} paused their plan; an upcoming appointment was cancelled.`,
-        });
+        }, { type: "appointmentCanceled" });
       }
     }
   }

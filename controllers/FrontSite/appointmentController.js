@@ -157,10 +157,10 @@ const appointmentCancelByUser = await Appointment.findOne({
     const user = await User.findByPk(userId);
     const dietitian = await User.findByPk(dietitionId);
 
-    const notify = async (deviceToken, title, body) => {
+    const notify = async (deviceToken, title, body, type) => {
       if (deviceToken) {
         try {
-          await sendNotification([deviceToken], { title, body });
+          await sendNotification([deviceToken], { title, body }, { type });
         } catch (err) {
           console.error("Notification error:", err.message);
         }
@@ -168,8 +168,8 @@ const appointmentCancelByUser = await Appointment.findOne({
     };
 
     await Promise.all([
-      notify(user?.deviceToken, "Booking Pending", `Your booking has been sent to ${dietitian?.firstName} ${dietitian?.lastName}. Please wait for confirmation`),
-      notify(dietitian?.deviceToken, "Booking Added", `Your booking has been added with ${user?.firstName} ${user?.lastName}`)
+      notify(user?.deviceToken, "Booking Pending", `Your booking has been sent to ${dietitian?.firstName} ${dietitian?.lastName}. Please wait for confirmation`, "bookingPending"),
+      notify(dietitian?.deviceToken, "Booking Added", `Your booking has been added with ${user?.firstName} ${user?.lastName}`, "bookingAdded")
     ]);
 
     const response = ApiResponse("1", "Appointment created successfully", { appointment: newAppointment });
@@ -226,7 +226,8 @@ exports.updateAppointment = async (req, res) => {
           {
             title: "Appointment Canceled",
             body: "Your appointment has been canceled by your dietitian. You can reschedule it at your convenience."
-          }
+          },
+          { type: "appointmentCanceled" }
         );
       } else if (status === "confirmed") {
         await sendNotification(
@@ -234,7 +235,8 @@ exports.updateAppointment = async (req, res) => {
           {
             title: "Appointment Confirmed",
             body: "Your appointment has been confirmed by your dietitian. Please be on time. Thank you!"
-          }
+          },
+          { type: "appointmentConfirmed" }
         );
       }
     }

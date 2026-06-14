@@ -74,5 +74,8 @@ router.post('/profile/feature_flag',validateToken,asyncMiddleware(userController
 //NOTIFICATION PREFERENCES APIS
 router.get('/notification_preferences',validateToken,asyncMiddleware(userController.get_notification_preferences));
 router.post('/notification_preferences',validateToken,asyncMiddleware(userController.save_notification_preferences));
+router.post('/device-token',validateToken,asyncMiddleware(userController.update_device_token));
+router.get('/notifications',validateToken,asyncMiddleware(userController.get_notifications));
+router.post('/notifications/read',validateToken,asyncMiddleware(userController.mark_notifications_read));
 
 module.exports = router;
