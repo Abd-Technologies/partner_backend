@@ -189,7 +189,7 @@ async function activateDietPlan(dietPlanId, dietitianId = null) {
       sendNotification([user.deviceToken], {
         title: 'Your Diet Plan is Ready',
         body: 'Your dietitian has activated your personalized plan.',
-      });
+      }, { type: 'dietPlanReady' });
     }
   } catch (e) {
     console.error('[activateDietPlan] notification failed:', e.message);
