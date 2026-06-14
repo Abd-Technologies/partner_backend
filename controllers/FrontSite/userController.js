@@ -777,8 +777,10 @@ async function save_notification_preferences(req, res) {
   const {
     morningNudge, classPrep, classStart,
     missedRecovery, trainerCancelled, weeklyCheckin,
-    quietStart, quietEnd
+    quietStart, quietEnd, timeBlock
   } = req.body;
+
+  const validTimeBlocks = ['morning', 'afternoon', 'evening', 'night', 'all'];
 
   try {
     let [prefs, created] = await NotificationPreference.findOrCreate({
@@ -794,6 +796,9 @@ async function save_notification_preferences(req, res) {
     if (weeklyCheckin !== undefined) prefs.weeklyCheckin = weeklyCheckin;
     if (quietStart !== undefined) prefs.quietStart = quietStart;
     if (quietEnd !== undefined) prefs.quietEnd = quietEnd;
+    if (timeBlock !== undefined && validTimeBlocks.includes(timeBlock)) {
+      prefs.timeBlock = timeBlock;
+    }
 
     await prefs.save();
 

@@ -50,6 +50,11 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: '07:00',
     },
+    timeBlock: {
+      type: DataTypes.ENUM('morning', 'afternoon', 'evening', 'night', 'all'),
+      allowNull: false,
+      defaultValue: 'all',
+    },
   });
 
   NotificationPreference.associate = (models) => {
