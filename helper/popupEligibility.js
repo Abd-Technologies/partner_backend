@@ -38,6 +38,8 @@ const PRIORITY = [
 const MAX_BOOKING_REMINDERS = 5;
 const DAILY_LOG_REMINDER_THRESHOLD_DAYS = 2;
 const INACTIVITY_THRESHOLD_DAYS = 3;
+const INACTIVITY_REFIRE_DAYS = 3;
+const RENEW_PLAN_REFIRE_DAYS = 7;
 const PLAN_DELAY_BREACH_DAYS = 3;
 const EARLY_CHECKIN_DAY_LOW = 3;
 const EARLY_CHECKIN_DAY_HIGH = 4;
@@ -366,6 +368,30 @@ async function evalRenewPlan(user, plans) {
   });
   if (!day30) return;
 
+  // Throttle: don't re-fire if shown in the last 7 days. Renewals are
+  // a calm decision; weekly nag matches the client cooldown. We push
+  // eligibleAt forward to (lastShown + 7d) so listForUser hides the row
+  // until the throttle expires — skipping setEligible alone wouldn't
+  // help because the existing row's eligibleAt is already in the past.
+  const recent = await PendingPopupState.findOne({
+    where: { userId: user.id, popupVariable: "POPUP_RENEW_PLAN" },
+    order: [["createdAt", "DESC"]],
+  });
+  const lastShown = recent && recent.lastShownAt;
+  if (lastShown && daysSince(lastShown) < RENEW_PLAN_REFIRE_DAYS) {
+    const nextEligible = moment(lastShown)
+      .tz(TZ)
+      .add(RENEW_PLAN_REFIRE_DAYS, "days")
+      .toDate();
+    if (
+      recent.eligibleAt &&
+      moment(recent.eligibleAt).isBefore(nextEligible)
+    ) {
+      await recent.update({ eligibleAt: nextEligible });
+    }
+    return;
+  }
+
   // Eligible from Day 30 onwards while plan is still active.
   await setEligible(user.id, "POPUP_RENEW_PLAN", nowPkt().toDate(), {
     userPlanId: plan.id,
@@ -420,10 +446,33 @@ async function evalInactivityReminder(user, plans) {
     .startOf("day")
     .subtract(INACTIVITY_THRESHOLD_DAYS, "days")
     .format("YYYY-MM-DD");
-  const recent = await ClassAttendance.findOne({
+  const recentAttendance = await ClassAttendance.findOne({
     where: { user_id: user.id, attended_at: { [Op.gte]: since } },
   });
-  if (recent) return;
+  if (recentAttendance) return;
+
+  // Throttle: don't re-fire if shown in the last 3 days. We push
+  // eligibleAt forward to (lastShown + 3d) so listForUser hides the row
+  // until the throttle expires — skipping setEligible alone wouldn't
+  // help because the existing row's eligibleAt is already in the past.
+  const recentState = await PendingPopupState.findOne({
+    where: { userId: user.id, popupVariable: "POPUP_INACTIVITY_REMINDER" },
+    order: [["createdAt", "DESC"]],
+  });
+  const lastShown = recentState && recentState.lastShownAt;
+  if (lastShown && daysSince(lastShown) < INACTIVITY_REFIRE_DAYS) {
+    const nextEligible = moment(lastShown)
+      .tz(TZ)
+      .add(INACTIVITY_REFIRE_DAYS, "days")
+      .toDate();
+    if (
+      recentState.eligibleAt &&
+      moment(recentState.eligibleAt).isBefore(nextEligible)
+    ) {
+      await recentState.update({ eligibleAt: nextEligible });
+    }
+    return;
+  }
 
   await setEligible(
     user.id,

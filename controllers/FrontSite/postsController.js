@@ -52,11 +52,15 @@ const toBool = (val, fallback) => {
   return Boolean(val);
 };
 
+// Store a relative path only. Building the absolute URL here couples
+// image scheme to whatever req.protocol returns — which is "http" when
+// behind a reverse proxy without `app.set('trust proxy', ...)`, leading
+// to iOS ATS / Android cleartext-traffic blocking the image load.
+// The client prepends its own baseUrl (always the working scheme it's
+// already talking to the API on), so the protocol is never wrong.
 const buildImageUrl = (req) => {
   if (!req.file) return null;
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-  const host = req.headers['x-forwarded-host'] || req.get('host');
-  return `${protocol}://${host}/public/posts/${req.file.filename}`;
+  return `/public/posts/${req.file.filename}`;
 };
 
 // Get all posts (with replies + likes count).
