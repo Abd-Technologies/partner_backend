@@ -205,11 +205,35 @@ User.hasMany(User, {
     User.hasMany(models.Report, { foreignKey: 'userId' });
     models.Report.belongsTo(User, { foreignKey: 'userId' });
 
-    // User.hasMany(models.UserPlan, { onDelete: "cascade", foreignKey: "trainerId", });
-    // models.UserPlan.belongsTo(User, { as: "Trainer", foreignKey: "trainerId" });
+    // Re-enabled — these were commented out (likely to dodge an alias
+    // collision with the plain `User.hasMany(models.UserPlan, {
+    // foreignKey: 'userId' })` above, which defaults to the "UserPlans"
+    // alias). Using distinct `as` on the hasMany side avoids that
+    // collision. Without the `belongsTo` half, Sequelize never learns
+    // that `trainerId`/`dietitianId` are real attributes on UserPlan —
+    // so `payment_success` in AdminController.js (which does
+    // `userPlan.trainerId = ...; userPlan.dietitianId = ...; .save()`)
+    // was silently a no-op for both columns: Sequelize only persists
+    // declared/dirty attributes, so an undeclared property assignment
+    // never reaches the UPDATE statement. Net effect: a user whose
+    // workout+diet package purchase was approved never actually got a
+    // dietitianId written to their UserPlan row, so
+    // getMyBookingContext (dietPlanController.js) could never resolve
+    // a dietitian for her and the client fell back to the plans/
+    // paywall screen instead of showing consultation slots.
+    User.hasMany(models.UserPlan, {
+      as: 'TrainerAssignments',
+      onDelete: 'cascade',
+      foreignKey: 'trainerId',
+    });
+    models.UserPlan.belongsTo(User, { as: 'Trainer', foreignKey: 'trainerId' });
 
-    // User.hasMany(models.UserPlan, { onDelete: "cascade", foreignKey: "dietitianId", });
-    // models.UserPlan.belongsTo(User, { as: "Dietition", foreignKey: "dietitianId" });
+    User.hasMany(models.UserPlan, {
+      as: 'DietitianAssignments',
+      onDelete: 'cascade',
+      foreignKey: 'dietitianId',
+    });
+    models.UserPlan.belongsTo(User, { as: 'Dietition', foreignKey: 'dietitianId' });
     User.hasMany(models.UserReview, { onDelete: "cascade", foreignKey: "dietitianId", });
     models.UserReview.belongsTo(User, { as: "Dietition", foreignKey: "dietitianId" });
 

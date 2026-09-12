@@ -3,14 +3,10 @@ const Redis = require("ioredis");
 const { Op } = require("sequelize");
 const { ClassAttendance, Plan, Slot, Time, User, UserPlan } = require("../models");
 const sendNotification = require("./notification");
+const { CANONICAL_TZ, parseEndAsUtc } = require("./timeFormats");
 
 const redis = new Redis();
 const DEFAULT_TZ = "Asia/Karachi";
-
-function asTimestamp(value) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-}
 
 async function alreadySent(userId, dateKey) {
   const key = `missedRecovery:${userId}:${dateKey}`;
@@ -67,15 +63,33 @@ async function sendMissedSessionRecovery() {
     const slots = await Slot.findAll({
       attributes: ["id", "end", "description"],
       where: { TimeId: timeRecord.id },
-      order: [["end", "DESC"]],
     });
     if (!slots.length) continue;
 
-    const lastEndedSlot = slots.find((slot) => {
-      const end = asTimestamp(slot.end);
-      return end != null && now.valueOf() > end + 30 * 60 * 1000;
-    });
-    if (!lastEndedSlot) continue;
+    // Slot.end is a wall-clock string that can be in any of three historical
+    // formats (millisecond timestamp, 24h UTC "HH:mm", or the current
+    // canonical 12h "h:mm AM/PM" PKT-local — see helper/timeFormats.js).
+    // Sorting or comparing it as a plain string/number is unreliable
+    // ("10:00 AM" sorts before "9:00 AM" alphabetically, and Number() on
+    // any of the AM/PM values is NaN). Parse every slot to a real UTC
+    // instant with the same helper autoEndSessions.js already uses
+    // correctly, anchored to today in PKT (the timezone the canonical
+    // data is stored in), then pick whichever slot actually ends last.
+    const todayPkt = moment.tz(CANONICAL_TZ);
+    let lastEndedSlot = null;
+    let lastEnd = null;
+    for (const slot of slots) {
+      const endUtc = parseEndAsUtc(slot.end, todayPkt);
+      if (!endUtc) continue;
+      const endMs = endUtc.valueOf();
+      if (lastEnd === null || endMs > lastEnd) {
+        lastEnd = endMs;
+        lastEndedSlot = slot;
+      }
+    }
+    // Only send after every class is done — if the final slot hasn't cleared
+    // its 30-min buffer yet, there are still classes the user could attend.
+    if (!lastEndedSlot || lastEnd === null || now.valueOf() <= lastEnd + 30 * 60 * 1000) continue;
 
     await sendNotification(
       [user.deviceToken],

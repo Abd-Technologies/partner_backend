@@ -37,7 +37,9 @@ const {
   Appointment,
   FreeTrailUsersSlots,
   FreeTrailUsers,
-  WeeklyCheckin
+  WeeklyCheckin,
+  TrialJourney,
+  sequelize: db,
 } = require("../../models");
 const { currentWeekMonday } = require("../../helper/dateUtils");
 const Queue = require("bull");
@@ -48,6 +50,11 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const ApiResponse = require("../../helper/ApiResponse");
 const { findFrozenActivePlan } = require("../../helper/freezeGate");
 const { normalizeSlotTime } = require("../../helper/normalizeSlotTime");
+// Single source of truth for "who gets notified about slot X" — see
+// helper/crownjobfunction.js for why this must not be re-derived per call
+// site (that duplication is what broke updateLink/updateTrainerJoin/
+// update_slot_status in the first place).
+const { getDeviceTokensForSlot } = require("../../helper/crownjobfunction");
 
 //agora generate token
 
@@ -705,6 +712,15 @@ async function add_slots(req, res) {
         newSlot.start = normalizedStart ?? timeSlot.start;
         newSlot.end = normalizedEnd ?? timeSlot.end;
         newSlot.TimeId = newTime.id;
+        // Same optional workout-details fields as update_slots below --
+        // add_slots doesn't assign a trainer yet, but nothing stops the
+        // admin from typing the class type/level/description in while
+        // building the initial grid, same as update_slots does.
+        if (timeSlot.type != null) newSlot.type = timeSlot.type;
+        if (timeSlot.level != null) newSlot.level = timeSlot.level;
+        if (timeSlot.description != null) {
+          newSlot.description = timeSlot.description;
+        }
         await newSlot.save();
       }
     }
@@ -785,6 +801,23 @@ async function update_slots(req, res) {
               existingSlot.end = normalizedEnd ?? slot.end;
               existingSlot.trainerId = slot.trainerId;
               existingSlot.status = "Upcoming Class";
+              // Workout details (type/level/description) used to only be
+              // settable later, one slot at a time, via update_slot_trainer
+              // -- meaning the trainer had to fill them in themselves after
+              // the admin assigned them. Letting the admin send these here
+              // too means the slot can be fully set up in one step. Each
+              // field is only touched when the admin actually sent a real
+              // value -- checked with != so both a missing key AND an
+              // explicit null (what the Flutter form sends for a field
+              // left blank) are skipped, not just a missing key. Otherwise
+              // an admin who leaves these blank while just updating the
+              // trainer would silently wipe out a value a trainer already
+              // set the old way.
+              if (slot.type != null) existingSlot.type = slot.type;
+              if (slot.level != null) existingSlot.level = slot.level;
+              if (slot.description != null) {
+                existingSlot.description = slot.description;
+              }
               await existingSlot.save();
               continue;
             }
@@ -796,6 +829,9 @@ async function update_slots(req, res) {
           newSlot.trainerId = slot.trainerId;
           newSlot.TimeId = timeEntry.id;
           newSlot.status = "Upcoming Class";
+          if (slot.type != null) newSlot.type = slot.type;
+          if (slot.level != null) newSlot.level = slot.level;
+          if (slot.description != null) newSlot.description = slot.description;
           await newSlot.save();
         }
       }
@@ -901,6 +937,19 @@ async function update_slot_status(req, res) {
     io.emit("slotUpdate", data);
     console.log("✅ slotUpdate emitted successfully");
 
+    // title/body were built above but never sent anywhere — this function
+    // emitted the socket event and stopped, so closed-app users never
+    // heard about cancellations or status changes at all. TYPE_BY_TITLE
+    // already covers all three titles used above ("Class Cancelled",
+    // "Sweat Now, Selfies Later", "Class Link Added"), so no explicit
+    // data.type is needed here either.
+    const deviceTokens = await getDeviceTokensForSlot(slot);
+    await notificationQueue.add({
+      title,
+      body,
+      data,
+      deviceTokens,
+    });
 
     return res.json(ApiResponse("1", "Slot updated successfully!", {}));
   } catch (error) {
@@ -920,7 +969,19 @@ async function getAllTimesWithSlots(req, res) {
       include: [
         {
           model: Slot,
-          attributes: ["id", "start", "end", "trainerId", "TimeId"], // Specify slot fields you want to retrieve
+          // type/level/description added so the Add Trainer Slots screen
+          // can show an already-set workout detail instead of blanking it
+          // out on every load.
+          attributes: [
+            "id",
+            "start",
+            "end",
+            "trainerId",
+            "TimeId",
+            "type",
+            "level",
+            "description",
+          ],
         },
       ],
       attributes: ["id", "day", "status"], // Specify time fields you want to retrieve
@@ -2063,6 +2124,19 @@ async function dietitionHome(req, res) {
 
 
 
+// ⚠️  DISCONNECTED FLOW WARNING
+// assignFreePlan creates a UserPlan + sets user.usedFreeTrial=1, but it does NOT
+// call createFreeTrialUser. That means users assigned a trial via this endpoint
+// will NOT have FreeTrailUsers or FreeTrailUsersSlots rows.
+//
+// Downstream effects:
+//   - getFreeTrialUserById will return nothing for these users (trainer sees empty list)
+//   - freeTrialExpiry.js handles the missing FreeTrailUsers row gracefully (null check)
+//   - changeFreeTrialStatus relies on FreeTrailUsers — will silently no-op for these users
+//
+// If you need the full free-trial experience (slot visibility, prefs, trainer view),
+// the admin UI must call createFreeTrialUser separately after calling this endpoint,
+// or this function needs to be merged with createFreeTrialUser in a future refactor.
 async function assignFreePlan(req, res) {
   const {
     userId, country
@@ -2100,12 +2174,27 @@ async function assignFreePlan(req, res) {
     }
 
     if (user.usedFreeTrial) {
-      const response = ApiResponse(
+      // alreadyUsed:true is a machine-readable field so Flutter doesn't need
+      // to match on the message string (which is fragile against typo fixes).
+      return res.json(ApiResponse(
         "0",
         `You can't subscribe free trial at this movement`,
-        {}
-      );
-      return res.json(response);
+        { alreadyUsed: true }
+      ));
+    }
+
+    // Cross-system check: this legacy endpoint only ever looked at
+    // usedFreeTrial, which the current TrialJourney system (trialController.js)
+    // never sets. A user who already ran a TrialJourney (or has one in
+    // progress) could still be handed a second free plan through here.
+    // Belt-and-braces alongside the equivalent check added to startTrial().
+    const existingJourney = await TrialJourney.findOne({ where: { userId } });
+    if (existingJourney) {
+      return res.json(ApiResponse(
+        "0",
+        `You can't subscribe free trial at this movement`,
+        { alreadyUsed: true }
+      ));
     }
 
     if (freePlan) {
@@ -2682,15 +2771,17 @@ async function updateLink(req, res) {
     io.emit("slotUpdate", data);
     console.log("✅ slotUpdate emitted successfully");
 
+    // deviceTokens was previously omitted here, which meant the worker
+    // always found an empty recipient list and silently dropped the push.
+    // TYPE_BY_TITLE in helper/notification.js already maps "Class Link
+    // Added" → classLinkAdded, so no explicit data.type is needed.
+    const deviceTokens = await getDeviceTokensForSlot(slot);
     await notificationQueue.add({
       title: "Class Link Added",
       body: "Class is starting soon",
-      data: data
+      data: data,
+      deviceTokens,
     });
-
-    // Add job to notification queue
-    //   await notificationQueue.add({});
-
 
     return res.json(ApiResponse("1", "Link updated. Notifications will be sent.", {}));
   } catch (error) {
@@ -2732,11 +2823,30 @@ async function updateTrainerJoin(req, res) {
     slot.joinedUserUID = joinedUserUID;
     await slot.save();
     if (isTrainerJoined === true) {
+      const trainer = await User.findOne({
+        attributes: ["id", "firstName", "lastName", "email"],
+        where: { id: slot?.trainerId },
+      });
+      const data = {
+        upcomingSlot: JSON.stringify(slot ?? {}),
+        trainer: JSON.stringify(trainer ?? {}),
+      };
+
+      // This previously had no socket emit at all (open-app users got
+      // nothing) and queued the push with no deviceTokens (closed-app
+      // users got nothing either) — same missing-roster bug as
+      // updateLink, fixed the same way. TYPE_BY_TITLE already maps
+      // "Trainer has Joined" → classStart.
+      const io = getIO();
+      io.emit("slotUpdate", data);
+
+      const deviceTokens = await getDeviceTokensForSlot(slot);
       await notificationQueue.add({
         title: "Trainer has Joined",
-        body: "Please join trainer has joined the class"
+        body: "Please join trainer has joined the class",
+        data,
+        deviceTokens,
       });
-
     }
 
 
@@ -2905,27 +3015,27 @@ async function userHome(req, res) {
 
         const remainingDays = Math.floor(remaining / (1000 * 60 * 60 * 24));
 
-        if (remainingDays <= 0 && plan?.Plan.title === "Free Trial") {
-          userData.status = false;
-          await userData.save();
+        if (remainingDays <= 0 && plan?.Plan?.title === "Free Trial") {
+          // Bug D fix: userData was fetched without 'status' in attributes, so
+          // setting userData.status then calling save() is a fragile partial save.
+          // Use a targeted UPDATE that only touches the status column.
+          await User.update({ status: false }, { where: { id: userId } });
+
+          // Bug E fix: previously used planId (the Plan template's PK) which would
+          // delete ALL UserPlan rows for this user with that template — e.g. if
+          // they somehow had two Free Trial rows. Use the specific UserPlan row ID.
           await UserPlan.destroy({
-            where: {
-              userId: userId,
-              planId: plan?.Plan.id,
-            },
+            where: { id: plan.id },
           });
 
           const freeTrail = await FreeTrailUsers.findOne({ where: { freeTrialUser: userId } });
 
           if (freeTrail) {
-            const freeTrailSlots = await FreeTrailUsersSlots.findAll({
+            // Bug D fix: replaced serial for...of slot.destroy() loop with a
+            // single bulk destroy — one DB round-trip instead of N, and atomic.
+            await FreeTrailUsersSlots.destroy({
               where: { freeTrialUserId: freeTrail.id },
             });
-
-            for (const slot of freeTrailSlots) {
-              await slot.destroy();
-            }
-
             await freeTrail.destroy();
           }
           return;
@@ -2980,7 +3090,8 @@ async function userHome(req, res) {
 
     // // Now, handle removing the "Free Trial" plan
 
-    planData = planData.filter(plan => plan !== null);
+    // filter(Boolean) removes both null and undefined — the mapper can return either
+    planData = planData.filter(Boolean);
 
 
     // const freeTrialPlan = plans.find((plan) => plan?.Plan?.title === "Free Trial");
@@ -3205,6 +3316,101 @@ async function getAnnouncement(req, res) {
   let data = await Announcement.findAll({});
   let response = ApiResponse("1", "Announcement Data", { data });
   return res.json(response);
+}
+
+// Cancels an active paid subscription (UserPlan) — the only "cancel"
+// action that existed before this was cancelDietPlan, which only touches
+// the DietPlan review document, never the underlying paid plan. There was
+// no way to actually end someone's subscription server-side at all.
+//
+// Locked inside a transaction so a duplicate click (retry, admin
+// double-tap) can't race a concurrent freeze/renewal on the same row or
+// double-cancel it — the same TOCTOU class of bug flagged elsewhere in the
+// payment/plan-approval flows, fixed here from the start rather than
+// copied from the older unlocked pattern in freeze() below.
+//
+// IMPORTANT — what actually gates the app's paid/unpaid home screen is
+// User.status (see AuthController.isPaid / logInUser.status on the
+// Flutter side, and freeTrialExpiry.js for the equivalent free-trial
+// flip), NOT UserPlan.status. An earlier version of this function only
+// set UserPlan.status=false, which silently did NOT revoke in-app paid
+// access — a cancelled subscriber kept seeing the full paid app until
+// their next cold login. Fixed here: we flip User.status=false too,
+// unless the user has another still-active plan (rare, but possible if
+// an admin ever double-assigns a plan). UserPlan.status is deliberately
+// LEFT ALONE (matches autoExpireUserPlans.js's existing convention for
+// natural expiry) so the cancelled row keeps showing via
+// GET /users/get_user_plans — the app needs it to explain what
+// happened, rather than the plan silently vanishing.
+async function cancelUserPlan(req, res) {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  try {
+    const result = await db.transaction(async (t) => {
+      const plan = await UserPlan.findOne({
+        where: { id },
+        lock: t.LOCK.UPDATE,
+        transaction: t,
+      });
+
+      if (!plan) return { outcome: "not_found" };
+      if (plan.planStatus === "cancelled") return { outcome: "already_cancelled" };
+
+      plan.planStatus = "cancelled";
+      plan.cancelledAt = new Date();
+      plan.cancelReason = reason || null;
+      plan.cancelledBy = (req.user && req.user.id) || null;
+      await plan.save({ transaction: t });
+
+      // Revoke in-app paid access — but only if this was their only
+      // active plan. An "active" plan here mirrors getActivePlan() in
+      // planFreezeController.js: not cancelled, not yet expired.
+      //
+      // BUG FIX: `{ [Op.ne]: "cancelled" }` alone compiles to SQL
+      // `planStatus <> 'cancelled'`, which evaluates to NULL (not true)
+      // when planStatus IS NULL — silently excluding every ordinary
+      // never-touched plan (the vast majority in production) from ever
+      // counting as "other active plan". Must allow NULL through
+      // explicitly, same fix as getActivePlan() in planFreezeController.js.
+      const otherActivePlan = await UserPlan.findOne({
+        where: {
+          userId: plan.userId,
+          id: { [Op.ne]: plan.id },
+          [Op.or]: [
+            { planStatus: null },
+            { planStatus: { [Op.ne]: "cancelled" } },
+          ],
+          expireDate: { [Op.gt]: new Date() },
+        },
+        transaction: t,
+      });
+      if (!otherActivePlan) {
+        await User.update(
+          { status: false },
+          { where: { id: plan.userId }, transaction: t }
+        );
+      }
+
+      return { outcome: "cancelled", planId: plan.id };
+    });
+
+    if (result.outcome === "not_found") {
+      return res.json(ApiResponse("0", "Subscription not found", {}));
+    }
+    if (result.outcome === "already_cancelled") {
+      return res.json(ApiResponse("0", "This subscription is already cancelled", {}));
+    }
+
+    return res.json(
+      ApiResponse("1", "Subscription cancelled", { userPlanId: result.planId })
+    );
+  } catch (e) {
+    console.error("cancelUserPlan error:", e);
+    return res.json(
+      ApiResponse("0", "Something went wrong while cancelling the subscription", {})
+    );
+  }
 }
 
 async function freeze(req, res) {
@@ -3462,7 +3668,14 @@ async function payment_success(req, res) {
     userPlan.PlanId = planId;
     userPlan.status = true;
     userPlan.trainerId = trainerId;
-    userPlan.dietitianId = dietitianId;
+    // The Plan itself carries its own dietitianId (each package/SKU has
+    // its dietitian baked in — set once on the Plan, not re-typed per
+    // approval). Prefer that over whatever the admin request body sends,
+    // falling back to the body value only if this Plan has no dietitian
+    // configured (e.g. a workout-only plan, or a legacy plan predating
+    // this field).
+    userPlan.dietitianId =
+      planData.dietitianId != null ? planData.dietitianId : dietitianId;
     await userPlan.save();
 
     // Generate response
@@ -3926,44 +4139,45 @@ async function workout_plans(req, res) {
 async function user_workout_plans(req, res) {
   try {
     const { userId } = req.params;
-    let workout = await Category.findOne({
-      where: { title: "Workout" },
-    });
+    // Category lookups are the legacy path — kept as a fallback, not
+    // required. planType is the authoritative signal going forward (see
+    // migration 20260902000001-add-plan-type-to-plans); this OR keeps
+    // working unchanged before the catalog is backfilled and switches
+    // to the reliable field automatically as plans get labeled, with no
+    // second deploy needed. "combined" plans count as workout plans too
+    // (mirrors the historical "Both" category behavior below).
+    let workout = await Category.findOne({ where: { title: "Workout" } });
     let both = await Category.findOne({ where: { title: "Both" } });
+    const categoryIds = [workout, both].filter(Boolean).map((c) => c.id);
 
-    if (workout) {
-      let plans = await Plan.findAll({
-        include: [
-          {
-            model: UserPlan,
-            attributes: [],
-            where: { UserId: userId },
-            required: true,
-          },
-        ],
-        attributes: [
-          "id",
-          "title",
-          "shortDescription",
-          "longDescription",
-          "status",
-          "image",
-          "CategoryId",
-          "subCategoryId",
-        ],
-        where: {
-          CategoryId: {
-            [Op.in]: [workout.id, both.id], // Use Op.in to filter by multiple CategoryId values
-          },
+    const or = [{ planType: { [Op.in]: ["workout", "combined"] } }];
+    if (categoryIds.length > 0) or.push({ CategoryId: { [Op.in]: categoryIds } });
+
+    let plans = await Plan.findAll({
+      include: [
+        {
+          model: UserPlan,
+          attributes: [],
+          where: { UserId: userId },
+          required: true,
         },
-      });
+      ],
+      attributes: [
+        "id",
+        "title",
+        "shortDescription",
+        "longDescription",
+        "status",
+        "image",
+        "CategoryId",
+        "subCategoryId",
+        "planType",
+      ],
+      where: { [Op.or]: or },
+    });
 
-      let response = ApiResponse("1", "Workout and diet plans", { plans });
-      return res.json(response);
-    } else {
-      let response = ApiResponse("0", "Workout category not found");
-      return res.status(404).json(response);
-    }
+    let response = ApiResponse("1", "Workout and diet plans", { plans });
+    return res.json(response);
   } catch (error) {
     let response = ApiResponse("0", "Error", { error: error.message });
     return res.status(500).json(response);
@@ -4117,39 +4331,32 @@ async function userDietPlans(req, res) {
   try {
     const { userId } = req.params;
 
-    // Fetch category with name "Diet"
+    // Category lookups are the legacy path — kept as a fallback, not
+    // required (previously this whole endpoint 404'd if either lookup
+    // failed, which meant a single naming mismatch broke it outright).
+    // planType is the authoritative signal going forward (migration
+    // 20260902000001-add-plan-type-to-plans). "combined" plans count as
+    // diet plans too, mirroring the historical "Both" category.
     let category = await Category.findOne({ where: { title: "Diet" } });
     let both = await Category.findOne({ where: { title: "Both" } });
+    const categoryIds = [category, both].filter(Boolean).map((c) => c.id);
 
-    if (!category || !both) {
-      return res.status(404).json(ApiResponse("0", "Categories not found", {}));
-    }
+    const planOr = [{ planType: { [Op.in]: ["diet", "combined"] } }];
+    if (categoryIds.length > 0) planOr.push({ CategoryId: { [Op.in]: categoryIds } });
 
-    // Fetch user plans with filter on CategoryId
     let userPlans = await UserPlan.findAll({
       where: { UserId: userId },
       include: [
-        // {
-        //   model: DietTime,
-        //   attributes: ['id'],
-        //   include: { model: Diet, attributes: ['id'] },
-        // },
         {
           model: Plan,
-          attributes: ["title", "shortDescription", "longDescription"],
-          where: {
-            CategoryId: {
-              [Op.in]: [category.id, both.id], // Use Op.in to filter by multiple CategoryId values
-            },
-          },
+          attributes: ["title", "shortDescription", "longDescription", "planType"],
+          where: { [Op.or]: planOr },
         },
       ],
     });
 
-    // Return response
     return res.json(ApiResponse("1", "Data", { userPlans }));
   } catch (error) {
-    // Handle errors
     return res
       .status(500)
       .json(ApiResponse("0", "Error", { error: error.message }));
@@ -4522,12 +4729,33 @@ async function getFreePlan(req, res) {
   }
 }
 
+// Toggles the active/inactive status of the Free Trial plan only.
+// Safety guard: rejects if the resolved plan is not titled "Free Trial" so a
+// wrong ID can never accidentally disable a paid plan.
 async function changeFreeTrialStatus(req, res) {
-  const { status, id } = req.body;
-  let dd = await Plan.findOne({ where: { id: id } });
-  dd.status = status;
-  await dd.save();
-  return res.json(ApiResponse("1", "Status Updated!", { status: status }));
+  try {
+    const { status, id } = req.body;
+
+    const plan = await Plan.findOne({ where: { id } });
+    if (!plan) {
+      return res.json(ApiResponse("0", "Plan not found", {}));
+    }
+
+    // Safety: this endpoint must only ever touch the Free Trial plan.
+    if (plan.title !== 'Free Trial') {
+      console.warn(
+        `[changeFreeTrialStatus] Rejected: planId=${id} is "${plan.title}", not "Free Trial"`
+      );
+      return res.json(ApiResponse("0", "This endpoint only manages the Free Trial plan", {}));
+    }
+
+    plan.status = status;
+    await plan.save();
+    return res.json(ApiResponse("1", "Status Updated!", { status }));
+  } catch (error) {
+    console.error('[changeFreeTrialStatus] error:', error.message);
+    return res.json(ApiResponse("0", "Internal Server Error", {}));
+  }
 }
 
 // Make sure to import Op if you're using Sequelize operators
@@ -4620,7 +4848,10 @@ async function completeDietPlan(req, res) {
   const { userPlanId } = req.body;
   let data = await UserPlan.findOne({ where: { id: userPlanId } });
   if (data) {
-    data.planStatus = process.env.PLANSTATUS;
+    // Diet-plan-review signal only — kept separate from planStatus,
+    // which now belongs to the subscription/package lifecycle (see
+    // migration 20260901000001-add-diet-plan-status-to-user-plans).
+    data.dietPlanStatus = process.env.PLANSTATUS;
     await data.save();
   }
   return res.json(ApiResponse("1", "Status updated", {}));
@@ -4637,7 +4868,9 @@ async function addDietitionReview(req, res) {
   });
   let data = await UserPlan.findOne({ where: { id: userPlanId } });
   if (data) {
-    data.planStatus = process.env.PLANSTATUS;
+    // Same diet-plan-review signal as completeDietPlan above — not the
+    // subscription's planStatus.
+    data.dietPlanStatus = process.env.PLANSTATUS;
     await data.save();
   }
   return res.json(ApiResponse("1", "Rating added successfully", {}));
@@ -4724,6 +4957,7 @@ async function getAllCustomSupporters(req, res) {
 }
 
 async function createFreeTrialUser(req, res) {
+  const t = await db.transaction();
   try {
     const {
       mainGoal,
@@ -4733,31 +4967,55 @@ async function createFreeTrialUser(req, res) {
       slots          // Array of Slot IDs
     } = req.body;
 
-    // Create FreeTrialUser entry manually
-    const newUser = new FreeTrailUsers();
-    newUser.mainGoal = mainGoal;
-    newUser.specificIssues = specificIssues;
-    newUser.prefrences = prefrences;
-    newUser.freeTrialUser = freeTrialUser;
-    await newUser.save();
-
-    // Manually create FreeTrailUsersSlots entries using a for loop
-    if (Array.isArray(slots) && slots.length > 0) {
-      for (const slotId of slots) {
-        const newSlotEntry = new FreeTrailUsersSlots();
-        newSlotEntry.freeTrialUserId = newUser.id;
-        newSlotEntry.slotId = slotId;
-        await newSlotEntry.save();
-
-      }
+    // Was previously missing entirely — changeFreeTrialStatus exists so
+    // admins can turn off new trial signups, but this endpoint never
+    // checked it, so the "kill switch" only ever worked for assignFreePlan.
+    const freePlan = await Plan.findOne({ where: { title: "Free Trial" } });
+    if (!freePlan || !freePlan.status) {
+      await t.rollback();
+      return res.json(ApiResponse("0", "Free trial is not currently available", {}));
     }
 
-    let response = ApiResponse("1", "Thank you for your information", {});
-    return res.json(response);
+    // Cross-system + duplicate check. Two problems in one:
+    //  1. No unique constraint on FreeTrailUsers.freeTrialUser — calling
+    //     this twice for the same user created two rows.
+    //  2. This never checked the current TrialJourney system at all, so a
+    //     user who already ran (or is running) a TrialJourney could still
+    //     pick up a legacy free-trial slot assignment through here.
+    const [existingFreeTrial, existingJourney, freeTrialUserRow] = await Promise.all([
+      FreeTrailUsers.findOne({ where: { freeTrialUser } }),
+      TrialJourney.findOne({ where: { userId: freeTrialUser } }),
+      User.findOne({ where: { id: freeTrialUser }, attributes: ["id", "usedFreeTrial"] }),
+    ]);
+    if (existingFreeTrial || existingJourney || freeTrialUserRow?.usedFreeTrial) {
+      await t.rollback();
+      return res.json(ApiResponse("0", "You've already used your free trial", { alreadyUsed: true }));
+    }
+
+    // Create FreeTrailUsers entry inside the transaction.
+    const newUser = await FreeTrailUsers.create(
+      { mainGoal, specificIssues, prefrences, freeTrialUser },
+      { transaction: t }
+    );
+
+    // Create all slot entries inside the same transaction.
+    // If any slot save fails, the whole operation rolls back — no orphaned
+    // FreeTrailUsers row left behind with missing slot data.
+    if (Array.isArray(slots) && slots.length > 0) {
+      const slotRows = slots.map((slotId) => ({
+        freeTrialUserId: newUser.id,
+        slotId,
+      }));
+      await FreeTrailUsersSlots.bulkCreate(slotRows, { transaction: t });
+    }
+
+    await t.commit();
+    return res.json(ApiResponse("1", "Thank you for your information", {}));
 
   } catch (error) {
-    let response = ApiResponse("0", "Internal Server Error", {});
-    return res.json(response);
+    await t.rollback();
+    console.error('[createFreeTrialUser] error:', error.message);
+    return res.json(ApiResponse("0", "Internal Server Error", {}));
   }
 }
 
@@ -4767,19 +5025,17 @@ async function getFreeTrialUserById(req, res) {
   try {
     const { id: trainerId, slotId } = req.params;
 
-    // Step 1: Delete users older than 2 days
+    // NOTE: The old code had a FreeTrailUsers.destroy() here, purging rows older
+    // than 2 days on every GET. That was a destructive side effect on a read
+    // endpoint — a trainer viewing their list would silently delete data.
+    // Cleanup is now handled exclusively by the nightly freeTrialExpiry cron
+    // (helper/freeTrialExpiry.js), which correctly sets user.status=false first
+    // so trialChurned.js can pick up the churn notification.
+
+    // Fetch users created within last 2 days who have slots with this trainer.
     const twoDaysAgo = new Date();
     twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
 
-    await FreeTrailUsers.destroy({
-      where: {
-        createdAt: {
-          [Op.lt]: twoDaysAgo,
-        },
-      },
-    });
-
-    // Step 2: Fetch users created within last 2 days who have slots with this trainer
     const users = await FreeTrailUsers.findAll({
       attributes: ["id", "mainGoal", "specificIssues", "prefrences", "createdAt"],
       where: {
@@ -4817,6 +5073,66 @@ async function getFreeTrialUserById(req, res) {
     return res.json(ApiResponse("1", "Free trial users fetched", { filteredUsers }));
   } catch (error) {
     console.error("Error in getFreeTrialUsers:", error);
+    return res.json(ApiResponse("0", "Internal server error", {}));
+  }
+}
+
+// Trainer roster for the CURRENT free-trial system (TrialJourney).
+// getFreeTrialUserById above only reads FreeTrailUsersSlots, which nothing
+// writes to anymore — every trial that goes through trialController.js
+// (day1/2/3 booking) stores its slot picks directly on the TrialJourney row
+// instead (day1SlotId/day2SlotId/day3SlotId). That left trainers with no way
+// to see who's actually coming to their trial classes. This mirrors
+// getFreeTrialUserById's (trainerId, slotId) shape so it's a drop-in
+// replacement/addition on the trainer-facing screen.
+async function getTrialJourneyUsersBySlot(req, res) {
+  try {
+    const { id: trainerId, slotId } = req.params;
+    const slotIdNum = Number(slotId);
+
+    if (!trainerId || !Number.isFinite(slotIdNum)) {
+      return res.json(ApiResponse("0", "trainerId and slotId are required", {}));
+    }
+
+    // Confirm the slot actually belongs to this trainer before returning
+    // anything — same guard getFreeTrialUserById relies on via its include.
+    const slot = await Slot.findOne({ where: { id: slotIdNum, trainerId } });
+    if (!slot) {
+      return res.json(ApiResponse("1", "No trial users found", { users: [] }));
+    }
+
+    const journeys = await TrialJourney.findAll({
+      where: {
+        [Op.or]: [
+          { day1SlotId: slotIdNum },
+          { day2SlotId: slotIdNum },
+          { day3SlotId: slotIdNum },
+        ],
+      },
+      include: [{
+        model: User,
+        as: "user",
+        attributes: ["id", "firstName", "lastName", "email", "bmiResult"],
+      }],
+    });
+
+    const users = journeys
+      .filter((j) => j.user)
+      .map((j) => {
+        const day = j.day1SlotId === slotIdNum ? 1
+          : j.day2SlotId === slotIdNum ? 2
+          : 3;
+        return {
+          user: j.user,
+          day,
+          bookedAt: j[`day${day}BookedAt`],
+          attendedAt: j[`day${day}AttendedAt`],
+        };
+      });
+
+    return res.json(ApiResponse("1", "Trial journey users fetched", { users }));
+  } catch (error) {
+    console.error("Error in getTrialJourneyUsersBySlot:", error);
     return res.json(ApiResponse("0", "Internal server error", {}));
   }
 }
@@ -4994,8 +5310,10 @@ module.exports = {
   addUserDetails,
   createFreeTrialUser,
   getFreeTrialUserById,
+  getTrialJourneyUsersBySlot,
   update_slot_status,
   socialLogin,
   getDietPlanStatus,
-  updateDietPlanStatus
+  updateDietPlanStatus,
+  cancelUserPlan
 };

@@ -6,12 +6,14 @@ async function checkActivePlan(req, res, next) {
   try {
     const userId = req.user.id;  // from auth middleware
 
-    // Find the user's current active plan where expiry_date is in future
+    // Find the user's current active plan where expireDate is in the future.
+    // Fix: field names must match the Sequelize model — userId and expireDate
+    // (camelCase), not user_id / expiry_date (snake_case).
     const activePlan = await UserPlan.findOne({
       where: {
-        user_id: userId,
-        expiry_date: {
-          [Op.gte]: new Date()  // plan expiry date is >= today
+        userId,
+        expireDate: {
+          [Op.gte]: new Date()
         }
       }
     });

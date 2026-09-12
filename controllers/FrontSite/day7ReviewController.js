@@ -4,6 +4,7 @@ const {
   Day7Review,
   PendingPopupState,
   UserPlan,
+  Plan,
 } = require("../../models");
 
 const VALID_PLAN_TYPES = new Set(["diet", "workout", "combined"]);
@@ -66,9 +67,31 @@ exports.submitReview = async (req, res) => {
 
     // Confirm the plan belongs to this user (defense in depth — request
     // body forgery).
-    const plan = await UserPlan.findOne({ where: { id: userPlanId, userId } });
+    const plan = await UserPlan.findOne({
+      where: { id: userPlanId, userId },
+      include: [{ model: Plan, attributes: ["planType"] }],
+    });
     if (!plan) {
       return res.json(ApiResponse("0", "Plan not found", {}));
+    }
+
+    // planType above was previously trusted straight from the request
+    // body with no server-side check at all. Now that Plan.planType
+    // exists (migration 20260902000001-add-plan-type-to-plans), cross-
+    // check against it when it's set — reject a mismatch instead of
+    // silently recording a review under the wrong plan type. Plans not
+    // yet backfilled (planType still null) fall back to trusting the
+    // client, same as before, so this doesn't break anything ahead of
+    // the catalog labeling pass.
+    const authoritativeType = plan.Plan && plan.Plan.planType;
+    if (authoritativeType && authoritativeType !== planType) {
+      return res.json(
+        ApiResponse(
+          "0",
+          `planType mismatch — this plan is actually "${authoritativeType}"`,
+          {}
+        )
+      );
     }
 
     const fields = pickReviewFields(body);

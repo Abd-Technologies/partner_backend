@@ -125,18 +125,31 @@ const existingAppointment = await Appointment.findOne({
     }
   }
 });
-// Reschedule signal is per-user — "did THIS user previously cancel
-// THIS slot on THIS date and is now rebooking?". The prior version
-// queried by timeSlotId only, which marked every fresh booking as a
-// reschedule whenever any user had ever canceled that template.
-const appointmentCancelByUser = await Appointment.findOne({
+// Reschedule signal — "did THIS user's most recent appointment on
+// THIS plan get canceled (by either side), and is she now rebooking
+// within a reasonable window?". Deliberately NOT scoped to the same
+// timeSlotId/date: a real reschedule is almost always a DIFFERENT day
+// or time, so requiring an exact slot+date match meant this flag
+// practically never fired (see RescheduleRequestScreen on the
+// dietitian side, which reads it). Scoped to the same userPlanId so
+// an unrelated old cancellation (a previous plan/cycle) never taints
+// a fresh purchase's first booking.
+const RESCHEDULE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+const priorCancellation = await Appointment.findOne({
   where: {
-    timeSlotId,
-    date,
     userId,
-    status: 'canceledByUser'
-  }
+    planId: userPlanId,
+    status: { [Op.in]: ["canceled", "canceledByUser"] },
+  },
+  order: [["status_changed_at", "DESC"], ["updatedAt", "DESC"]],
 });
+const cancelTimestamp =
+  priorCancellation &&
+  (priorCancellation.status_changed_at || priorCancellation.updatedAt);
+const isReschedule =
+  !!cancelTimestamp &&
+  Date.now() - new Date(cancelTimestamp).getTime() <= RESCHEDULE_WINDOW_MS;
 
     if (existingAppointment) {
       const response = ApiResponse("0", "Time slot already booked", {});
@@ -150,7 +163,7 @@ const appointmentCancelByUser = await Appointment.findOne({
       timeSlotId,
       status: "pending",
       planId: userPlanId,
-      reschedule: !!appointmentCancelByUser,
+      reschedule: isReschedule,
       kind: persistedKind,
     });
 
@@ -374,12 +387,24 @@ exports.createAppointmentReview = async (req, res) => {
 
 // Get all clients (appointments) where reshadule is true
 exports.getAllRescheduledAppointments = async (req, res) => {
- 
+
   try {
   const { reschedule } = req.params;
+  // Express route params are always strings ("true"/"false"), but
+  // `reschedule` is a BOOLEAN column. Passing the raw string straight
+  // into `where` used to compare `reschedule = 'true'` at the SQL
+  // level — MySQL coerces a non-numeric string to 0 when comparing
+  // against a numeric/tinyint column, so BOTH ".../true" and
+  // ".../false" silently matched only reschedule=false rows. That
+  // made the dietitian's "Reschedule Requests" screen
+  // (RescheduleRequestScreen, called with reschedule:true) always come
+  // back with ordinary non-reschedule bookings instead of the actual
+  // flagged ones — functionally indistinguishable from the "Requests"
+  // screen. Explicit boolean coercion fixes the comparison.
+  const isReschedule = reschedule === 'true' || reschedule === '1';
 
     const appointments = await Appointment.findAll({
-      where: { reschedule: reschedule },
+      where: { reschedule: isReschedule },
       attributes: { exclude: ["createdAt", "updatedAt"] },
       include: [
         {

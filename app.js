@@ -49,6 +49,8 @@ const progressSubmissionRoutes = require('./routes/FrontSite/progressSubmission'
 const progressSubmissionAdminRoutes = require('./routes/Admin/progressSubmission')
 const consultationBookingRoutes = require('./routes/FrontSite/consultationBooking')
 const escalationRoutes = require('./routes/FrontSite/escalation')
+const appIssueRoutes = require('./routes/FrontSite/appIssue')
+const internalRoutes = require('./routes/internal')
 const escalationAdminRoutes = require('./routes/Admin/escalation')
 const metricsAdminRoutes = require('./routes/Admin/metrics')
 const trialRoutes = require('./routes/FrontSite/trial')
@@ -60,7 +62,16 @@ const dietPlanUserRoutes = require('./routes/FrontSite/dietPlan')
 
 const { Server } = require("socket.io"); // FIX: Import Server from socket.io
 
-const  { sendUpcomingSlotNotificationsPerUser } = require('./helper/crownjobfunction')
+const { sendUpcomingSlotNotificationsPerUser } = require('./helper/crownjobfunction');
+const { runFreeTrialExpiryBatch } = require('./helper/freeTrialExpiry');
+const {
+  sendDownloadedUserNudges,
+  sendTrialChurnedNudges,
+  sendTrialJourneyNudges,
+  sendTrialJourneyChurnedNudges,
+  sendLifecycleNudges,
+  sendWeeklyCheckinReminders,
+} = require('./helper/notifications');
 
 
 
@@ -80,6 +91,7 @@ const moment = require("moment");
 const { autoEndExpiredSessions, GRACE_MINUTES } = require("./helper/autoEndSessions");
 const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("./helper/autoEndExpiredAppointments");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
+const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
 const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
 const popupEligibility = require("./helper/popupEligibility");
 
@@ -189,6 +201,30 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Subscription expiry: hourly sweep that flags UserPlan rows whose
+// expireDate has passed via planStatus = 'expired'. Nothing previously
+// set this server-side — the app derived "expired" itself from the
+// date on every render. Does not touch the `status` boolean (that
+// still gates GET /users/get_user_plans visibility) and skips frozen
+// plans, whose clock is paused. See helper/autoExpireUserPlans.js for
+// the full reasoning.
+cron.schedule(
+  "0 * * * *",
+  async () => {
+    try {
+      const expired = await autoExpireUserPlans();
+      if (expired.length > 0) {
+        console.log(
+          `[auto-expire-plans] Marked ${expired.length} plan(s) expired: ${expired.join(", ")}`
+        );
+      }
+    } catch (error) {
+      console.error("Error in auto-expire-plans job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Consultation-flow: per-minute consultant-no-show check. Looks for
 // confirmed appointments whose scheduled time + 10 min grace has passed
 // without the dietitian flipping status to "In Progress". Marks the user
@@ -251,17 +287,131 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Free trial expiry — nightly at 02:00 PKT.
+// Finds expired Free Trial UserPlans where user.status=true, flips status=false
+// (so trialChurned.js picks them up), destroys UserPlan + FreeTrailUsers + slots.
+// Without this, users who never reopen the app after expiry are invisible to churn
+// notifications — userHome() only runs expiry on-demand when the app is opened.
+cron.schedule(
+  '0 2 * * *',
+  async () => {
+    try {
+      await runFreeTrialExpiryBatch();
+    } catch (error) {
+      console.error('[cron] free-trial-expiry failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Downloaded-user nudge at 09:00 PKT daily.
+// Targets users who signed up but never started a trial (usedFreeTrial=false).
+// Day-based message sequence: day 2-6 / 7-13 / 14-20 / 21-30 — stops after day 30.
+// 7-day cooldown per user so each bucket fires once.
+cron.schedule(
+  '0 9 * * *',
+  async () => {
+    try {
+      await sendDownloadedUserNudges();
+    } catch (error) {
+      console.error('[cron] downloaded-user nudge failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Trial-churned nudge at 09:05 PKT daily.
+// Targets users who used their free trial but never bought a paid plan.
+// 5-minute offset ensures both segments log cleanly without overlapping I/O.
+cron.schedule(
+  '5 9 * * *',
+  async () => {
+    try {
+      await sendTrialChurnedNudges();
+    } catch (error) {
+      console.error('[cron] trial-churned nudge failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Lifecycle nudge at 10:00 PKT daily.
+// Sends to churned PAID users segmented by plan state:
+//   midPackageChurn  — plan still active but account deactivated
+//   postPackageEarly — plan expired 1–14 days ago
+//   postPackageMid   — plan expired 15–45 days ago
+//   postPackageLate  — plan expired 46–90 days ago
+// Messages are personalised with the user's cycle phase where available.
+cron.schedule(
+  '0 10 * * *',
+  async () => {
+    try {
+      await sendLifecycleNudges();
+    } catch (error) {
+      console.error('[cron] lifecycle nudge failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// TrialJourney nudge at 09:10 PKT daily.
+// Targets users who started the 3-day TrialJourney flow (trialController.js)
+// but are stuck at a state transition (haven't booked the next day or converted).
+// State-machine based: each segment fires only when the journey has been
+// idle long enough (minStaleDays) and respects a per-type cooldown.
+// 5-minute offset from trialChurned (09:05) to keep DB I/O clean.
+cron.schedule(
+  '10 9 * * *',
+  async () => {
+    try {
+      await sendTrialJourneyNudges();
+    } catch (error) {
+      console.error('[cron] trial-journey nudge failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// TrialJourneyChurned nudge at 09:15 PKT daily.
+// Targets users who completed all 3 trial days (day3AttendedAt set) but never
+// converted to a paid plan. Highest-intent segment — attended 3 classes, didn't buy.
+// trialJourney.js covers them for the first 14 days (trialJourneyConvert segment).
+// This channel picks up from day 15 onward with a 4-bucket re-engagement sequence.
+// 5-minute offset from trialJourney (09:10) to keep DB I/O clean.
+cron.schedule(
+  '15 9 * * *',
+  async () => {
+    try {
+      await sendTrialJourneyChurnedNudges();
+    } catch (error) {
+      console.error('[cron] trial-journey-churned nudge failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Weekly check-in reminder — Sunday 19:00 PKT.
+// Nudges active users (status=true) who haven't submitted a WeeklyCheckin
+// this ISO week yet. Gated by NotificationPreference.weeklyCheckin (default on).
+// Phase-aware body for cycle-tracked users.
+// 6-day recentlySent dedup prevents double-fire if cron runs twice.
+cron.schedule(
+  '0 19 * * 0',
+  async () => {
+    try {
+      await sendWeeklyCheckinReminders();
+    } catch (error) {
+      console.error('[cron] weekly-checkin failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 app.use(cors());
 app.use(express.json());
 
 //for form data and multipart data
 app.use(bodyParser.urlencoded({ extended: true }));
-
-
-
-
-
-
 
 // app.use(upload.array());
 
@@ -292,17 +442,14 @@ app.use('/users/progress', progressSubmissionRoutes);
 app.use('/admin/users', progressSubmissionAdminRoutes);
 app.use('/users', consultationBookingRoutes);
 app.use('/users/escalations', escalationRoutes);
+app.use('/users/app-issue', appIssueRoutes);
+app.use('/internal', internalRoutes);
 app.use('/admin/escalations', escalationAdminRoutes);
 app.use('/admin/metrics', metricsAdminRoutes);
 app.use('/trial', trialRoutes);
 app.use('/admin/diet-plan', dietPlanAdminRoutes);
 app.use('/users/diet-plan', dietPlanUserRoutes);
 
-
-
-
-
-// app.use
 // Error middleware : To show any error if promise fails
 app.use(error);
 // To make the folder Public

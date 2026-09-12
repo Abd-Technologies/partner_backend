@@ -29,6 +29,7 @@ router.get('/get_profile',validateToken,asyncMiddleware(userController.get_profi
 router.post('/plan/freeze', validateToken, asyncMiddleware(planFreezeController.freezePlan));
 router.post('/plan/unfreeze', validateToken, asyncMiddleware(planFreezeController.unfreezePlan));
 router.get('/plan/freeze-status', validateToken, asyncMiddleware(planFreezeController.freezeStatus));
+router.post('/plan/cancel', validateToken, asyncMiddleware(planFreezeController.cancelPlan));
 
 router.get('/get_plan_details/:planId',validateToken,asyncMiddleware(userController.get_plan_details));
 router.get('/get_user_plans',validateToken,asyncMiddleware(userController.get_user_plans));

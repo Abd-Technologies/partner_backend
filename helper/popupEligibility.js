@@ -17,6 +17,33 @@ const { createEscalation } = require("./escalation");
 
 const TZ = "Asia/Karachi";
 
+// Authoritative "what kind of plan is this" checks — prefer
+// Plan.planType (migration 20260902000001-add-plan-type-to-plans),
+// falling back to a title-text guess only for plans not yet backfilled.
+// The inline checks these replace were all named "dietOrCombined" but
+// only ever tested for the word "diet" — a plan titled e.g. "Both"
+// with no "diet"/"combined" substring was silently missed. Fixed here
+// too, in the fallback branch.
+function isDietOrCombinedPlan(p) {
+  if (!p || !p.Plan) return false;
+  const type = p.Plan.planType;
+  if (type) return type === "diet" || type === "combined";
+  const title = (p.Plan.title || "").toLowerCase();
+  return (
+    title.includes("diet") || title.includes("combined") || title.includes("both")
+  );
+}
+
+function isWorkoutOrCombinedPlan(p) {
+  if (!p || !p.Plan) return false;
+  const type = p.Plan.planType;
+  if (type) return type === "workout" || type === "combined";
+  const title = (p.Plan.title || "").toLowerCase();
+  return (
+    title.includes("workout") || title.includes("combined") || title.includes("both")
+  );
+}
+
 // Priority order — highest first. Section G.1 of the build plan.
 const PRIORITY = [
   "POPUP_MEDICAL_CONCERN",
@@ -110,10 +137,7 @@ async function evalBookInitialConsultation(user, plans) {
   // Diet/Combined plans only. Trigger: plan purchased AND no initial
   // Appointment of kind='initial' yet (or any appointment if kind not
   // wired — backward compat). Stops once initial booking exists.
-  const dietOrCombined = plans.find(
-    (p) =>
-      p.Plan && (p.Plan.title || "").toLowerCase().includes("diet")
-  );
+  const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
 
   const initial = await Appointment.findOne({
@@ -134,10 +158,7 @@ async function evalBookInitialConsultation(user, plans) {
 }
 
 async function evalPreConsultationForm(user, plans) {
-  const dietOrCombined = plans.find(
-    (p) =>
-      p.Plan && (p.Plan.title || "").toLowerCase().includes("diet")
-  );
+  const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
 
   const initial = await Appointment.findOne({
@@ -165,10 +186,7 @@ async function evalPreConsultationForm(user, plans) {
 async function evalBookInitialReminder(user, plans) {
   // Every 2 days while the initial consultation isn't booked, max 5.
   // After 5 dismissals → BOOKING_REMINDER_5X escalation.
-  const dietOrCombined = plans.find(
-    (p) =>
-      p.Plan && (p.Plan.title || "").toLowerCase().includes("diet")
-  );
+  const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
 
   const initial = await Appointment.findOne({
@@ -434,12 +452,7 @@ async function evalDailyLogReminder(user) {
 
 async function evalInactivityReminder(user, plans) {
   // 3+ consecutive days no slot join. Workout/combined plans only.
-  const isWorkoutOrCombined = plans.some(
-    (p) =>
-      p.Plan &&
-      ((p.Plan.title || "").toLowerCase().includes("workout") ||
-        (p.Plan.title || "").toLowerCase().includes("combined"))
-  );
+  const isWorkoutOrCombined = plans.some(isWorkoutOrCombinedPlan);
   if (!isWorkoutOrCombined) return;
 
   const since = nowPkt()
@@ -484,10 +497,7 @@ async function evalInactivityReminder(user, plans) {
 
 async function evalPlanDelayed(user, plans) {
   // Day 3 after consultation, no PdfDiet delivered for that plan.
-  const dietOrCombined = plans.find(
-    (p) =>
-      p.Plan && (p.Plan.title || "").toLowerCase().includes("diet")
-  );
+  const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
 
   const consultation = await Appointment.findOne({
