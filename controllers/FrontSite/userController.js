@@ -372,8 +372,23 @@ async function all_plans(req, res) {
   return res.json(response);
 }
 async function workout(req, res) {
+  const { Op } = require('sequelize');
+  // Category lookup kept as a fallback, not required — the previous
+  // version crashed (cateogry.id on null) if this exact-title match
+  // ever missed. planType is the authoritative signal going forward
+  // (migration 20260902000001-add-plan-type-to-plans); "combined"
+  // plans count as workout plans too.
   const cateogry = await Category.findOne({ where: { title: "WorkOut" } });
-  const plans = await Plan.findAll({ where: [{ status: true }, { CategoryId: cateogry.id }], include: { model: Time } });
+  const both = await Category.findOne({ where: { title: "Both" } });
+  const categoryIds = [cateogry, both].filter(Boolean).map((c) => c.id);
+
+  const or = [{ planType: { [Op.in]: ["workout", "combined"] } }];
+  if (categoryIds.length > 0) or.push({ CategoryId: { [Op.in]: categoryIds } });
+
+  const plans = await Plan.findAll({
+    where: { status: true, [Op.or]: or },
+    include: { model: Time },
+  });
   const response = ApiResponse("1", "All Plans", plans);
   return res.json(response);
 }

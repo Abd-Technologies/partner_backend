@@ -270,6 +270,14 @@ router.get(
   asyncMiddleware(adminController.getAnnouncement)
 );
 router.post("/freeze", validateAdmin, asyncMiddleware(adminController.freeze));
+// Cancels an active paid subscription (UserPlan) — see
+// AdminController.cancelUserPlan for why this endpoint didn't exist
+// before. :id is the UserPlan id, not the User id.
+router.post(
+  "/user-plan/:id/cancel",
+  validateAdmin,
+  asyncMiddleware(adminController.cancelUserPlan)
+);
 router.post("/addReview", asyncMiddleware(adminController.addReview));
 router.get("/getReviews", asyncMiddleware(adminController.getReviews));
 router.get("/syncrhonize", asyncMiddleware(adminController.syncrhonize));
@@ -358,6 +366,8 @@ router.get(
 );
 router.post(
   "/changeFreeTrialStatus",
+  validateToken,
+  validateAdmin,
   asyncMiddleware(adminController.changeFreeTrialStatus)
 );
 router.post(
@@ -423,8 +433,12 @@ router.get(
 router.post("/assignFreePlan", validateAdmin, asyncMiddleware(adminController.assignFreePlan));
 router.post("/addUserDetails", asyncMiddleware(adminController.addUserDetails));
 
-router.post('/createFreeTrialUser', asyncMiddleware(adminController.createFreeTrialUser));
-router.get('/getFreeTrialUserById/:id/:slotId', asyncMiddleware(adminController.getFreeTrialUserById));
+router.post('/createFreeTrialUser', validateToken, asyncMiddleware(adminController.createFreeTrialUser));
+router.get('/getFreeTrialUserById/:id/:slotId', validateToken, asyncMiddleware(adminController.getFreeTrialUserById));
+// Trainer roster for the current (TrialJourney) free-trial system — the
+// route above only ever reads the legacy FreeTrailUsersSlots table, which
+// nothing has written to since trialController.js shipped.
+router.get('/getTrialJourneyUsersBySlot/:id/:slotId', validateToken, asyncMiddleware(adminController.getTrialJourneyUsersBySlot));
 router.post(
   '/updateSlotStatus',
   validateToken,
@@ -433,6 +447,20 @@ router.post(
 router.put('/updateDietPlanStatus/:id', asyncMiddleware(adminController.updateDietPlanStatus));
 router.get('/getDietPlanStatus', asyncMiddleware(adminController.getDietPlanStatus));
 
+// ─── Trial admin overrides ───────────────────────────────────────────────────
+// POST /admin/trial/force-attendance
+// Manually marks a trial day as attended for a user who is stuck in the
+// "booked but never attended" deadlock (e.g. app crashed before leave API fired).
+// Body: { userId, day }  — day must be 1, 2, or 3.
+// Auth: validateToken + validateAdmin
+const trialAdminController = require("../../controllers/Admin/trialAdminController");
+router.post(
+  "/trial/force-attendance",
+  validateToken,
+  validateAdmin,
+  asyncMiddleware(trialAdminController.forceAttendance)
+);
+
 // ─── Identity / session helper ──────────────────────────────────────────────
 // Used by the CRM dashboard (and any external system) to verify a session JWT
 // issued by /admin/login and fetch the current user's profile + role.
@@ -440,6 +468,37 @@ router.get('/getDietPlanStatus', asyncMiddleware(adminController.getDietPlanStat
 // Header: accessToken: <jwt>
 router.get("/me", validateToken, asyncMiddleware(adminController.me));
 
+// ─── Trial deep-link token system (sales rep) ───────────────────────────────
+// Reps create shareable deep links that auto-start a 3-day TrialJourney when
+// the target user taps the link and opens / installs the app.
+//
+// Deep-link format: https://backend.thefither.com/trial?token=<token>
+// Flutter AppLinkHandler detects "trial" + "token" → validates → starts trial.
+//
+// POST   /admin/create-trial-token          – generate a new token + link
+// GET    /admin/my-trial-tokens             – list this rep's tokens (paginated)
+// DELETE /admin/revoke-trial-token/:token   – kill a link before it's used
+//
+// Auth: validateToken only (all rep roles: Customer_Support_Representative,
+//       Trainer, Admin, etc. — anyone with a valid JWT can create links).
+const trialTokenController = require("../../controllers/FrontSite/trialTokenController");
 
+router.post(
+  "/create-trial-token",
+  validateToken,
+  asyncMiddleware(trialTokenController.createTrialToken)
+);
+
+router.get(
+  "/my-trial-tokens",
+  validateToken,
+  asyncMiddleware(trialTokenController.listMyTrialTokens)
+);
+
+router.delete(
+  "/revoke-trial-token/:token",
+  validateToken,
+  asyncMiddleware(trialTokenController.revokeTrialToken)
+);
 
 module.exports = router;

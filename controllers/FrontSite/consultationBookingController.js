@@ -5,7 +5,13 @@ const {
   Appointment,
   PendingPopupState,
   SlotDiet,
+  TimeDietition,
 } = require("../../models");
+
+// Matches SLOT_WEEKDAY_NAMES in controllers/Admin/AdminController.js —
+// index = JS Date#getUTCDay(), and TimeDietition.day is stored as one of
+// these full English names ("Monday", "Tuesday", ...).
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 // GET /users/dietitian-availability?dietitianId=&from=YYYY-MM-DD&to=YYYY-MM-DD
 // Decision 3: reuse SlotDiet (parameterized to user). SlotDiet rows are
@@ -39,9 +45,13 @@ exports.getDietitianAvailability = async (req, res) => {
         : toDefault;
 
     // Templates for this dietitian (one row per recurring weekday slot).
+    // Each template belongs to ONE weekday (via TimeDietition.day) — we
+    // need that to only surface a template on dates that actually fall
+    // on its weekday.
     const templates = await SlotDiet.findAll({
       where: { dietitionId: dietitianId },
       attributes: ["id", "start", "end", "dietitionLink"],
+      include: [{ model: TimeDietition, attributes: ["id", "day"] }],
     });
 
     // All appointments that block availability in the date range. Status
@@ -59,7 +69,12 @@ exports.getDietitianAvailability = async (req, res) => {
       blockingAppts.map((a) => `${a.timeSlotId}|${String(a.date).slice(0, 10)}`)
     );
 
-    // Walk every date in [from, to], emit one entry per template per date.
+    // Walk every date in [from, to], emit one entry per template that
+    // actually belongs to that date's weekday. Previously this emitted
+    // EVERY template on EVERY date regardless of weekday — a dietitian
+    // with, say, a "3:00 PM" slot configured on Monday, Wednesday, and
+    // Friday would see "3:00 PM" three times on a single date instead
+    // of once (and never on days it wasn't actually configured for).
     const out = [];
     const start = new Date(`${from}T00:00:00Z`);
     const end = new Date(`${to}T00:00:00Z`);
@@ -69,7 +84,9 @@ exports.getDietitianAvailability = async (req, res) => {
       day.setUTCDate(day.getUTCDate() + 1)
     ) {
       const isoDate = day.toISOString().slice(0, 10);
+      const weekdayName = WEEKDAY_NAMES[day.getUTCDay()];
       for (const t of templates) {
+        if (!t.TimeDietition || t.TimeDietition.day !== weekdayName) continue;
         const key = `${t.id}|${isoDate}`;
         out.push({
           slotDietId: t.id,

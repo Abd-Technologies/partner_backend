@@ -1,6 +1,9 @@
 const { Op } = require("sequelize");
 const { UserPlan, sequelize } = require("../models");
-const { _applyUnfreeze } = require("../controllers/FrontSite/planFreezeController");
+const {
+  _applyUnfreeze,
+  _sendUnfreezeNotification,
+} = require("../controllers/FrontSite/planFreezeController");
 
 // Sweeps every UserPlan where the user-initiated freeze has expired
 // and flips it back to active. Mirrors autoEndExpiredAppointments:
@@ -51,6 +54,15 @@ async function autoUnfreezeExpiredPlans() {
       await _applyUnfreeze(plan, { actorUserId: null, transaction: t });
       await t.commit();
       unfrozen.push(candidate.id);
+
+      // Same "Plan Resumed" push the manual Unfreeze button sends --
+      // Shaista's ask was that this should notify the user directly no
+      // matter which path resumed the plan, not just the in-app one.
+      // Fired after the commit, fire-and-forget, so a notification
+      // hiccup on one plan can't stop the sweep from unfreezing the rest.
+      _sendUnfreezeNotification(plan.userId).catch((err) =>
+        console.error(`[auto-unfreeze] notification error for plan ${candidate.id}:`, err.message)
+      );
     } catch (err) {
       await t.rollback();
       console.error(`[auto-unfreeze] plan ${candidate.id} failed:`, err.message);

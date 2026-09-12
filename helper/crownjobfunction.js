@@ -1,4 +1,4 @@
-const { Slot, Time, User, UserPlan, Plan, FreeTrailUsers, FreeTrailUsersSlots } = require('../models');
+const { Slot, Time, User, UserPlan, Plan, NotificationPreference, FreeTrailUsers, FreeTrailUsersSlots } = require('../models');
 const { Op } = require('sequelize');
 const Queue = require("bull");
 const moment = require('moment-timezone');
@@ -10,17 +10,54 @@ const notificationQueue = new Queue("notificationQueue", {
 const redis = new Redis();
 
 /**
- * 🔹 Prevent duplicate notifications (per user & slot)
+ * 🔹 Prevent duplicate notifications per user per slot.
+ * Each slot gets exactly one classPrep and one classStart — no more.
+ * TTL expires when the slot ends + 10 min buffer so keys clean up automatically.
  */
 async function alreadyNotified(userId, slotId, reminderType, slotEnd) {
   const key = `notified:${userId}:${slotId}:${reminderType}`;
   const exists = await redis.get(key);
   if (exists) return true;
 
-  // expire key after slot ends + 10 min buffer
   const ttlSeconds = Math.ceil((slotEnd - Date.now()) / 1000) + 600;
-  await redis.set(key, "1", "EX", ttlSeconds);
+  await redis.set(key, "1", "EX", Math.max(ttlSeconds, 60));
   return false;
+}
+
+/**
+ * 🔹 Filter today's slots to only those falling in the user's preferred
+ * time window (set in NotificationPreference.timeBlock).
+ *
+ * Windows (hour of day in user's local timezone):
+ *   morning   →  5:00 – 11:59
+ *   afternoon → 12:00 – 16:59
+ *   evening   → 17:00 – 20:59
+ *   night     → 21:00 – 04:59 (wraps midnight)
+ *   all       → no filter (default)
+ *
+ * With 8 open classes (8 AM → 10 PM) a user who sets timeBlock='evening'
+ * only gets notified for 7:30 PM — 2 pushes instead of 16.
+ */
+const TIME_BLOCK_HOURS = {
+  morning:   { start: 5,  end: 12 },
+  afternoon: { start: 12, end: 17 },
+  evening:   { start: 17, end: 21 },
+  night:     { start: 21, end: 29 }, // 29 = 5 AM next day (21→24→5)
+};
+
+function filterSlotsByTimeBlock(slots, timeBlock, timeZone) {
+  if (!timeBlock || timeBlock === 'all') return slots;
+  const window = TIME_BLOCK_HOURS[timeBlock];
+  if (!window) return slots;
+
+  return slots.filter(slot => {
+    const startMs = Number(slot.start);
+    if (!Number.isFinite(startMs)) return false;
+    const hour = moment(startMs).tz(timeZone || 'Asia/Karachi').hours();
+    // night wraps past midnight: treat hours 0-4 as 24-28
+    const h = (timeBlock === 'night' && hour < 5) ? hour + 24 : hour;
+    return h >= window.start && h < window.end;
+  });
 }
 
 /**
@@ -110,6 +147,15 @@ async function sendUpcomingSlotNotificationsPerUser() {
       ],
     });
 
+    // Batch-fetch timeBlock preferences to avoid N+1 queries.
+    // Default 'all' if the user has no preference row yet.
+    const userIds = userPlans.map(up => up.User?.id).filter(Boolean);
+    const prefs = await NotificationPreference.findAll({
+      where: { userId: { [Op.in]: userIds } },
+      attributes: ['userId', 'timeBlock'],
+    });
+    const timeBlockByUserId = new Map(prefs.map(p => [p.userId, p.timeBlock || 'all']));
+
     for (const userPlan of userPlans) {
       const user = userPlan.User;
       if (!user || !user.deviceToken || !user.timeZone) continue;
@@ -121,7 +167,13 @@ async function sendUpcomingSlotNotificationsPerUser() {
       const timeRecord = await Time.findOne({ where: { day: currentDay }, attributes: ['id'] });
       if (!timeRecord) continue;
 
-      const slotsToday = await getTodaySlotsForUser(user, timeRecord, userPlan.Plan.title === "Free Trial");
+      const allSlotsToday = await getTodaySlotsForUser(user, timeRecord, userPlan.Plan.title === "Free Trial");
+
+      // Only notify for classes that fall in the user's preferred time window.
+      // A user who sets 'evening' won't be disturbed by 8 AM class reminders.
+      const timeBlock = timeBlockByUserId.get(user.id) || 'all';
+      const slotsToday = filterSlotsByTimeBlock(allSlotsToday, timeBlock, user.timeZone);
+
       const reminder = pickClassReminder(slotsToday, nowTimestamp);
 
       if (!reminder) continue;
@@ -221,7 +273,67 @@ async function sendUpcomingSlotNotificationToUser(userId) {
   }
 }
 
+/**
+ * 🔹 Single source of truth for "who gets notified about slot X".
+ *
+ * Slots are drop-in, not per-user booked (confirmed: any paid user on a
+ * workout/workout+diet plan — Plan.CategoryId 2 or 3 — can join any slot
+ * that matches their plan). So the roster for an admin-triggered slot
+ * notification (link added, trainer joined, status changed) is:
+ *   1. every paid user currently on a CategoryId 2/3 plan, plus
+ *   2. any free-trial user explicitly assigned to this exact slot.
+ *
+ * This mirrors the token lookup already proven correct in
+ * sendUpcomingSlotNotificationsPerUser above. AdminController's
+ * updateLink / updateTrainerJoin / update_slot_status should call this
+ * instead of re-deriving the roster themselves — that duplication (an
+ * abandoned copy still sits commented-out in notificationWorker.js) is
+ * exactly what let those three call sites drift out of sync and ship
+ * with an empty recipient list.
+ */
+async function getDeviceTokensForSlot(slot) {
+  if (!slot || !slot.id) return [];
+
+  try {
+    const [paidUserPlans, freeTrialAssignments] = await Promise.all([
+      UserPlan.findAll({
+        include: [
+          { model: User, attributes: ['deviceToken'] },
+          {
+            model: Plan,
+            attributes: ['CategoryId'],
+            where: { CategoryId: { [Op.or]: [2, 3] } },
+          },
+        ],
+      }),
+      FreeTrailUsersSlots.findAll({
+        where: { slotId: slot.id },
+        include: [{
+          model: FreeTrailUsers,
+          as: 'freeUserSlots',
+          include: [{ model: User, as: 'freeUserId', attributes: ['deviceToken'] }],
+        }],
+      }),
+    ]);
+
+    const paidTokens = paidUserPlans
+      .map(up => up.User?.deviceToken)
+      .filter(Boolean);
+
+    const freeTokens = freeTrialAssignments
+      .map(a => a.freeUserSlots?.freeUserId?.deviceToken)
+      .filter(Boolean);
+
+    // De-dupe — a user could theoretically surface in both queries.
+    return Array.from(new Set([...paidTokens, ...freeTokens]));
+  } catch (err) {
+    console.error('[getDeviceTokensForSlot] roster lookup failed:', err);
+    return [];
+  }
+}
+
 module.exports = {
   sendUpcomingSlotNotificationsPerUser,
   sendUpcomingSlotNotificationToUser,
+  getDeviceTokensForSlot,
 };

@@ -5,7 +5,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "nodemon app.js",
-    "dev": "nodemon app.js"
+    "dev": "nodemon app.js",
+    "worker": "node notificationWorker.js",
+    "worker:dev": "nodemon notificationWorker.js"
   },
   "keywords": [],
   "author": "",

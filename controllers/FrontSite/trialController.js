@@ -1,5 +1,6 @@
 const ApiResponse = require("../../helper/ApiResponse");
-const { TrialJourney, TrialToken, Slot, sequelize } = require("../../models");
+const { TrialJourney, TrialToken, Slot, User, FreeTrailUsers, sequelize } = require("../../models");
+const { computeState, computeNextBookableDay, isTrialExpired } = require("../../helper/trialState");
 
 const TOKEN_STATUSES = {
   ISSUED: "issued",
@@ -29,30 +30,16 @@ const DAY_KEYS = {
   },
 };
 
-function isExpired(tokenRow) {
+// Minimum class duration (seconds) required for manual attendance marking.
+// Mirrors the threshold used by classPresenceController → trialAttendance.js.
+const DEFAULT_MIN_ATTENDANCE_SECONDS = 10 * 60;
+function minAttendanceSeconds() {
+  const raw = Number(process.env.TRIAL_ATTENDANCE_MIN_SECONDS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_MIN_ATTENDANCE_SECONDS;
+}
+
+function isTokenExpired(tokenRow) {
   return !!(tokenRow && tokenRow.expiresAt && new Date(tokenRow.expiresAt) < new Date());
-}
-
-function computeState(journey) {
-  if (journey.convertedAt) return "converted";
-  if (journey.day3AttendedAt) return "day3_attended";
-  if (journey.day3BookedAt) return "day3_booked";
-  if (journey.day2AttendedAt) return "day2_attended";
-  if (journey.day2BookedAt) return "day2_booked";
-  if (journey.day1AttendedAt) return "day1_attended";
-  if (journey.day1BookedAt) return "day1_booked";
-  if (journey.startedAt) return "trial_started";
-  if (journey.tokenValidatedAt) return "token_validated";
-  return "trial_started";
-}
-
-function computeNextBookableDay(journey) {
-  if (!journey.day1BookedAt) return 1;
-  if (journey.day1BookedAt && !journey.day1AttendedAt) return null;
-  if (!journey.day2BookedAt) return 2;
-  if (journey.day2BookedAt && !journey.day2AttendedAt) return null;
-  if (!journey.day3BookedAt) return 3;
-  return null;
 }
 
 function serializeJourney(journey) {
@@ -64,6 +51,11 @@ function serializeJourney(journey) {
   return {
     state,
     nextBookableDay,
+    // Previously the client had no way to know the 3-day window had closed
+    // except by attempting to book and getting rejected — bookDay enforces
+    // this server-side, but nothing surfaced it proactively. Computed the
+    // same way bookDay checks it, so the two can never disagree.
+    isExpired: !journey.convertedAt && isTrialExpired(journey.startedAt),
     tokenValidatedAt: journey.tokenValidatedAt,
     startedAt: journey.startedAt,
     day1SlotId: journey.day1SlotId,
@@ -107,7 +99,7 @@ async function getValidTokenOrError(token) {
   if (tokenRow.status === TOKEN_STATUSES.REVOKED) {
     return { error: "Trial token has been revoked", tokenRow: null };
   }
-  if (isExpired(tokenRow)) {
+  if (isTokenExpired(tokenRow)) {
     if (tokenRow.status !== TOKEN_STATUSES.EXPIRED) {
       tokenRow.status = TOKEN_STATUSES.EXPIRED;
       await tokenRow.save();
@@ -186,6 +178,20 @@ exports.startTrial = async (req, res) => {
     }
 
     if (!journey) {
+      // Cross-system check. This is the current, live-in-app trial system,
+      // but the legacy FreeTrailUsers/assignFreePlan system is still fully
+      // reachable on the backend and was never checked here — a user who
+      // already got a free trial through either legacy path could still
+      // start a brand new TrialJourney with no record of that prior grant.
+      const [existingFreeTrial, userRow] = await Promise.all([
+        FreeTrailUsers.findOne({ where: { freeTrialUser: userId }, transaction }),
+        User.findOne({ where: { id: userId }, attributes: ["id", "usedFreeTrial"], transaction }),
+      ]);
+      if (existingFreeTrial || userRow?.usedFreeTrial) {
+        await transaction.rollback();
+        return res.json(ApiResponse("0", "You've already used your free trial", { alreadyUsed: true }));
+      }
+
       journey = await TrialJourney.create(
         {
           userId,
@@ -197,6 +203,14 @@ exports.startTrial = async (req, res) => {
         },
         { transaction }
       );
+
+      // Set the flag the legacy system checks (assignFreePlan/
+      // createFreeTrialUser) so a start here is visible to that side too —
+      // closes the loop the other direction.
+      if (userRow) {
+        userRow.usedFreeTrial = 1;
+        await userRow.save({ transaction });
+      }
     } else {
       if (!journey.startedAt) {
         journey.startedAt = new Date();
@@ -207,7 +221,8 @@ exports.startTrial = async (req, res) => {
       if (tokenRow && !journey.tokenValidatedAt) {
         journey.tokenValidatedAt = new Date();
       }
-      await persistDerivedState(journey, { transaction });
+      // State is persisted by the unconditional persistDerivedState below —
+      // no need to save here too (Bug 6 fix: removed duplicate save).
     }
 
     if (tokenRow) {
@@ -225,6 +240,22 @@ exports.startTrial = async (req, res) => {
     );
   } catch (error) {
     await transaction.rollback();
+
+    // Race condition: TrialJourney.userId is unique, but the findOne+lock
+    // above only protects a row that already exists — two near-simultaneous
+    // first-time starts (double-tap, dialog firing twice) can both pass the
+    // !journey check before either commits. The second INSERT then fails
+    // this unique constraint. Previously that raw Sequelize error went
+    // straight to the user instead of a friendly message.
+    if (error.name === "SequelizeUniqueConstraintError") {
+      const existing = await getJourneyForUser(userId);
+      return res.json(
+        ApiResponse("1", "Trial already started", {
+          journey: serializeJourney(existing),
+        })
+      );
+    }
+
     return res.json(ApiResponse("0", error.message || error.toString(), {}));
   }
 };
@@ -263,6 +294,12 @@ exports.bookDay = async (req, res) => {
     return res.json(ApiResponse("0", "No active trial", {}));
   }
 
+  // Bug 3 fix: server-side expiry gate. Client-side hasActiveThreeDayTrial()
+  // is not enough — the endpoint must refuse after startedAt + 3 days.
+  if (isTrialExpired(journey.startedAt)) {
+    return res.json(ApiResponse("0", "Your 3-day trial has expired", { journey: serializeJourney(journey) }));
+  }
+
   await persistDerivedState(journey);
   if (journey.nextBookableDay !== day) {
     return res.json(
@@ -294,6 +331,7 @@ exports.bookDay = async (req, res) => {
 exports.markAttendance = async (req, res) => {
   const userId = req.user && req.user.id;
   const day = Number(req.body && req.body.day);
+  // attendedMinutes is client-provided — enforce server-side minimum (Bug 4 fix).
   const attendedMinutes = Math.max(
     0,
     Number(req.body && req.body.attendedMinutes) || 0
@@ -304,6 +342,20 @@ exports.markAttendance = async (req, res) => {
   }
   if (!DAY_KEYS[day]) {
     return res.json(ApiResponse("0", "Valid day is required", {}));
+  }
+
+  // Bug 4 fix: reject if attended duration is below the same threshold that
+  // classPresenceController uses. attendedMinutes is client-supplied and
+  // untrusted — enforce the minimum here server-side.
+  const minMinutes = Math.ceil(minAttendanceSeconds() / 60);
+  if (attendedMinutes < minMinutes) {
+    return res.json(
+      ApiResponse(
+        "0",
+        `Attendance requires at least ${minMinutes} minutes in class`,
+        {}
+      )
+    );
   }
 
   const journey = await getJourneyForUser(userId);
@@ -348,6 +400,16 @@ exports.convert = async (req, res) => {
     return res.json(
       ApiResponse("0", "Trial conversion is only available after day 3 attendance", {})
     );
+  }
+  // Bug 3 fix: server-side expiry check. Allow conversion up to 30 days after
+  // trial end so users who completed all 3 days aren't punished for slow action,
+  // but block attempts more than 30 days out.
+  const CONVERT_GRACE_DAYS = 30;
+  const convertDeadline = new Date(
+    new Date(journey.startedAt).getTime() + (3 + CONVERT_GRACE_DAYS) * 24 * 60 * 60 * 1000
+  );
+  if (new Date() > convertDeadline) {
+    return res.json(ApiResponse("0", "Trial conversion window has closed", {}));
   }
   if (!journey.convertedAt) {
     journey.convertedAt = new Date();

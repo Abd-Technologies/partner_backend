@@ -7,6 +7,7 @@ const {
   WeeklyCheckin,
   DailyCheckin,
   ClassAttendance,
+  ClassPresence,
   Slot,
   Time,
 } = require("../../models");
@@ -274,9 +275,52 @@ async function buildLiveAndComingUp(userTz) {
   const formatLocal = (parts, utcDay) =>
     slotMomentOnUtcDate(parts, utcDay).clone().tz(tz).format("hh:mm A");
 
-  // ── live: backend status decides; convert times to user's timezone ────
+  // ── live: prefer the trainer's manual "In Progress" flip, but fall back
+  // to real time-window detection so a class doesn't vanish from the app
+  // between its scheduled start and whenever the trainer actually flips
+  // the status. Without the fallback, `comingUp` below only ever keeps
+  // strictly-future occurrences, so a slot whose start time has already
+  // passed but hasn't been flipped yet has nowhere to render at all --
+  // that's the bug behind the missing "STARTING SOON" home banner.
+  //
+  // PRE_START_LEAD_MINUTES additionally treats a slot as "live" starting
+  // this many minutes BEFORE its scheduled start too, not just during the
+  // [start, end) window -- this is what lets the home screen show its
+  // pre-class card (currently: "Confirmed" from here, then "Get ready"
+  // once inside the last 10 min -- see paid_hero_live_section.dart's
+  // _kGetReadyLeadMinutes) ahead of time instead of only once class time
+  // arrives. This constant is intentionally NOT the same 20-minute value
+  // as the shared frontend resolver's _kSoonWindow (lib/utils/
+  // slot_ui_state.dart) -- that one still drives the Workout Schedule
+  // screen and the Coming Up tiles, which haven't adopted this longer
+  // lead time.
+  //
+  // Either way, the real status (whatever it is) is passed through
+  // untouched below, so the frontend decides what to actually render
+  // (Confirmed / Cancelled / Get ready / LIVE / blocked) -- this block
+  // only decides *which* slot to surface as `live`.
+  const PRE_START_LEAD_MINUTES = 30;
+  const isWithinTodaysWindow = (slot) => {
+    if (!slot.Time || !slot.Time.day) return false;
+    const utcDayIdx = UTC_WEEKDAY_NAMES.indexOf(slot.Time.day);
+    if (utcDayIdx < 0 || todayUtc.day() !== utcDayIdx) return false;
+    const startParts = parseSlotTimeParts(slot.start);
+    const endParts = parseSlotTimeParts(slot.end);
+    if (!startParts || !endParts) return false;
+    const startUtc = slotMomentOnUtcDate(startParts, todayUtc);
+    const endUtc = slotMomentOnUtcDate(endParts, todayUtc);
+    if (endUtc.isSameOrBefore(startUtc)) endUtc.add(1, "day");
+    const windowStart = startUtc
+      .clone()
+      .subtract(PRE_START_LEAD_MINUTES, "minutes");
+    return nowUtc.isSameOrAfter(windowStart) && nowUtc.isBefore(endUtc);
+  };
+
   let live = null;
-  const liveSlot = slots.find((s) => s.status === "In Progress");
+  let liveSlot = slots.find((s) => s.status === "In Progress");
+  if (!liveSlot) {
+    liveSlot = slots.find((s) => isWithinTodaysWindow(s));
+  }
   if (liveSlot) {
     const trainer = liveSlot.User;
     const trainerName = trainer
@@ -286,13 +330,42 @@ async function buildLiveAndComingUp(userTz) {
     const endParts = parseSlotTimeParts(liveSlot.end);
     const localStart = startParts ? formatLocal(startParts, todayUtc) : liveSlot.start;
     const localEnd = endParts ? formatLocal(endParts, todayUtc) : liveSlot.end;
+
+    // Real duration straight from the slot's own start/end -- no separate
+    // data source needed. Same overnight-slot handling as
+    // isWithinTodaysWindow (end rolls to the next day if it isn't
+    // strictly after start).
+    let durationMinutes = null;
+    if (startParts && endParts) {
+      const startUtc = slotMomentOnUtcDate(startParts, todayUtc);
+      const endUtc = slotMomentOnUtcDate(endParts, todayUtc);
+      if (endUtc.isSameOrBefore(startUtc)) endUtc.add(1, "day");
+      durationMinutes = Math.round(endUtc.diff(startUtc, "minutes", true));
+    }
+
+    // Real live headcount from ClassPresence -- written by the app's own
+    // join/leave calls (see classPresenceController.js). Counts users
+    // currently connected (leftAt still null), not just everyone who ever
+    // joined, so it tracks who's actually in the room right now.
+    let participantCount = null;
+    try {
+      participantCount = await ClassPresence.count({
+        where: { slotId: liveSlot.id, leftAt: { [Op.is]: null } },
+      });
+    } catch (err) {
+      console.error(
+        "DashboardController.buildLiveAndComingUp presence count:",
+        err
+      );
+    }
+
     live = {
       slotId: liveSlot.id,
       classType: liveSlot.type,
       trainerName: trainerName.length ? trainerName : null,
-      durationMinutes: null,
+      durationMinutes,
       caloriesEstimate: null,
-      participantCount: null,
+      participantCount,
       elapsedMinutes: null,
       startedAtUtc: null,
       status: liveSlot.status,
@@ -362,6 +435,11 @@ async function buildLiveAndComingUp(userTz) {
       durationMinutes: null,
       dayOffset,
       trainerName: trainerName.length ? trainerName : null,
+      // Added so the frontend can run the same resolveSlotUIState() the
+      // Workout Schedule screen uses -- lets the home screen render the
+      // amber "Starts in Xm" countdown identically instead of plain text.
+      status: slot.status,
+      trainerLink: slot.trainerLink || null,
     });
   }
   upcoming.sort((a, b) => a._sortKey - b._sortKey);

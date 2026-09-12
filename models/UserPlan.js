@@ -9,11 +9,40 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.DATE,
             allowNull: true,
         },
+        // Subscription/package lifecycle only (e.g. 'expired', set by
+        // helper/autoExpireUserPlans.js). Diet-plan-content review status
+        // lives in the separate dietPlanStatus column below — the two
+        // used to share this field, which meant a plan already flagged
+        // reviewed-complete could never later be flagged expired.
         planStatus: {
             type: DataTypes.STRING(),
             allowNull: true,
         },
-       
+        // Dietitian-review-completion signal only (AdminController.js
+        // completeDietPlan / addDietitionReview). Separate from
+        // planStatus — see migration 20260901000001.
+        dietPlanStatus: {
+            type: DataTypes.STRING(),
+            allowNull: true,
+        },
+
+        // Cancellation audit trail — written only by
+        // AdminController.cancelUserPlan. Mirrors the frozenAt/frozenBy
+        // pattern below rather than inventing a new convention. See
+        // migration 20260905000001.
+        cancelledAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+        cancelReason: {
+            type: DataTypes.STRING(),
+            allowNull: true,
+        },
+        cancelledBy: {
+            type: DataTypes.INTEGER,
+            allowNull: true,
+        },
+
 
         price: {
             type: DataTypes.INTEGER,
