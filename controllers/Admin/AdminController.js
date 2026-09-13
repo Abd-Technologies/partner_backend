@@ -3745,16 +3745,20 @@ async function addImage(req, res) {
     let autoApproved = false;
     let approvalReason = null;
     const expectedAmount = parseInt(price, 10);
+    const wrongReceiver = ocrResult?.receiver && !ocrResult?.receiverVerified;
 
-    if (ocrResult && ocrResult.confidence >= OCR_AUTO_APPROVE_MIN_CONFIDENCE) {
+    if (ocrResult && ocrResult.confidence >= OCR_AUTO_APPROVE_MIN_CONFIDENCE && !wrongReceiver) {
+      const receiverTag = ocrResult.receiverVerified ? `, receiver verified (${ocrResult.receiver})` : '';
       if (ocrResult.amount &&
           Math.abs(ocrResult.amount - expectedAmount) <= OCR_AMOUNT_TOLERANCE_PKR) {
         autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified`;
+        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified${receiverTag}`;
       } else if (ocrResult.amount && ocrResult.amount > expectedAmount) {
         autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward`;
+        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward${receiverTag}`;
       }
+    } else if (wrongReceiver) {
+      approvalReason = `Slip receiver is "${ocrResult.receiver}" (expected FitHer or Shaista Khalid) — admin review required`;
     }
 
     // Create the PlanImage row
@@ -3769,13 +3773,15 @@ async function addImage(req, res) {
     newImage.paidAmount       = ocrResult?.amount && autoApproved ? ocrResult.amount : expectedAmount;
     newImage.uploadSource     = 'user_app';
     newImage.ocrData          = ocrResult ? {
-      amount:     ocrResult.amount,
-      amounts:    ocrResult.amounts,
-      date:       ocrResult.date,
-      bank:       ocrResult.bank,
-      sender:     ocrResult.sender,
-      refNumber:  ocrResult.refNumber,
-      rawText:    ocrResult.rawText?.slice(0, 1000),
+      amount:           ocrResult.amount,
+      amounts:          ocrResult.amounts,
+      date:             ocrResult.date,
+      bank:             ocrResult.bank,
+      sender:           ocrResult.sender,
+      receiver:         ocrResult.receiver,
+      receiverVerified: ocrResult.receiverVerified,
+      refNumber:        ocrResult.refNumber,
+      rawText:          ocrResult.rawText?.slice(0, 1000),
       autoApproved,
       approvalReason,
     } : null;
@@ -3784,6 +3790,7 @@ async function addImage(req, res) {
     newImage.ocrBank          = ocrResult?.bank       || null;
     newImage.ocrDate          = ocrResult?.date       || null;
     newImage.ocrSender        = ocrResult?.sender     || null;
+    newImage.ocrReceiver      = ocrResult?.receiver   || null;
     newImage.ocrTransactionId = ocrResult?.refNumber  || null;
 
     await newImage.save();
@@ -3828,11 +3835,13 @@ async function addImage(req, res) {
       userPlanId:         activationResult?.userPlanId || null,
       planImageId:        newImage.id,
       ocrSummary: ocrResult ? {
-        confidence: ocrResult.confidence,
-        amount:     ocrResult.amount,
-        bank:       ocrResult.bank,
-        date:       ocrResult.date,
-        refNumber:  ocrResult.refNumber,
+        confidence:       ocrResult.confidence,
+        amount:           ocrResult.amount,
+        bank:             ocrResult.bank,
+        date:             ocrResult.date,
+        receiver:         ocrResult.receiver,
+        receiverVerified: ocrResult.receiverVerified,
+        refNumber:        ocrResult.refNumber,
       } : null,
     }));
 

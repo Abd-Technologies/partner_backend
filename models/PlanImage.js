@@ -33,6 +33,7 @@ module.exports = (sequelize, DataTypes) => {
       ocrBank:            { type: DataTypes.STRING(80),  allowNull: true },
       ocrDate:            { type: DataTypes.STRING(40),  allowNull: true },
       ocrSender:          { type: DataTypes.STRING(120), allowNull: true },
+      ocrReceiver:        { type: DataTypes.STRING(120), allowNull: true },
       ocrTransactionId:   { type: DataTypes.STRING(80),  allowNull: true },
     });
     

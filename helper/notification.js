@@ -119,7 +119,7 @@ async function sendNotification(deviceTokens, notification, data = {}) {
     if (prefKey) {
       const users = await User.findAll({
         where: { deviceToken: { [Op.in]: tokens } },
-        attributes: ['id', 'deviceToken'],
+        attributes: ['id', 'deviceToken', 'timeZone'],
       });
       // Cache for step 5.
       users.forEach(u => { tokenUserMap[u.deviceToken] = u.id; });
@@ -141,8 +141,9 @@ async function sendNotification(deviceTokens, notification, data = {}) {
           // Gate: is this pref column enabled?
           if (!pref[prefKey]) return;
 
-          // Quiet-hours gate (PKT default; no per-user TZ stored yet).
-          const now = moment().tz(DEFAULT_TZ);
+          // Quiet-hours gate (evaluated in the user's own timezone, fallback to PKT).
+          const userTz = user.timeZone || DEFAULT_TZ;
+          const now = moment().tz(userTz);
           const nowMin = now.hours() * 60 + now.minutes();
           const toMin = (str) => {
             const [h, m] = (str || '').split(':').map(Number);

@@ -5,8 +5,10 @@ const { sign } = require("jsonwebtoken");
 const sentOtpMail = require("../../helper/sentOtpMail");
 const Sequelize = require('sequelize');
 
+const crypto = require('crypto');
+
 function generateOTP() {
-  return Math.floor(1000 + Math.random() * 9000).toString();
+  return crypto.randomInt(1000, 10000).toString();
 }
 async function registration(req, res) {
   const { firstName, lastName, email, phone, password } = req.body;
@@ -153,108 +155,150 @@ async function change_password(req, res) {
   }
 }
 async function forget_password(req, res) {
+  try {
+    const rawEmail = req.body.email || "";
+    const email = rawEmail.trim().toLowerCase();
 
-  // Attributes allowlist: schema-drift defence — `useNewProgressHub` is
-  // declared in models/User.js but doesn't exist in MySQL, so a default
-  // SELECT * fails. Restrict to the columns this controller actually reads
-  // (`check` is used for truthy + `check.email`). Tracked for full Phase C
-  // schema-drift cleanup; this scoped fix unblocks Phase 0 only.
-  const check = await User.findOne({
-    where: { email: req.body.email },
-    attributes: ['id', 'email'],
-  });
-  if (check) {
-    const checkotp = await OtpData.findOne({ where: { email: check.email } });
-    if (checkotp) {
-      let OTP = generateOTP();
-      checkotp.otp = OTP;
-      checkotp.requestAt = new Date();
-      checkotp
-        .save()
-        .then((dat) => {
-          sentOtpMail("OTP For Fither", `Your OTP for forget password is ${OTP}`, req.body.email);
-
-          const data = {
-            email: check.email,
-          };
-          const response = ApiResponse("1", "Opt Sent Successfully!", data);
-          return res.json(response);
-        })
-        .catch((error) => {
-          const response = ApiResponse("0", error.message, {});
-          return res.json(response);
-        });
-    } else {
-      let OTP = generateOTP();
-      const newOtp = new OtpData();
-      newOtp.requestAt = new Date();
-      newOtp.email = check.email;
-      newOtp.otp = OTP;
-      newOtp.status = true;
-      newOtp
-        .save()
-        .then((dat) => {
-          sentOtpMail("OTP For Fither", `Your OTP for forget password is ${OTP}`, req.body.email);
-          const data = {
-            email: check.email,
-          };
-          const response = ApiResponse("1", "Opt Sent Successfully!", data);
-          return res.json(response);
-        })
-        .catch((error) => {
-          const response = ApiResponse("0", error.message, {});
-          return res.json(response);
-        });
+    if (!email) {
+      return res.json(ApiResponse("0", "Email is required", {}));
     }
-  } else {
-    const response = ApiResponse("0", "Sorry! User not exist", {});
-    return res.json(response);
+
+    // Attributes allowlist: schema-drift defence — `useNewProgressHub` is
+    // declared in models/User.js but doesn't exist in MySQL, so a default
+    // SELECT * fails. Restrict to the columns this controller actually reads.
+    const check = await User.findOne({
+      where: { email: email },
+      attributes: ['id', 'email'],
+    });
+
+    if (check) {
+      let checkotp = await OtpData.findOne({ where: { email: check.email } });
+      const OTP = generateOTP();
+
+      if (checkotp) {
+        checkotp.otp = OTP;
+        checkotp.requestAt = new Date();
+        checkotp.status = true;
+        await checkotp.save();
+      } else {
+        checkotp = new OtpData();
+        checkotp.requestAt = new Date();
+        checkotp.email = check.email;
+        checkotp.otp = OTP;
+        checkotp.status = true;
+        await checkotp.save();
+      }
+
+      // Send OTP via mail
+      sentOtpMail("OTP For FitHer", `Your OTP for password reset is ${OTP}`, check.email);
+
+      const data = {
+        email: check.email,
+      };
+      return res.json(ApiResponse("1", "OTP sent successfully!", data));
+    } else {
+      return res.json(ApiResponse("0", "Sorry! User does not exist", {}));
+    }
+  } catch (error) {
+    console.error("forget_password error:", error);
+    return res.json(ApiResponse("0", error.message || "Something went wrong", {}));
   }
 }
+
+async function verify_otp(req, res) {
+  try {
+    const rawEmail = req.body.email || "";
+    const email = rawEmail.trim().toLowerCase();
+    const otp = (req.body.otp || "").toString().trim();
+
+    if (!email || !otp) {
+      return res.json(ApiResponse("0", "Email and OTP are required.", {}));
+    }
+
+    const otpRecord = await OtpData.findOne({ where: { email: email } });
+    if (!otpRecord) {
+      return res.json(ApiResponse("0", "No password reset was requested for this email.", {}));
+    }
+
+    // Verify OTP was recently generated (within 10 minutes)
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    if (!otpRecord.requestAt || otpRecord.requestAt < tenMinutesAgo) {
+      return res.json(ApiResponse("0", "OTP has expired. Please request a new one.", {}));
+    }
+
+    // Verify OTP status is valid (not yet consumed)
+    if (!otpRecord.status) {
+      return res.json(ApiResponse("0", "OTP has already been used. Please request a new one.", {}));
+    }
+
+    // Verify OTP matches
+    if (String(otpRecord.otp).trim() !== otp) {
+      return res.json(ApiResponse("0", "Invalid OTP. Please check the code sent to your email.", {}));
+    }
+
+    return res.json(ApiResponse("1", "OTP verified successfully!", { email: email }));
+  } catch (error) {
+    console.error("verify_otp error:", error);
+    return res.json(ApiResponse("0", error.message || "Something went wrong", {}));
+  }
+}
+
+async function resend_otp(req, res) {
+  return forget_password(req, res);
+}
+
 async function change_password_after_otp(req, res) {
-  const { email, password } = req.body;
+  try {
+    const rawEmail = req.body.email || "";
+    const email = rawEmail.trim().toLowerCase();
+    const password = req.body.password;
+    const otp = (req.body.otp || "").toString().trim();
 
-  // 1. Verify an OTP record exists for this email
-  const otpRecord = await OtpData.findOne({ where: { email: email } });
-  if (!otpRecord) {
-    const response = ApiResponse("0", "No password reset was requested for this email.", {});
-    return res.json(response);
+    if (!email || !password) {
+      return res.json(ApiResponse("0", "Email and new password are required.", {}));
+    }
+
+    // 1. Verify an OTP record exists for this email
+    const otpRecord = await OtpData.findOne({ where: { email: email } });
+    if (!otpRecord) {
+      return res.json(ApiResponse("0", "No password reset was requested for this email.", {}));
+    }
+
+    // 2. Verify OTP was recently generated (within 10 minutes)
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    if (!otpRecord.requestAt || otpRecord.requestAt < tenMinutesAgo) {
+      return res.json(ApiResponse("0", "OTP has expired. Please request a new one.", {}));
+    }
+
+    // 3. Verify OTP status is valid
+    if (!otpRecord.status) {
+      return res.json(ApiResponse("0", "OTP has already been used. Please request a new one.", {}));
+    }
+
+    // 4. Verify OTP value matches
+    if (!otp || String(otpRecord.otp).trim() !== otp) {
+      return res.json(ApiResponse("0", "Invalid OTP. Please verify the code and try again.", {}));
+    }
+
+    // 5. Find user and update password
+    const user = await User.findOne({ where: { email: email } });
+    if (!user) {
+      return res.json(ApiResponse("0", "User does not exist!", {}));
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(password, salt);
+    await user.save();
+
+    // 6. Invalidate OTP after successful password change
+    otpRecord.status = false;
+    await otpRecord.save();
+
+    return res.json(ApiResponse("1", "Password updated successfully!", {}));
+  } catch (error) {
+    console.error("change_password_after_otp error:", error);
+    return res.json(ApiResponse("0", error.message || "Something went wrong", {}));
   }
-
-  // 2. Verify OTP was recently generated (within 10 minutes)
-  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-  if (!otpRecord.requestAt || otpRecord.requestAt < tenMinutesAgo) {
-    const response = ApiResponse("0", "OTP has expired. Please request a new one.", {});
-    return res.json(response);
-  }
-
-  // 3. Verify OTP status is valid
-  if (!otpRecord.status) {
-    const response = ApiResponse("0", "OTP has already been used.", {});
-    return res.json(response);
-  }
-
-  // 4. Find user and update password
-  const user = await User.findOne({ where: { email: email } });
-  if (!user) {
-    const response = ApiResponse("0", "User not exists!", {});
-    return res.json(response);
-  }
-
-  const salt = await bcrypt.genSalt(10);
-  user.password = await bcrypt.hash(password, salt);
-  user.save()
-    .then(async (dat) => {
-      // 5. Invalidate OTP after successful password change
-      otpRecord.status = false;
-      await otpRecord.save();
-      const response = ApiResponse("1", "Password updated successfully!", {});
-      return res.json(response);
-    })
-    .catch((error) => {
-      const response = ApiResponse("0", error.message, {});
-      return res.json(response);
-    });
 }
 async function get_profile(req, res) {
   const user = await User.findOne({
@@ -1030,6 +1074,8 @@ module.exports = {
   registration,
   login,
   forget_password,
+  verify_otp,
+  resend_otp,
   change_password,
   change_password_after_otp,
   update_profile,
