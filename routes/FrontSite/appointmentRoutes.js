@@ -19,10 +19,14 @@ const { validateToken } = require("../../middlewares/AuthorizationMW");
 
 // // Delete an appointment by ID (requires authentication)
 // router.delete('/:id', authenticate, appointmentController.deleteAppointment);
- router.get("/rescheduled/appointments/:reschedule", appointmentController.getAllRescheduledAppointments);
+ router.get("/rescheduled/appointments/:reschedule/:dietitianId", appointmentController.getAllRescheduledAppointments);
 
  router.get("/status", appointmentController.getAllAppointmentStatus);
 
+// User-facing counterpart to /dietAppointments/:id below — the caller's
+// own current active booking, for the Diet tab's "your booked
+// consultation" card. Registered before the generic "/:id" route.
+ router.get("/me/current", validateToken, consultationBookingController.getMyCurrentAppointment);
 
 // Route to get all appointments
  router.get("/dietAppointments/:id", appointmentController.getAllAppointments);
@@ -39,6 +43,11 @@ const { validateToken } = require("../../middlewares/AuthorizationMW");
 // User reports the dietitian didn't show up. Auth-gated; controller
 // enforces ownership. Opens a CONSULT_NO_SHOW escalation. Phase 1B addition.
  router.post("/:id/no-show", validateToken, consultationBookingController.reportNoShow);
+
+// User-initiated cancel (ownership-checked, only from pending/confirmed).
+// Distinct from the dietitian-facing PUT /:id below, which trusts the
+// caller and allows any status transition.
+ router.post("/:id/cancel", validateToken, consultationBookingController.cancelMyAppointment);
 
 // Per-consultation review by the client. Auth-gated; the controller
 // enforces that req.user.id matches the appointment's userId.

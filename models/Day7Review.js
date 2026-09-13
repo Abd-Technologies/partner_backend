@@ -92,6 +92,25 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: [],
       },
+
+      // ── Staff acknowledgment (separate from the computed `flagged`
+      // fact above) ───────────────────────────────────────────────────
+      // `flagged` is recomputed from raw fields on every save by the
+      // beforeSave hook below, so it can never be directly "cleared" —
+      // the next save would just re-derive it back to true. These two
+      // columns record "a human dealt with this" independently, the
+      // same way PendingPopupState.completedAt records completion
+      // without touching the eligibility computation. Set together by
+      // escalationAdminController.js::resolveTicket when a REVIEW_FLAG
+      // ticket is resolved. NULL means still open/unaddressed.
+      flagResolvedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      flagResolvedBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
     },
     {
       tableName: 'Day7Reviews',

@@ -2,6 +2,7 @@ const {
   MEAL_TEMPLATES,
   VALID_MEAL_TYPES,
 } = require('../constants/mealTemplates');
+const { parseAllergyKeywords } = require('../utils/allergies');
 
 const TIME_PATTERN = /^\d{2}:\d{2}$/;
 
@@ -41,10 +42,10 @@ function validateDietPlan(plan, user, planDays) {
   const expectedTypes = MEAL_TEMPLATES[user.mealsPerDay] || [];
   const expectedTypeSet = new Set(expectedTypes);
 
-  const allergyKeywords = (user.allergies || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+  // Shared with dietPlanPrompt.js so the prompt and this check never
+  // drift apart — see utils/allergies.js for why short fragments (e.g.
+  // a stray "g") are dropped.
+  const allergyKeywords = parseAllergyKeywords(user.allergies);
 
   for (const day of plan.days || []) {
     const dayLabel = `Day ${day && day.dayNumber}`;

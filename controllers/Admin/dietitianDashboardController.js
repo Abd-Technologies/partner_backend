@@ -1,6 +1,7 @@
 const { Op, fn, col, literal } = require("sequelize");
 const { Appointment, User, AppointmentReview, sequelize } = require("../../models");
 const ApiResponse = require("../../helper/ApiResponse");
+const { isUnscopedRole } = require("../../helper/dietitianScope");
 
 // Default range = last 30 days, anchored to UTC. Caller can override
 // with from/to query params (YYYY-MM-DD). Range is inclusive on both
@@ -27,7 +28,15 @@ function parseRange(req) {
 // "On time" = manually completed (the dietitian clicked End before the
 // cron's grace window expired). "Ran over" = cron-completed.
 exports.getDietitianConsultationDashboard = async (req, res) => {
-  const { dietitianId } = req.params;
+  // Scoped to the logged-in staff member: previously this trusted the
+  // :dietitianId URL param outright, so any dietitian could view any
+  // other dietitian's consultation stats and reviews just by changing
+  // the id. Only an Admin may look up an arbitrary dietitian this way;
+  // everyone else always gets their own dashboard regardless of what's
+  // in the URL.
+  const dietitianId = isUnscopedRole(req.user && req.user.userType)
+    ? req.params.dietitianId
+    : req.user && req.user.id;
   if (!dietitianId) {
     return res.json(ApiResponse("0", "dietitianId is required", {}));
   }

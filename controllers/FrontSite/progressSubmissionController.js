@@ -121,6 +121,50 @@ exports.submit = async (req, res) => {
   }
 };
 
+// GET /users/progress/previous?userPlanId=&cycle=15|30
+// Section 9: "previous values pre-filled for comparison". Day 15 is the
+// user's FIRST checkpoint on this plan — there's no earlier
+// ProgressSubmission to compare against, so cycle=15 always returns
+// { previous: null } (this is expected, not an error; the client just
+// shows blank fields with no "Last: ..." ghost text). Day 30's previous
+// values are the same plan's cycle:15 row.
+exports.getPrevious = async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
+
+    const userPlanId = parseInt(req.query.userPlanId, 10);
+    const cycle = parseInt(req.query.cycle, 10);
+    if (!Number.isInteger(userPlanId) || userPlanId <= 0) {
+      return res.json(ApiResponse("0", "Invalid userPlanId", {}));
+    }
+    if (!VALID_CYCLES.has(cycle)) {
+      return res.json(ApiResponse("0", "cycle must be 15 or 30", {}));
+    }
+
+    const plan = await UserPlan.findOne({ where: { id: userPlanId, userId } });
+    if (!plan) return res.json(ApiResponse("0", "Plan not found", {}));
+
+    if (cycle === 15) {
+      // No earlier checkpoint exists on this plan yet.
+      return res.json(ApiResponse("1", "No previous checkpoint", { previous: null }));
+    }
+
+    const prior = await ProgressSubmission.findOne({
+      where: { userPlanId, cycle: 15 },
+    });
+
+    return res.json(
+      ApiResponse("1", "Previous progress fetched", {
+        previous: prior ? prior.toJSON() : null,
+      })
+    );
+  } catch (err) {
+    console.error("[progress] getPrevious:", err);
+    return res.json(ApiResponse("0", "Failed to fetch previous progress", {}));
+  }
+};
+
 // GET /admin/users/:userId/progress
 // Lists a user's progress submissions ordered most-recent first. Used by
 // the dietitian dashboard during the Day 15 / Day 30 follow-up.

@@ -49,9 +49,54 @@ module.exports = (sequelize, DataTypes) => {
       // Free-form context the popup needs at render time (e.g. cycle
       // number, plan id, draft pre-fill). Kept small — capped at ~4 KB
       // per row by the controller writers.
+      //
+      // IMPORTANT — MariaDB compatibility workaround (root cause of the
+      // 2026-09-13 metadata corruption incident):
+      // This app connects via Sequelize's `mysql` dialect (mysql2 driver)
+      // pointed at a MariaDB server (XAMPP). Real MySQL reports a JSON
+      // column's protocol type code as JSON, which is what makes
+      // Sequelize's automatic read-side `JSON.parse()` fire. MariaDB's
+      // JSON type is only a CHECK-constrained alias for LONGTEXT — over
+      // the wire it reports as a plain text/blob type, so Sequelize's
+      // auto-parse never triggers and `instance.metadata` can silently
+      // come back as the raw JSON-encoded STRING instead of an object.
+      // Helper code across this codebase does `{ ...recent.metadata }` to
+      // merge metadata forward (see helper/popupEligibility.js and
+      // controllers/FrontSite/popupStateController.js) — spreading a
+      // STRING in JS doesn't throw, it silently produces an object keyed
+      // by character index ({"0":"{","1":"\"",...}). Re-stringifying and
+      // re-storing that on every dashboard reload compounds explosively
+      // (each generation's JSON text is ~7-10x longer than the last),
+      // which is exactly what produced a 2.8-million-character value and
+      // then an ECONNRESET on the next query against this table.
+      //
+      // Fix: a custom getter that coerces a string value back into a
+      // parsed object (or null) every time, regardless of whether the
+      // driver already auto-parsed it. This makes `.metadata` safe to
+      // spread everywhere, on both MySQL and MariaDB.
       metadata: {
         type: DataTypes.JSON,
         allowNull: true,
+        get() {
+          const raw = this.getDataValue('metadata');
+          if (typeof raw === 'string') {
+            if (raw === '') return null;
+            try {
+              return JSON.parse(raw);
+            } catch (e) {
+              console.error(
+                '[PendingPopupState] corrupt metadata JSON, id=',
+                this.getDataValue('id'),
+                e
+              );
+              return null;
+            }
+          }
+          return raw;
+        },
+        set(value) {
+          this.setDataValue('metadata', value);
+        },
       },
     },
     {

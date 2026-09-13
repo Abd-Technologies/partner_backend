@@ -16,6 +16,15 @@ const VALID_STATUSES = ['draft', 'active', 'completed', 'cancelled'];
 
 const { User, PreConsultationProfile, DietPlan, DietPlanDay, DietPlanMeal } = db;
 
+// ── Calorie target estimate ───────────────────────────────────────────
+// Moved to services/ai/utils/calorieTarget.js so the trial quick-intake
+// path (trialDietPlanController.js) computes targetCalories the exact
+// same way instead of carrying its own copy that could drift — same
+// reasoning as the shared allergy-keyword parsing in utils/allergies.js.
+// Every draft from this controller still goes through the dietitian for
+// review before activation.
+const { computeTargetCalories } = require('../../services/ai/utils/calorieTarget');
+
 /**
  * POST /admin/diet-plan/generate
  * Body: { userId, userPlanId, planDays = 7, mealsPerDay }
@@ -56,7 +65,6 @@ async function generateDietPlanDraft(req, res) {
 
     // TODO Phase D: pull most recent UserCycleData for cyclePhase.
     // TODO Phase D: derive cuisinePreference from profile.dietaryPreferences.
-    // TODO Phase D: compute targetCalories from goal/weight/activity.
     const userInput = {
       id: user.id,
       firstName: user.firstName || 'User',
@@ -66,14 +74,20 @@ async function generateDietPlanDraft(req, res) {
       // prompt builder coerce / Gemini accept the value as-is.
       weightKg: user.weight,
       heightCm: user.height,
-      goal: user.mainGoal || 'general wellness',
+      goal: profile.goals || user.mainGoal || 'general wellness',
       cyclePhase: 'follicular',
       hasPcos: ((profile.medicalConditions || '') + ' ' + (user.healthConditions || ''))
         .toLowerCase()
         .includes('pcos'),
       allergies: profile.allergies || '',
       cuisinePreference: 'Pakistani',
-      targetCalories: 1500,
+      targetCalories: computeTargetCalories({
+        weightKg: user.weight,
+        heightCm: user.height,
+        age: user.age,
+        lifestyle: profile.lifestyle,
+        goalKey: profile.goals || user.mainGoal,
+      }),
       mealsPerDay: mealsPerDay || profile.mealsPerDay || 5,
     };
 
