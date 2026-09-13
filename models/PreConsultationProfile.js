@@ -126,6 +126,18 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+
+      // 'trial_quick' when this profile (or its most recent update) came
+      // from the trimmed 3-field trial quick-intake form rather than the
+      // full dietitian-facing consultation. NULL for every profile that
+      // came from the real consultation flow (the only source before
+      // this column existed, and still the default going forward). Lets
+      // an "upgrade to paid" flow later tell a trial convert still owes
+      // a full consultation instead of trusting isComplete=true blindly.
+      intakeSource: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
     },
     {
       tableName: 'PreConsultationProfiles',

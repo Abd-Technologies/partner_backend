@@ -1,5 +1,24 @@
 const ApiResponse = require("../../helper/ApiResponse");
 const { PreConsultationProfile, User } = require("../../models");
+const {
+  getAssignedClientIds,
+  isUnscopedRole,
+} = require("../../helper/dietitianScope");
+
+// Scoping guard shared by all three handlers below. Admin bypasses;
+// every other staff type (Dietition, Trainer, Gynecologist,
+// Psychiatrist) may only view/edit/comment on a profile belonging to
+// one of their own assigned clients — previously any non-User login
+// could read or edit ANY client's full health profile just by putting
+// a different userId in the URL. Returns the same "Profile not found"
+// shape the handlers already use on a miss, so this doesn't confirm to
+// a prober that a given userId exists and simply belongs to someone
+// else's client.
+async function assertOwnsProfile(req, targetId) {
+  if (isUnscopedRole(req.user && req.user.userType)) return true;
+  const assignedIds = await getAssignedClientIds(req.user && req.user.id);
+  return assignedIds.has(targetId);
+}
 
 // Same whitelist as the user-side controller PLUS none — dietitians can
 // edit any health/lifestyle field captured during the consultation. They
@@ -56,6 +75,9 @@ exports.getProfile = async (req, res) => {
     if (!Number.isInteger(targetId) || targetId <= 0) {
       return res.json(ApiResponse("0", "Invalid userId", {}));
     }
+    if (!(await assertOwnsProfile(req, targetId))) {
+      return res.json(ApiResponse("0", "Profile not found", {}));
+    }
     const profile = await PreConsultationProfile.findOne({
       where: { userId: targetId },
     });
@@ -80,6 +102,9 @@ exports.updateProfile = async (req, res) => {
     const targetId = parseInt(req.params.userId, 10);
     if (!Number.isInteger(targetId) || targetId <= 0) {
       return res.json(ApiResponse("0", "Invalid userId", {}));
+    }
+    if (!(await assertOwnsProfile(req, targetId))) {
+      return res.json(ApiResponse("0", "Profile not found", {}));
     }
     const profile = await PreConsultationProfile.findOne({
       where: { userId: targetId },
@@ -112,6 +137,9 @@ exports.addComment = async (req, res) => {
     const text = req.body && req.body.text;
     if (typeof text !== "string" || !text.trim()) {
       return res.json(ApiResponse("0", "Comment text required", {}));
+    }
+    if (!(await assertOwnsProfile(req, targetId))) {
+      return res.json(ApiResponse("0", "Profile not found", {}));
     }
     const profile = await PreConsultationProfile.findOne({
       where: { userId: targetId },

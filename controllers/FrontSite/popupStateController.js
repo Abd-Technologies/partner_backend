@@ -73,6 +73,62 @@ exports.dismissPopup = async (req, res) => {
   }
 };
 
+// POST /users/popup/:variable/snooze
+// Body: optional { days: 1 } (default 1). "Remind me tomorrow" — pushes
+// eligibleAt forward so listForUser (eligibleAt <= now) hides the popup
+// until it expires, WITHOUT touching dismissCount. That's the deliberate
+// difference from dismiss: dismiss means "I saw this and don't want it
+// right now" (counts toward the eventual staff escalation), snooze means
+// "come back later" (a neutral, explicit reschedule, not a nag signal).
+// The matching eligibility evaluator must also respect metadata
+// .snoozedUntil, or its own next setEligible() call will just overwrite
+// this back to "now" on the next dashboard fetch.
+exports.snoozePopup = async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
+
+    const variable = req.params.variable;
+    if (!KNOWN_POPUPS.has(variable)) {
+      return res.json(ApiResponse("0", "Unknown popup variable", {}));
+    }
+
+    const daysRaw = req.body && req.body.days;
+    const days =
+      Number.isFinite(Number(daysRaw)) && Number(daysRaw) > 0
+        ? Number(daysRaw)
+        : 1;
+    const snoozedUntil = new Date(Date.now() + days * 86400000);
+
+    let state = await findActiveState(userId, variable);
+    if (!state) {
+      state = await PendingPopupState.create({
+        userId,
+        popupVariable: variable,
+        eligibleAt: snoozedUntil,
+        lastShownAt: new Date(),
+        metadata: { snoozedUntil: snoozedUntil.toISOString() },
+      });
+    } else {
+      await state.update({
+        eligibleAt: snoozedUntil,
+        lastShownAt: new Date(),
+        metadata: {
+          ...(state.metadata || {}),
+          snoozedUntil: snoozedUntil.toISOString(),
+        },
+      });
+    }
+
+    return res.json(
+      ApiResponse("1", "Popup snoozed", { state: state.toJSON() })
+    );
+  } catch (err) {
+    console.error("[popupState] snoozePopup:", err);
+    return res.json(ApiResponse("0", "Failed to snooze popup", {}));
+  }
+};
+
 // POST /users/popup/:variable/complete
 // Stamps completedAt; the row becomes frozen history. Subsequent
 // eligibility passes that need to fire the same popup again (next cycle)

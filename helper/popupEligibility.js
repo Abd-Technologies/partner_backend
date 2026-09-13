@@ -184,8 +184,15 @@ async function evalPreConsultationForm(user, plans) {
 }
 
 async function evalBookInitialReminder(user, plans) {
-  // Every 2 days while the initial consultation isn't booked, max 5.
-  // After 5 dismissals → BOOKING_REMINDER_5X escalation.
+  // Updated product direction: resurface on EVERY dashboard load while
+  // the initial consultation isn't booked — no fixed cadence — until
+  // the user either books or explicitly taps "Remind me tomorrow"
+  // (POST /users/popup/:variable/snooze, handled below via
+  // metadata.snoozedUntil). Closing the sheet with the plain "x" does
+  // NOT suppress it — that's the whole point of "every time it
+  // reloads". dismissCount still accumulates (from the dismiss
+  // endpoint, if anything still calls it) purely as a staff-escalation
+  // signal at 5, decoupled from whether the popup keeps showing.
   const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
 
@@ -195,7 +202,25 @@ async function evalBookInitialReminder(user, plans) {
       status: { [Op.in]: ["pending", "confirmed", "In Progress", "completed"] },
     },
   });
-  if (initial) return;
+  if (initial) {
+    // Booked since the last time this ran. Nothing else ever marks this
+    // popup completed (see the doc comment on book_initial_reminder_sheet
+    // .dart's "Book now" button — it deliberately doesn't call
+    // completePopup), so without this, a row that was already eligible
+    // stays eligible (completedAt stays null) forever and listForUser
+    // keeps returning it even after the user has booked. Retire it here.
+    await PendingPopupState.update(
+      { completedAt: new Date() },
+      {
+        where: {
+          userId: user.id,
+          popupVariable: "POPUP_BOOK_INITIAL_REMINDER",
+          completedAt: null,
+        },
+      }
+    );
+    return;
+  }
 
   const purchaseDate = dietOrCombined.buyingDate;
   if (!purchaseDate) return;
@@ -210,39 +235,49 @@ async function evalBookInitialReminder(user, plans) {
     order: [["createdAt", "DESC"]],
   });
 
-  if (recent && recent.dismissCount >= MAX_BOOKING_REMINDERS) {
-    // Trip the 5x escalation once, then stop nagging.
-    if (!recent.metadata || !recent.metadata.escalated) {
-      try {
-        await createEscalation({
-          userId: user.id,
-          dietitianId: null,
-          trigger: "BOOKING_REMINDER_5X",
-          severity: "medium",
-          payload: { userPlanId: dietOrCombined.id },
-        });
-        await recent.update({
-          metadata: { ...(recent.metadata || {}), escalated: true },
-        });
-      } catch (e) {
-        console.error("[popupEligibility] BOOKING_REMINDER_5X escalate:", e);
-      }
-    }
+  // Respect an explicit "Remind me tomorrow" snooze. Must check this
+  // BEFORE calling setEligible below — otherwise setEligible would see
+  // eligibleAt differs from "now" and immediately overwrite the snooze.
+  const snoozedUntil = recent && recent.metadata && recent.metadata.snoozedUntil;
+  if (snoozedUntil && moment(snoozedUntil).isAfter(nowPkt())) {
     return;
   }
 
-  // Re-eligible cadence: every 2 days since lastShownAt.
-  const lastShown = recent && recent.lastShownAt;
-  if (lastShown) {
-    const daysSinceShown = daysSince(lastShown);
-    if (daysSinceShown < 2) return;
+  if (
+    recent &&
+    recent.dismissCount >= MAX_BOOKING_REMINDERS &&
+    (!recent.metadata || !recent.metadata.escalated)
+  ) {
+    // One-time "this user has ignored 5 reminders" flag to staff. Does
+    // NOT stop the popup from continuing to show — only an explicit
+    // snooze or actually booking does that now.
+    try {
+      await createEscalation({
+        userId: user.id,
+        dietitianId: null,
+        trigger: "BOOKING_REMINDER_5X",
+        severity: "medium",
+        payload: { userPlanId: dietOrCombined.id },
+      });
+      await recent.update({
+        metadata: { ...(recent.metadata || {}), escalated: true },
+      });
+    } catch (e) {
+      console.error("[popupEligibility] BOOKING_REMINDER_5X escalate:", e);
+    }
   }
 
+  // setEligible REPLACES metadata wholesale (not a merge) — spread the
+  // existing row's metadata forward so the `escalated` flag just set
+  // above (and any `snoozedUntil` from a prior, now-expired snooze)
+  // survives this call. Without this, the escalation above would
+  // silently get wiped on every dashboard load and re-fire every time
+  // dismissCount stays >= 5.
   await setEligible(
     user.id,
     "POPUP_BOOK_INITIAL_REMINDER",
     nowPkt().toDate(),
-    { userPlanId: dietOrCombined.id }
+    { ...(recent && recent.metadata ? recent.metadata : {}), userPlanId: dietOrCombined.id }
   );
 }
 
@@ -314,7 +349,11 @@ async function evalDay7Review(user, plans) {
 }
 
 async function evalDay15Progress(user, plans) {
-  const plan = plans.find((p) => p.firstPlanDeliveredAt);
+  // Guardrail: trial-tier UserPlans (see models/UserPlan.js isTrial) are
+  // free system placeholders, not a paid subscription cycle — they
+  // shouldn't get the "submit your Day 15 progress" nudge that assumes
+  // a paying, renewing customer.
+  const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
   const since = daysSince(plan.firstPlanDeliveredAt);
   if (since == null || since < DAY15_OFFSET) return;
@@ -324,16 +363,24 @@ async function evalDay15Progress(user, plans) {
   });
   if (existing) return;
 
+  // planType drives which section the client shows (diet questions vs.
+  // strength/stamina notes vs. both) — without it the sheet defaulted to
+  // 'diet' for everyone, so a workout-only user never saw the section
+  // that actually applies to them.
   await setEligible(
     user.id,
     "POPUP_DAY15_PROGRESS",
     nowPkt().toDate(),
-    { userPlanId: plan.id, cycle: 15 }
+    { userPlanId: plan.id, cycle: 15, planType: (plan.Plan && plan.Plan.planType) || "diet" }
   );
 }
 
 async function evalBookFollowup(user, plans) {
-  const plan = plans.find((p) => p.firstPlanDeliveredAt);
+  // Guardrail: see evalDay15Progress — a trial plan's Day 15 progress
+  // never fires, so this (gated on a Day 15 ProgressSubmission existing)
+  // would already never trigger for one either. Excluded explicitly too
+  // so that stays true even if the evaluator order above ever changes.
+  const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
 
   const day15 = await ProgressSubmission.findOne({
@@ -359,7 +406,8 @@ async function evalBookFollowup(user, plans) {
 }
 
 async function evalDay30Progress(user, plans) {
-  const plan = plans.find((p) => p.firstPlanDeliveredAt);
+  // Guardrail: see evalDay15Progress.
+  const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
   const since = daysSince(plan.firstPlanDeliveredAt);
   if (since == null || since < DAY30_OFFSET) return;
@@ -373,12 +421,14 @@ async function evalDay30Progress(user, plans) {
     user.id,
     "POPUP_DAY30_PROGRESS",
     nowPkt().toDate(),
-    { userPlanId: plan.id, cycle: 30 }
+    { userPlanId: plan.id, cycle: 30, planType: (plan.Plan && plan.Plan.planType) || "diet" }
   );
 }
 
 async function evalRenewPlan(user, plans) {
-  const plan = plans.find((p) => p.firstPlanDeliveredAt);
+  // Guardrail: "renew your plan" makes no sense for a free trial's
+  // system-placeholder UserPlan — see evalDay15Progress.
+  const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
 
   const day30 = await ProgressSubmission.findOne({

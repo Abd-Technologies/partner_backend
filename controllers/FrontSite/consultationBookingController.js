@@ -1,12 +1,25 @@
 const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
 const { createEscalation } = require("../../helper/escalation");
+const sendNotification = require("../../helper/notification");
 const {
   Appointment,
   PendingPopupState,
   SlotDiet,
   TimeDietition,
+  User,
 } = require("../../models");
+
+// Sequelize's DATE column comes back as a native JS Date instance for this
+// dialect config — `String(date)` (used elsewhere in this file for the
+// DATEONLY-shaped blockedSet keys) gives the human `Date#toString()` form,
+// not an ISO date. Booking-context responses need the real YYYY-MM-DD, so
+// this helper handles both a Date instance and an already-string value.
+function toIsoDate(d) {
+  if (!d) return null;
+  if (d instanceof Date) return d.toISOString().slice(0, 10);
+  return String(d).slice(0, 10);
+}
 
 // Matches SLOT_WEEKDAY_NAMES in controllers/Admin/AdminController.js —
 // index = JS Date#getUTCDay(), and TimeDietition.day is stored as one of
@@ -66,7 +79,7 @@ exports.getDietitianAvailability = async (req, res) => {
     });
 
     const blockedSet = new Set(
-      blockingAppts.map((a) => `${a.timeSlotId}|${String(a.date).slice(0, 10)}`)
+      blockingAppts.map((a) => `${a.timeSlotId}|${toIsoDate(a.date)}`)
     );
 
     // Walk every date in [from, to], emit one entry per template that
@@ -176,5 +189,147 @@ exports.reportNoShow = async (req, res) => {
   } catch (err) {
     console.error("[consultationBooking] reportNoShow:", err);
     return res.json(ApiResponse("0", "Failed to report no-show", {}));
+  }
+};
+
+// GET /appointment/me/current
+// Auth: validateToken
+//
+// User-facing counterpart to the dietitian-only GET
+// /appointment/dietAppointments/:id. Returns the caller's single most
+// relevant ACTIVE (pending/confirmed/In Progress) consultation booking,
+// if any, so the Diet tab can render a "your booked consultation" card
+// with Reschedule/Cancel actions. Ordered by date ascending — soonest
+// upcoming booking wins. In normal use a user only ever holds one active
+// booking at a time (createAppointment blocks double-booking the same
+// slot+date, and the empty-state CTA only appears when there's none),
+// but this doesn't assume that — it just picks the most relevant one.
+//
+// Never a hard error for "nothing booked" — { appointment: null } is a
+// normal, expected response shape.
+exports.getMyCurrentAppointment = async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
+
+    const appt = await Appointment.findOne({
+      where: {
+        userId,
+        status: { [Op.in]: ["pending", "confirmed", "In Progress"] },
+      },
+      include: [
+        { model: SlotDiet, attributes: ["id", "start", "end"] },
+        // Unaliased on purpose — Appointment.belongsTo(User, {foreignKey:
+        // 'dietitionId'}) is the only un-aliased User association on this
+        // model (the client side is aliased "ClientUser"), so `{model:
+        // User}` resolves to the dietitian.
+        { model: User, attributes: ["id", "firstName", "lastName"] },
+      ],
+      order: [["date", "ASC"]],
+    });
+
+    if (!appt) {
+      return res.json(
+        ApiResponse("1", "No active appointment", { appointment: null })
+      );
+    }
+
+    const dietitian = appt.User || null;
+    const dietitianName = dietitian
+      ? `${dietitian.firstName || ""} ${dietitian.lastName || ""}`.trim()
+      : null;
+
+    return res.json(
+      ApiResponse("1", "Appointment fetched", {
+        appointment: {
+          id: appt.id,
+          date: toIsoDate(appt.date),
+          status: appt.status,
+          kind: appt.kind,
+          userId: appt.userId,
+          userPlanId: appt.planId,
+          dietitianId: appt.dietitionId,
+          dietitianName: dietitianName || null,
+          slotStart: appt.SlotDiet ? appt.SlotDiet.start : null,
+          slotEnd: appt.SlotDiet ? appt.SlotDiet.end : null,
+        },
+      })
+    );
+  } catch (err) {
+    console.error("[consultationBooking] getMyCurrentAppointment:", err);
+    return res.json(ApiResponse("0", "Failed to fetch appointment", {}));
+  }
+};
+
+// POST /appointment/:id/cancel
+// Auth: validateToken
+//
+// User-initiated cancel. Distinct from the dietitian-facing PUT
+// /appointment/:id (appointmentController.updateAppointment), which
+// writes whatever status the caller sends with no ownership check at
+// all — this endpoint is the properly-guarded counterpart for the
+// client side: verifies req.user.id owns the appointment, and only
+// allows the transition from a state the user can actually still back
+// out of. Once a session is "In Progress" the dietitian owns the state
+// transition; completed/already-canceled rows are a no-op error rather
+// than silently rewriting history.
+exports.cancelMyAppointment = async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
+
+    const apptId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(apptId) || apptId <= 0) {
+      return res.json(ApiResponse("0", "Invalid appointment id", {}));
+    }
+
+    const appt = await Appointment.findByPk(apptId);
+    if (!appt) return res.json(ApiResponse("0", "Appointment not found", {}));
+    if (appt.userId !== userId) {
+      return res.json(ApiResponse("0", "Not your appointment", {}));
+    }
+    if (!["pending", "confirmed"].includes(appt.status)) {
+      return res.json(
+        ApiResponse(
+          "0",
+          `Cannot cancel an appointment in status "${appt.status}".`,
+          {}
+        )
+      );
+    }
+
+    appt.status = "canceledByUser";
+    appt.completed_by = userId;
+    appt.status_changed_at = new Date();
+    await appt.save();
+
+    try {
+      const [dietitian, user] = await Promise.all([
+        User.findByPk(appt.dietitionId),
+        User.findByPk(userId),
+      ]);
+      if (dietitian && dietitian.deviceToken) {
+        const clientName = user
+          ? `${user.firstName || ""} ${user.lastName || ""}`.trim()
+          : "A client";
+        await sendNotification(
+          [dietitian.deviceToken],
+          {
+            title: "Appointment Canceled",
+            body: `${clientName} canceled their appointment on ${toIsoDate(appt.date)}.`,
+          },
+          { type: "appointmentCanceledByUser" }
+        );
+      }
+    } catch (e) {
+      console.error("[consultationBooking] cancel notify failed:", e);
+    }
+
+    return res.json(
+      ApiResponse("1", "Appointment canceled", { appointment: appt.toJSON() })
+    );
+  } catch (err) {
+    console.error("[consultationBooking] cancelMyAppointment:", err);
+    return res.json(ApiResponse("0", "Failed to cancel appointment", {}));
   }
 };

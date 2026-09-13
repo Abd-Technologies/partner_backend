@@ -169,6 +169,34 @@ async function createEscalation({
   return ticket;
 }
 
+// Best-effort notification back to the CLIENT once her flagged Day 7
+// review has been staff-acknowledged. This is the other direction from
+// everything above (which fans out TO the dietitian/admin) — it closes
+// the loop back to the user who submitted the review. Called from
+// escalationAdminController.js::resolveTicket. Failure here must never
+// block the resolve action itself, so this always resolves rather than
+// throwing — callers just get `false` back on any problem.
+async function notifyClientFlagResolved(userId) {
+  try {
+    const user = await User.findByPk(userId, {
+      attributes: ["deviceToken"],
+    });
+    const tok = user && user.deviceToken;
+    if (!tok) return false;
+    await queueNotification(
+      [tok],
+      "Your check-in has been reviewed",
+      "Your dietitian looked into what you flagged in your last check-in. Tap to see your plan.",
+      { kind: "review_flag_resolved" }
+    );
+    return true;
+  } catch (e) {
+    console.error("[escalation] client resolve-notify failed:", e);
+    return false;
+  }
+}
+
 module.exports = {
   createEscalation,
+  notifyClientFlagResolved,
 };
