@@ -1,4 +1,5 @@
 const { MEAL_TEMPLATES } = require('../constants/mealTemplates');
+const { parseAllergyKeywords } = require('../utils/allergies');
 
 /**
  * Build the prompt sent to Gemini for diet-plan generation.
@@ -34,6 +35,21 @@ function buildDietPlanPrompt(user, planDays) {
   const mealTypesList = mealTypes.join(', ');
   const mealTypesPipe = mealTypes.join(' | ');
 
+  // Same filter dietPlanValidator.js checks the response against (see
+  // utils/allergies.js) — applied here too so Gemini is never told to
+  // treat a stray fragment like "g" as a literal ingredient to avoid.
+  // That exact bug previously made it into a plan's own summary text
+  // ("...while strictly avoiding any foods containing the letter 'g'
+  // to ensure safety and well-being"), which is both meaningless and
+  // alarming for a dietitian to read.
+  const allergyKeywords = parseAllergyKeywords(user.allergies);
+  const allergyList = allergyKeywords.length
+    ? allergyKeywords.join(', ')
+    : 'None reported';
+  const allergyRequirement = allergyKeywords.length
+    ? `NEVER include foods containing any of: ${allergyList}.`
+    : 'No known allergies reported for this client — no exclusions needed on that front.';
+
   return `You are an expert women's wellness dietitian assistant for Fit Her, a Pakistan-based wellness app. Generate a personalized ${planDays}-day diet plan for this user.
 
 USER DATA:
@@ -44,7 +60,7 @@ USER DATA:
 - Goal: ${user.goal}
 - Current cycle phase: ${user.cyclePhase}
 - PCOS: ${user.hasPcos ? 'Yes' : 'No'}
-- Allergies: ${user.allergies}
+- Allergies: ${allergyList}
 - Cuisine preference: ${user.cuisinePreference}
 - Daily calorie target: ${user.targetCalories} kcal
 - Meals per day: ${user.mealsPerDay}
@@ -53,7 +69,7 @@ REQUIREMENTS:
 1. Exactly ${planDays} days, ${user.mealsPerDay} meals per day, in this order: ${mealTypesList}.
 2. Each day's totalCalories within ±150 of ${user.targetCalories}.
 3. Use authentic Pakistani / South Asian foods (daal, roti, sabzi, chicken curry, oats with banana, paratha).
-4. NEVER include foods containing any of: ${user.allergies}.
+4. ${allergyRequirement}
 5. Variety: avoid repeating the exact same meal on different days.
 6. Cycle-phase awareness:
    - luteal: more iron + magnesium (leafy greens, dark chocolate, lentils)

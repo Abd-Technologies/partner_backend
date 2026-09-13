@@ -1,8 +1,16 @@
 const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
-const { EscalationTicket, User } = require("../../models");
+const { EscalationTicket, User, Day7Review } = require("../../models");
+const { notifyClientFlagResolved } = require("../../helper/escalation");
+const { isUnscopedRole } = require("../../helper/dietitianScope");
 
 // GET /admin/escalations?status=open&trigger=&limit=&offset=
+//
+// Scoped to the logged-in staff member: only an Admin sees every
+// dietitian's tickets. Everyone else (Dietition, Trainer, Gynecologist,
+// Psychiatrist) only sees tickets addressed to them — before this,
+// validateAdmin's blocklist-only check meant any non-User login could
+// list every ticket for every dietitian.
 exports.listTickets = async (req, res) => {
   try {
     const where = {};
@@ -14,6 +22,9 @@ exports.listTickets = async (req, res) => {
     }
     if (typeof req.query.trigger === "string") {
       where.trigger = req.query.trigger;
+    }
+    if (!isUnscopedRole(req.user && req.user.userType)) {
+      where.dietitianId = req.user && req.user.id;
     }
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
@@ -66,6 +77,17 @@ exports.resolveTicket = async (req, res) => {
     const ticket = await EscalationTicket.findByPk(id);
     if (!ticket) return res.json(ApiResponse("0", "Ticket not found", {}));
 
+    // Same scoping as listTickets — a non-Admin can only resolve a
+    // ticket addressed to her. Returned as "not found" rather than a
+    // 403 so this doesn't confirm to a prober that a given ticket id
+    // exists and just belongs to someone else.
+    if (
+      !isUnscopedRole(req.user && req.user.userType) &&
+      ticket.dietitianId !== (req.user && req.user.id)
+    ) {
+      return res.json(ApiResponse("0", "Ticket not found", {}));
+    }
+
     if (ticket.status === "resolved") {
       return res.json(
         ApiResponse("0", "Ticket already resolved", { ticket: ticket.toJSON() })
@@ -83,6 +105,38 @@ exports.resolveTicket = async (req, res) => {
       resolvedBy: req.user && req.user.id,
       resolutionNote: note,
     });
+
+    // Close the flagged-review loop. Day7Review.flagged is recomputed
+    // from raw fields on every save (see the model's beforeSave hook),
+    // so resolving the ticket can't just write `flagged: false` — the
+    // next save would instantly re-derive it back to true. Instead we
+    // stamp the separate flagResolvedAt/flagResolvedBy pair (added
+    // alongside this change) that records staff acknowledgment without
+    // touching the computed flag, then best-effort tell the client
+    // someone looked at it. This never blocks the resolve response —
+    // the ticket is already resolved above regardless of what happens
+    // here.
+    if (
+      ticket.trigger === "REVIEW_FLAG" &&
+      ticket.payload &&
+      ticket.payload.reviewId
+    ) {
+      try {
+        const review = await Day7Review.findByPk(ticket.payload.reviewId);
+        if (review && review.flagged && !review.flagResolvedAt) {
+          await review.update({
+            flagResolvedAt: new Date(),
+            flagResolvedBy: req.user && req.user.id,
+          });
+          await notifyClientFlagResolved(review.userId);
+        }
+      } catch (e) {
+        console.error(
+          "[escalation/admin] flagged-review resolve step failed:",
+          e
+        );
+      }
+    }
 
     return res.json(
       ApiResponse("1", "Ticket resolved", { ticket: ticket.toJSON() })

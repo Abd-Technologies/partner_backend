@@ -1,7 +1,17 @@
-const { TimeDietition, SlotDiet, Plan, UserPlan, User, Appointment, sequelize } = require("../../models");
+const { TimeDietition, SlotDiet, Plan, UserPlan, User, Appointment, DietPlan, PdfDietsForUserNew, Day7Review, sequelize } = require("../../models");
 const axios = require('axios');
 const ApiResponse = require("../../helper/ApiResponse");
 const { Op } = require("sequelize");
+const { getAssignedClientIds } = require("../../helper/dietitianScope");
+
+// Matches the 2-day plan-delivery SLA language used elsewhere in the
+// product (see the Command Center audit / preConsultation flow docs).
+// Deliberately NOT reusing helper/popupEligibility.js's PLAN_DELAY_BREACH_DAYS
+// (3 days) or its delivered-check (PdfDietsForUserNew only) — that check
+// predates the AI DietPlan system and would wrongly call every AI-plan
+// client "delayed" forever, since no PDF row is ever created for them.
+// This one checks both delivery paths.
+const CLIENT_PLAN_OVERDUE_DAYS = 2;
 
 const NUTRITIONIX_APP_ID = "6e3756a6";
 const NUTRITIONIX_APP_KEY = "467773c332062e1af5bef60d027c49cc";
@@ -179,6 +189,25 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
     return res.json(ApiResponse("0", error.toString(), {}));
   }
 };
+// GET /users/diet/getClients/:id
+//
+// This used to return just a name and a buying/expiry date range — a
+// dietitian looking at it had no way to tell whether she still owed
+// someone a consultation or a plan. It also only found clients via
+// Plan.dietitianId (a package-level assignment), missing anyone
+// assigned through the newer per-UserPlan or per-DietPlan paths — see
+// helper/dietitianScope.js's getAssignedClientIds, now reused here so
+// this list is complete, not just re-sorted.
+//
+// Each client row now carries a computed `status` (highest-priority
+// one wins): FLAGGED (unresolved flagged Day 7 review) >
+// CONSULTATION_TODAY > PLAN_OVERDUE (consultation done,
+// CLIENT_PLAN_OVERDUE_DAYS+ with nothing delivered) > AWAITING_PLAN
+// (consultation done, nothing delivered yet, still inside the window)
+// > ON_TRACK (something's been delivered) > NEW (no consultation yet).
+// "Delivered" checks BOTH diet systems — an active/draft DietPlan (the
+// AI flow) or a PdfDietsForUserNew row (the legacy upload flow) —
+// because a client can be on either one.
 exports.getAllClients = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -188,30 +217,154 @@ exports.getAllClients = async (req, res, next) => {
     if (!req.user || Number(id) !== Number(req.user.id)) {
       return res.json(ApiResponse("0", "Forbidden", {}));
     }
-    // findAll, not findOne — a dietitian may own multiple plans.
-    // Prior version returned only the clients of whichever plan
-    // Sequelize happened to return first.
-    const plans = await Plan.findAll({
-      where: { dietitianId: id },
-      attributes: ["id"],
-    });
 
-    if (plans.length === 0) {
+    const assignedIds = [...(await getAssignedClientIds(id))];
+    if (assignedIds.length === 0) {
       return res.json(ApiResponse("0", "No Plan assigned to you yet", {}));
     }
 
-    const planIds = plans.map((p) => p.id);
-    const clients = await UserPlan.findAll({
-      where: { PlanId: { [Op.in]: planIds } },
-      attributes: ["id", "buyingDate", "expireDate", "PlanId"],
-      include: [
-        {
-          model: User,
-          attributes: ["id", "firstName", "lastName", "email"],
-        },
-      ],
-      order: [["buyingDate", "DESC"]],
-    });
+    const [userPlans, appts, dietPlans, pdfRows, flaggedReviews] =
+      await Promise.all([
+        UserPlan.findAll({
+          where: { userId: { [Op.in]: assignedIds } },
+          attributes: ["id", "userId", "buyingDate", "expireDate", "PlanId"],
+          include: [
+            {
+              model: User,
+              attributes: ["id", "firstName", "lastName", "email"],
+            },
+          ],
+          order: [["buyingDate", "DESC"]],
+        }),
+        Appointment.findAll({
+          where: { userId: { [Op.in]: assignedIds }, dietitionId: id },
+          attributes: ["id", "userId", "date", "status", "status_changed_at", "updatedAt"],
+          order: [["date", "DESC"]],
+        }),
+        DietPlan.findAll({
+          where: { userId: { [Op.in]: assignedIds }, dietitianId: id },
+          attributes: ["id", "userId"],
+        }),
+        PdfDietsForUserNew.findAll({
+          where: { userId: { [Op.in]: assignedIds } },
+          attributes: ["id", "userId"],
+        }),
+        Day7Review.findAll({
+          where: {
+            userId: { [Op.in]: assignedIds },
+            flagged: true,
+            flagResolvedAt: null,
+          },
+          attributes: ["id", "userId"],
+        }),
+      ]);
+
+    // Keep only the latest UserPlan per client (rows are already sorted
+    // buyingDate DESC, so the first one seen per userId wins). A client
+    // assigned only via a DietPlan/Appointment with no UserPlan row at
+    // all has no buying/expiry date to show and is left out below —
+    // same as the old query, which only ever looked at UserPlan rows.
+    const latestPlanByUser = new Map();
+    for (const up of userPlans) {
+      if (!latestPlanByUser.has(up.userId)) latestPlanByUser.set(up.userId, up);
+    }
+
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setUTCHours(23, 59, 59, 999);
+
+    const apptTodayByUser = new Map();
+    const lastCompletedByUser = new Map();
+    const CANCELED_STATUSES = new Set(["canceled", "canceledByUser"]);
+    for (const a of appts) {
+      const d = new Date(a.date);
+      if (
+        d >= todayStart &&
+        d <= todayEnd &&
+        !CANCELED_STATUSES.has(a.status) &&
+        !apptTodayByUser.has(a.userId)
+      ) {
+        apptTodayByUser.set(a.userId, a);
+      }
+      if (a.status === "completed" && !lastCompletedByUser.has(a.userId)) {
+        lastCompletedByUser.set(a.userId, a);
+      }
+    }
+
+    const deliveredUserIds = new Set([
+      ...dietPlans.map((p) => p.userId),
+      ...pdfRows.map((p) => p.userId),
+    ]);
+    const flaggedUserIds = new Set(flaggedReviews.map((r) => r.userId));
+
+    const clients = [];
+    for (const [userId, plan] of latestPlanByUser) {
+      const todayAppt = apptTodayByUser.get(userId);
+      const lastCompleted = lastCompletedByUser.get(userId);
+      const delivered = deliveredUserIds.has(userId);
+      const flagged = flaggedUserIds.has(userId);
+
+      let status = "NEW";
+      let statusDetail = "No consultation yet";
+
+      if (lastCompleted) {
+        if (delivered) {
+          status = "ON_TRACK";
+          statusDetail = "Plan delivered";
+        } else {
+          const since = Math.floor(
+            (Date.now() -
+              new Date(
+                lastCompleted.status_changed_at || lastCompleted.updatedAt
+              ).getTime()) /
+              86400000
+          );
+          if (since >= CLIENT_PLAN_OVERDUE_DAYS) {
+            status = "PLAN_OVERDUE";
+            statusDetail = `Consultation done ${since}d ago — plan not delivered yet`;
+          } else {
+            status = "AWAITING_PLAN";
+            statusDetail = "Consultation done — plan not delivered yet";
+          }
+        }
+      }
+      if (todayAppt) {
+        status = "CONSULTATION_TODAY";
+        statusDetail = "Consultation scheduled today";
+      }
+      if (flagged) {
+        status = "FLAGGED";
+        statusDetail = "Flagged Day 7 review needs attention";
+      }
+
+      const planJson = plan.toJSON();
+      clients.push({
+        id: planJson.id,
+        buyingDate: planJson.buyingDate,
+        expireDate: planJson.expireDate,
+        PlanId: planJson.PlanId,
+        User: planJson.User,
+        status,
+        statusDetail,
+        hasConsultationToday: !!todayAppt,
+        consultationTodayAt: todayAppt ? todayAppt.date : null,
+      });
+    }
+
+    // Most urgent first — flagged/today/overdue clients belong at the
+    // top of her list, not buried by whoever bought most recently.
+    const STATUS_ORDER = [
+      "FLAGGED",
+      "CONSULTATION_TODAY",
+      "PLAN_OVERDUE",
+      "AWAITING_PLAN",
+      "ON_TRACK",
+      "NEW",
+    ];
+    clients.sort(
+      (a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status)
+    );
 
     return res.json(ApiResponse("1", "Diet Client", { cliets: clients }));
   } catch (error) {

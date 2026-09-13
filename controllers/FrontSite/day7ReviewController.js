@@ -5,7 +5,48 @@ const {
   PendingPopupState,
   UserPlan,
   Plan,
+  DietPlan,
+  Appointment,
 } = require("../../models");
+
+// Same 3-step fallback as dietPlanController.js::getMyBookingContext,
+// kept local rather than shared so this file doesn't take on a
+// dependency on the booking-context endpoint's internals: prefer the
+// active DietPlan's own dietitianId, then the UserPlan/Plan's
+// dietitianId, then the most recent Appointment's dietitionId. Without
+// this, every REVIEW_FLAG escalation was created with dietitianId
+// hardcoded to null, which meant createEscalation's dietitian fan-out
+// (helper/escalation.js) silently never fired — only admin ever heard
+// about a flagged review.
+async function resolveDietitianId(userId, userPlanRow) {
+  const activeDietPlan = await DietPlan.findOne({
+    where: { userId, status: "active" },
+    attributes: ["id", "dietitianId"],
+    order: [
+      ["activatedAt", "DESC"],
+      ["createdAt", "DESC"],
+    ],
+  });
+  if (activeDietPlan && activeDietPlan.dietitianId) {
+    return activeDietPlan.dietitianId;
+  }
+
+  const userPlanDietitianId =
+    userPlanRow &&
+    (userPlanRow.dietitianId != null
+      ? userPlanRow.dietitianId
+      : (userPlanRow.Plan && userPlanRow.Plan.dietitianId) || null);
+  if (userPlanDietitianId) return userPlanDietitianId;
+
+  const appt = await Appointment.findOne({
+    where: { userId },
+    order: [
+      ["date", "DESC"],
+      ["createdAt", "DESC"],
+    ],
+  });
+  return appt ? appt.dietitionId : null;
+}
 
 const VALID_PLAN_TYPES = new Set(["diet", "workout", "combined"]);
 
@@ -69,7 +110,7 @@ exports.submitReview = async (req, res) => {
     // body forgery).
     const plan = await UserPlan.findOne({
       where: { id: userPlanId, userId },
-      include: [{ model: Plan, attributes: ["planType"] }],
+      include: [{ model: Plan, attributes: ["planType", "dietitianId"] }],
     });
     if (!plan) {
       return res.json(ApiResponse("0", "Plan not found", {}));
@@ -107,9 +148,10 @@ exports.submitReview = async (req, res) => {
     // per Section 12).
     if (review.flagged) {
       try {
+        const dietitianId = await resolveDietitianId(userId, plan);
         await createEscalation({
           userId,
-          dietitianId: null,
+          dietitianId,
           trigger: "REVIEW_FLAG",
           severity: "high",
           payload: {

@@ -1,6 +1,7 @@
 const ApiResponse = require("../../helper/ApiResponse");
 const { TrialJourney, TrialToken, Slot, User, FreeTrailUsers, sequelize } = require("../../models");
 const { computeState, computeNextBookableDay, isTrialExpired } = require("../../helper/trialState");
+const { ensureTrialUserPlan } = require("../../services/trialPlanService");
 
 const TOKEN_STATUSES = {
   ISSUED: "issued",
@@ -231,6 +232,15 @@ exports.startTrial = async (req, res) => {
       tokenRow.status = TOKEN_STATUSES.USED;
       await tokenRow.save({ transaction });
     }
+
+    // Trial-to-Plan funnel Step 2 — every trial user needs a UserPlan for
+    // DietPlan.userPlanId (NOT NULL) to have anything to attach an
+    // auto-generated diet plan to. Runs on both branches above (brand
+    // new trial AND an already-existing journey) so a user who started
+    // their trial before this feature existed also gets backfilled the
+    // next time they hit /trial/start (e.g. app relaunch). findOrCreate
+    // makes this a no-op on every call after the first.
+    await ensureTrialUserPlan(userId, transaction);
 
     await persistDerivedState(journey, { transaction });
     await transaction.commit();

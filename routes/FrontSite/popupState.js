@@ -6,11 +6,17 @@ const asyncMiddleware = require("../../middlewares/async");
 const ctrl = require("../../controllers/FrontSite/popupStateController");
 
 // POST /users/popup/:variable/dismiss
+// POST /users/popup/:variable/snooze
 // POST /users/popup/:variable/complete
 router.post(
   "/:variable/dismiss",
   validateToken,
   asyncMiddleware(ctrl.dismissPopup)
+);
+router.post(
+  "/:variable/snooze",
+  validateToken,
+  asyncMiddleware(ctrl.snoozePopup)
 );
 router.post(
   "/:variable/complete",

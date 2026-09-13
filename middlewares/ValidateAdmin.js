@@ -28,6 +28,16 @@ const validateAdmin = async (req, res, next) => {
   }
 
   if (user.userType !== "User") {
+    // Enrich req.user (until now just the JWT payload — {email, id}) with
+    // the userType we already fetched above, at no extra query cost.
+    // Downstream Admin-side controllers use this to scope data to the
+    // logged-in staff member (e.g. a dietitian only seeing her own
+    // clients) instead of trusting a URL param — see helper/
+    // dietitianScope.js and Command Center punch-list item 2. Previously
+    // this middleware only ever checked "not a plain User" and threw the
+    // userType away, so every controller had to re-fetch it (or, more
+    // often, didn't bother and left the data unscoped).
+    req.user.userType = user.userType;
     return next();
   }
 

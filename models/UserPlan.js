@@ -139,6 +139,22 @@ durationIdPlan: {
             allowNull: true,
         },
 
+        // ── Trial-to-Plan funnel ─────────────────────────────────────
+        // True only for the system-created placeholder UserPlan that
+        // backs a free trial user's auto-generated diet plan (see
+        // services/trialPlanService.js). DietPlan.userPlanId is NOT
+        // NULL, so trial users need a real UserPlan row to attach to —
+        // this flag is how the rest of the app tells that row apart
+        // from an actual paid subscription. See migration
+        // 20260913020000-add-trial-diet-plan-support and
+        // helper/popupEligibility.js (excludes isTrial rows from
+        // Day15/30 progress + renewal/follow-up-consultation popups).
+        isTrial: {
+            type: DataTypes.BOOLEAN,
+            allowNull: false,
+            defaultValue: false,
+        },
+
     });
 
     // Each user can have one email verification code
