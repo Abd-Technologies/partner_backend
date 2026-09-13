@@ -269,18 +269,23 @@ async function redeemLink(req, res) {
     // ─── Decide auto-approve vs admin queue based on OCR ───
     let autoApproved = false;
     let approvalReason = null;
-    if (ocrResult && ocrResult.confidence >= AUTO_APPROVE_MIN_CONFIDENCE) {
+    const wrongReceiver = ocrResult?.receiver && !ocrResult?.receiverVerified;
+
+    if (ocrResult && ocrResult.confidence >= AUTO_APPROVE_MIN_CONFIDENCE && !wrongReceiver) {
+      const receiverTag = ocrResult.receiverVerified ? `, receiver verified (${ocrResult.receiver})` : '';
       // Amount must match within tolerance
       if (ocrResult.amount &&
           Math.abs(ocrResult.amount - link.paidAmount) <= AMOUNT_TOLERANCE_PKR) {
         autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified`;
+        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified${receiverTag}`;
       } else if (ocrResult.amount && ocrResult.amount > link.paidAmount) {
         // Customer paid more than expected — auto-approve at the actual amount paid.
         // Admin can still see this case and refund difference or credit it.
         autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward`;
+        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward${receiverTag}`;
       }
+    } else if (wrongReceiver) {
+      approvalReason = `Slip receiver is "${ocrResult.receiver}" (expected FitHer or Shaista Khalid) — admin review required`;
     }
 
     // Create the PlanImage row (status reflects auto vs manual review)
@@ -303,13 +308,15 @@ async function redeemLink(req, res) {
       payerRelationship:  (payerRelationship || link.payerRelationship || null) ?
                             String(payerRelationship || link.payerRelationship).toLowerCase() : null,
       ocrData:            ocrResult ? {
-                            amount:     ocrResult.amount,
-                            amounts:    ocrResult.amounts,
-                            date:       ocrResult.date,
-                            bank:       ocrResult.bank,
-                            sender:     ocrResult.sender,
-                            refNumber:  ocrResult.refNumber,
-                            rawText:    ocrResult.rawText?.slice(0, 1000),
+                            amount:           ocrResult.amount,
+                            amounts:          ocrResult.amounts,
+                            date:             ocrResult.date,
+                            bank:             ocrResult.bank,
+                            sender:           ocrResult.sender,
+                            receiver:         ocrResult.receiver,
+                            receiverVerified: ocrResult.receiverVerified,
+                            refNumber:        ocrResult.refNumber,
+                            rawText:          ocrResult.rawText?.slice(0, 1000),
                             autoApproved,
                             approvalReason,
                           } : null,
@@ -319,6 +326,7 @@ async function redeemLink(req, res) {
       ocrBank:            ocrResult?.bank       || null,
       ocrDate:            ocrResult?.date       || null,
       ocrSender:          ocrResult?.sender     || null,
+      ocrReceiver:        ocrResult?.receiver   || null,
       ocrTransactionId:   ocrResult?.refNumber  || null,
     });
 
@@ -366,11 +374,13 @@ async function redeemLink(req, res) {
       userPlanId:        activationResult?.userPlanId || null,
       // Hint for the app UI — show different post-upload screens
       ocrSummary: ocrResult ? {
-        confidence: ocrResult.confidence,
-        amount:     ocrResult.amount,
-        bank:       ocrResult.bank,
-        date:       ocrResult.date,
-        refNumber:  ocrResult.refNumber,
+        confidence:       ocrResult.confidence,
+        amount:           ocrResult.amount,
+        bank:             ocrResult.bank,
+        date:             ocrResult.date,
+        receiver:         ocrResult.receiver,
+        receiverVerified: ocrResult.receiverVerified,
+        refNumber:        ocrResult.refNumber,
       } : null,
     }));
   } catch (err) {

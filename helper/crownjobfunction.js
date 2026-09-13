@@ -39,10 +39,10 @@ async function alreadyNotified(userId, slotId, reminderType, slotEnd) {
  * only gets notified for 7:30 PM — 2 pushes instead of 16.
  */
 const TIME_BLOCK_HOURS = {
-  morning:   { start: 5,  end: 12 },
-  afternoon: { start: 12, end: 17 },
-  evening:   { start: 17, end: 21 },
-  night:     { start: 21, end: 29 }, // 29 = 5 AM next day (21→24→5)
+  morning:   { start: 6,  end: 11 },
+  afternoon: { start: 11, end: 16 },
+  evening:   { start: 16, end: 20 },
+  night:     { start: 20, end: 29 }, // 20:00 (8 PM) to 05:00 next day (wraps midnight)
 };
 
 function filterSlotsByTimeBlock(slots, timeBlock, timeZone) {

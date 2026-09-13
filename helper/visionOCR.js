@@ -37,6 +37,30 @@ const BANK_PATTERNS = [
   { name: 'Summit Bank',        patterns: [/Summit Bank/i] },
 ];
 
+// Official receiver identities for FitHer payments (FitHer brand, corporate entity, or official beneficiary Shaista Khalid)
+const OFFICIAL_RECEIVERS = [
+  {
+    name: 'FITHER PRIVATE LIMITED',
+    patterns: [
+      /\bFit\s*Her\s*(?:\(?Pvt\.?\)?|Private)?\s*(?:Limited|Ltd\.?)\b/i,
+      /\bFither\s*(?:\(?Pvt\.?\)?|Private)?\s*(?:Limited|Ltd\.?)\b/i,
+    ],
+  },
+  {
+    name: 'FitHer',
+    patterns: [/\bFit\s*Her\b/i, /\bFither\b/i],
+  },
+  {
+    name: 'Shaista Khalid',
+    patterns: [/\bShaista[\s\-]+Khalid\b/i],
+  },
+];
+
+// Receiver / Beneficiary patterns on Pakistani payment slips
+const RECEIVER_PATTERNS = [
+  /(?:To|Receiver(?:\s*Name|\s*Title)?|Beneficiary(?:\s*Name|\s*Title)?|Account\s*Title|A\/C\s*Title|Title\s*of\s*Account|Paid\s*To|Transferred?\s*To|Sent\s*To|Credited\s*To)\s*[:.\-]?\s*\n?\s*([A-Za-z][A-Za-z\s.'-]{2,40})/i,
+];
+
 // Amount extraction — captures Pakistani formats with currency markers
 // IMPORTANT: regex with /g flag is stateful — we reset .lastIndex inside parseSlipText
 const AMOUNT_PATTERNS = [
@@ -65,7 +89,16 @@ const DATE_PATTERNS = [
 // Exported for testability; called automatically by extractSlipData.
 function parseSlipText(rawText) {
   if (!rawText || typeof rawText !== 'string') {
-    return { amount: null, amounts: [], date: null, bank: null, sender: null, refNumber: null };
+    return {
+      amount: null,
+      amounts: [],
+      date: null,
+      bank: null,
+      sender: null,
+      receiver: null,
+      receiverVerified: false,
+      refNumber: null,
+    };
   }
 
   // Normalize whitespace
@@ -113,8 +146,50 @@ function parseSlipText(rawText) {
 
   // Sender name — look for patterns like "From: NAME" or "Sender: NAME"
   let sender = null;
-  const senderMatch = /(?:From|Sender|Sent\s*by|Payer)\s*[:.]?\s*([A-Z][A-Z\s.'-]{2,40}[A-Z])/m.exec(text);
-  if (senderMatch) sender = senderMatch[1].trim();
+  const senderMatch = /(?:From|Sender|Sent\s*by|Payer)\s*[:.]?\s*([A-Za-z][A-Za-z\s.'-]{2,40})/i.exec(text);
+  if (senderMatch && senderMatch[1]) {
+    sender = senderMatch[1].trim().split(/[\r\n]|(?:\b(?:Account|Acc|A\/C|IBAN|Amount|Rs|PKR|Date|Mobile|Phone|Fee)\b)/i)[0].trim();
+  }
+
+  // Receiver name & verification — checks for official receivers ('FitHer' and 'Shaista Khalid')
+  let receiver = null;
+  let receiverVerified = false;
+
+  const isSenderShaista = /(?:From|Sender|Sent\s*by|Payer)\s*[:.]?\s*Shaista[\s\-]+Khalid/i.test(text);
+  const isSenderFitHer  = /(?:From|Sender|Sent\s*by|Payer)\s*[:.]?\s*(?:Fit\s*Her|Fither)/i.test(text);
+
+  // 1. Check if official receiver pattern appears in slip (and not as sender)
+  for (const official of OFFICIAL_RECEIVERS) {
+    if (official.name === 'Shaista Khalid' && isSenderShaista) continue;
+    if ((official.name === 'FitHer' || official.name === 'FITHER PRIVATE LIMITED') && isSenderFitHer) continue;
+
+    if (official.patterns.some(re => re.test(text))) {
+      receiver = official.name;
+      receiverVerified = true;
+      break;
+    }
+  }
+
+  // 2. If not found in body, check explicitly labeled receiver field (e.g. "To: NAME", "Beneficiary: NAME")
+  if (!receiverVerified) {
+    for (const re of RECEIVER_PATTERNS) {
+      const m = re.exec(text);
+      if (m && m[1]) {
+        const candidate = m[1].trim().split(/[\r\n]|(?:\b(?:Account|Acc|A\/C|IBAN|Amount|Rs|PKR|Date|Mobile|Phone|Fee)\b)/i)[0].trim();
+        if (candidate.length >= 3 && !/^(Bank|Account|Amount|Date|PKR|Rs|JazzCash|EasyPaisa|Meezan|HBL)/i.test(candidate)) {
+          const matchedOfficial = OFFICIAL_RECEIVERS.find(o => o.patterns.some(p => p.test(candidate)));
+          if (matchedOfficial) {
+            receiver = matchedOfficial.name;
+            receiverVerified = true;
+          } else {
+            receiver = candidate;
+            receiverVerified = false;
+          }
+          break;
+        }
+      }
+    }
+  }
 
   // Reference / transaction ID — REQUIRE a colon/space separator so we don't
   // accidentally capture the tail of the keyword itself (e.g., "Reference" → "erence").
@@ -147,6 +222,8 @@ function parseSlipText(rawText) {
     date,
     bank,
     sender,
+    receiver,
+    receiverVerified,
     refNumber,
   };
 }
@@ -176,6 +253,14 @@ function scoreSlip(extracted, expected = {}) {
   // Sender detected = +0.1
   if (extracted.sender) score += 0.1;
 
+  // Receiver verified (money sent to FitHer or Shaista Khalid) = +0.2
+  if (extracted.receiverVerified) {
+    score += 0.2;
+  } else if (extracted.receiver && !extracted.receiverVerified) {
+    // Explicit receiver found but NOT FitHer / Shaista Khalid -> major penalty
+    score -= 0.4;
+  }
+
   // Amount matches expected (within ±50 PKR tolerance) = +0.15
   if (expected.amount && extracted.amount) {
     const diff = Math.abs(extracted.amount - expected.amount);
@@ -183,7 +268,7 @@ function scoreSlip(extracted, expected = {}) {
     else if (diff <= 500) score += 0.05;
   }
 
-  return Math.min(1, score);
+  return Math.max(0, Math.min(1, score));
 }
 
 /**
@@ -192,7 +277,7 @@ function scoreSlip(extracted, expected = {}) {
  * @param {string} imagePath — absolute or relative file path
  * @param {object} [expected] — optional { amount, dateMaxAgeDays } for confidence scoring
  * @returns {Promise<object|null>}
- *   { rawText, amount, date, bank, sender, refNumber, amounts, confidence, raw }
+ *   { rawText, amount, date, bank, sender, receiver, receiverVerified, refNumber, amounts, confidence, raw }
  *   Returns null on hard failure (network, missing key).
  */
 async function extractSlipData(imagePath, expected = {}) {
@@ -239,6 +324,8 @@ async function extractSlipData(imagePath, expected = {}) {
       date: parsed.date,
       bank: parsed.bank,
       sender: parsed.sender,
+      receiver: parsed.receiver,
+      receiverVerified: parsed.receiverVerified,
       refNumber: parsed.refNumber,
       confidence,
       raw: json, // full response for audit; consider stripping if storage is a concern
@@ -254,4 +341,6 @@ module.exports = {
   parseSlipText,
   scoreSlip,
   BANK_PATTERNS,
+  OFFICIAL_RECEIVERS,
+  RECEIVER_PATTERNS,
 };
