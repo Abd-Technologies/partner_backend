@@ -14,6 +14,7 @@ const {
   Plan,
 } = require("../models");
 const { createEscalation } = require("./escalation");
+const { resolveDietitianNoShow, resolveUnconfirmedExpiry } = require("./noShowResolution");
 
 const TZ = "Asia/Karachi";
 
@@ -71,6 +72,13 @@ const PLAN_DELAY_BREACH_DAYS = 3;
 const EARLY_CHECKIN_DAY_LOW = 3;
 const EARLY_CHECKIN_DAY_HIGH = 4;
 const NO_SHOW_GRACE_MINUTES = 10;
+// How long a confirmed-but-unreported appointment can stay "eligible"
+// for the no-show popup before it's considered stale and auto-retired
+// (see evaluateConsultantNoShows). Exported so
+// consultationBookingController.js's getMyCurrentAppointment can flag
+// the same appointment the exact same way for the Diet tab's
+// UpcomingConsultationCard, instead of recomputing this rule twice.
+const NO_SHOW_STALE_HOURS = 24;
 
 // Day-of-cycle each popup fires (relative to plan delivery).
 const DAY7_OFFSET = 7;
@@ -701,14 +709,34 @@ async function evaluateAllActiveUsers() {
 
 // Per-minute consultant-no-show check. Looks for confirmed appointments
 // whose scheduled time + 10 min has passed without an actualStartedAt
-// (status didn't flip to "In Progress"). Fires the popup eligibility AND
-// opens a CONSULT_NO_SHOW escalation. Idempotent on PendingPopupState.
+// (status didn't flip to "In Progress"). Idempotent on PendingPopupState.
+//
+// Bug fix: this used to have no upper bound — a confirmed appointment
+// that nobody ever started, completed, canceled, or reported stayed
+// eligible forever, and setEligible refreshes eligibleAt to "now" every
+// time this cron runs (once a minute), so the client saw this as
+// endlessly re-eligible. Combined with POPUP_CONSULTANT_NO_SHOW being
+// the 2nd-highest-priority, non-dismissible popup, that meant a single
+// stale appointment (e.g. leftover test data) would interrupt the user
+// with a blocking "Consultant hasn't joined" sheet on every app open,
+// indefinitely, with no way out except manually reporting it.
+//
+// Fixed with a staleness ceiling (NO_SHOW_STALE_HOURS): appointments
+// past that window stop being (re-)made eligible, and any already-open
+// PendingPopupState row for one is auto-retired here so it self-heals
+// without needing a manual DB fix — AND an escalation is opened so
+// staff still find out about the missed session even though the user
+// never tapped "Report" (previously only the user-initiated report path
+// created one; a session nobody ever reports silently vanished).
 async function evaluateConsultantNoShows() {
   const cutoff = nowPkt().subtract(NO_SHOW_GRACE_MINUTES, "minutes").toDate();
+  const staleFloor = nowPkt().subtract(NO_SHOW_STALE_HOURS, "hours").toDate();
+
+  // Newly eligible: past the grace period, but not stale yet.
   const rows = await Appointment.findAll({
     where: {
       status: "confirmed",
-      date: { [Op.lte]: cutoff },
+      date: { [Op.lte]: cutoff, [Op.gte]: staleFloor },
       noShowReportedAt: null,
     },
   });
@@ -724,12 +752,118 @@ async function evaluateConsultantNoShows() {
       console.error("[popupEligibility] no-show set eligible:", e);
     }
   }
+
+  // Now-stale: still confirmed + unreported, but past the staleness
+  // ceiling. Auto-retire any open popup state and escalate once.
+  const staleRows = await Appointment.findAll({
+    where: {
+      status: "confirmed",
+      date: { [Op.lt]: staleFloor },
+      noShowReportedAt: null,
+    },
+  });
+  for (const a of staleRows) {
+    try {
+      // A PendingPopupState row for this appointment may never have
+      // been created — e.g. it went stale before this auto-resolution
+      // logic shipped, or the "newly eligible" pass never got to run
+      // for it. Resolution must NOT depend on that row existing: it's
+      // purely a "retire this popup so the client stops being
+      // prompted" side effect, done best-effort when there is one to
+      // retire, never a gate on the actual auto-cancel/escalate below.
+      const existing = await PendingPopupState.findOne({
+        where: {
+          userId: a.userId,
+          popupVariable: "POPUP_CONSULTANT_NO_SHOW",
+          completedAt: null,
+        },
+        order: [["createdAt", "DESC"]],
+      });
+      if (existing) {
+        await existing.update({ completedAt: new Date() });
+      }
+
+      // If the Meet attendance check already found hard evidence the
+      // dietitian DID attend, don't treat "nobody clicked anything in
+      // the app for 24h" as proof of a no-show — that would wrongly
+      // cancel a session that genuinely happened just because the
+      // status field never got updated. (checkMeetAttendance's own
+      // fast path already resolves the true no-show case well before
+      // this point is ever reached.)
+      if (a.meetDietitianAttended === true) {
+        continue;
+      }
+
+      await createEscalation({
+        userId: a.userId,
+        dietitianId: a.dietitionId || null,
+        trigger: "CONSULT_NO_SHOW",
+        severity: "medium",
+        payload: {
+          appointmentId: a.id,
+          scheduledDate: a.date,
+          autoRetired: true,
+        },
+      });
+
+      // Nobody reported it and 24 hours passed anyway — resolve it
+      // for her instead of leaving the booking stuck at "confirmed"
+      // forever with no real answer on her screen. Cancels it and
+      // notifies her that rebooking is free. This flips status away
+      // from "confirmed", so this same row will not be re-matched by
+      // the staleRows query on the next tick (no separate dedup flag
+      // needed).
+      await resolveDietitianNoShow(a);
+    } catch (e) {
+      console.error("[popupEligibility] no-show stale retire:", e);
+    }
+  }
+}
+
+// Auto-expires a "pending" appointment — the client booked it, but the
+// dietitian never confirmed it AT ALL — once its scheduled time has
+// passed. No grace period here (unlike the no-show case): a pending
+// booking whose slot time is already in the past has nothing left to
+// wait for, since nothing was ever confirmed in order to check whether
+// it happened. Runs every minute, same cadence as the no-show check.
+async function evaluateUnconfirmedBookings() {
+  const now = nowPkt().toDate();
+
+  const rows = await Appointment.findAll({
+    where: {
+      status: "pending",
+      date: { [Op.lt]: now },
+      expiredAt: null,
+    },
+  });
+
+  for (const a of rows) {
+    try {
+      await createEscalation({
+        userId: a.userId,
+        dietitianId: a.dietitionId || null,
+        trigger: "CONSULT_UNCONFIRMED",
+        severity: "low",
+        payload: {
+          appointmentId: a.id,
+          scheduledDate: a.date,
+          autoExpired: true,
+        },
+      });
+      await resolveUnconfirmedExpiry(a);
+    } catch (e) {
+      console.error("[popupEligibility] unconfirmed-booking expiry:", e);
+    }
+  }
 }
 
 module.exports = {
   evaluateForUser,
   evaluateAllActiveUsers,
   evaluateConsultantNoShows,
+  evaluateUnconfirmedBookings,
   listForUser,
   PRIORITY,
+  NO_SHOW_GRACE_MINUTES,
+  NO_SHOW_STALE_HOURS,
 };

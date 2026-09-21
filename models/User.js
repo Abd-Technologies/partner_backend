@@ -70,6 +70,17 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
       defaultValue: null,
     },
+    // 'lose' | 'gain' | null. Only needed when mainGoal doesn't already
+    // say which direction weight should move (mainGoal === 'Lose weight'
+    // implies 'lose' on its own) — captured explicitly when the user
+    // sets a target weight, so the Weight trend card on the home screen
+    // knows whether a delta is good news or a heads-up instead of
+    // guessing from the number alone.
+    weightGoalDirection: {
+      type: DataTypes.STRING(10),
+      allowNull: true,
+      defaultValue: null,
+    },
     customSupporter: {
       type: DataTypes.INTEGER,
       allowNull: true,

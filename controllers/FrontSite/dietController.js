@@ -155,6 +155,13 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
       }
     }
 
+    // Accept an optional per-slot Meet link in the same payload. Only
+    // added here (not read before) — the dietitian-facing Slots screen
+    // in the app is being wired up to edit this alongside start/end,
+    // so this save path needs to carry it too.
+    const normalizeLink = (v) =>
+      typeof v === "string" && v.trim() ? v.trim() : null;
+
     for (const element of slotsList) {
       // Bug 9: == null catches both null and undefined; === null missed
       // the undefined case and silently dropped new-slot creates.
@@ -165,6 +172,7 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
             end: element.end,
             dietitionId,
             TimeDietitionId: dayId,
+            dietitionLink: normalizeLink(element.dietitionLink),
           },
           { transaction: t }
         );
@@ -172,6 +180,13 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
         const slotToUpdate = existingSlotMap.get(element.id);
         slotToUpdate.start = element.start;
         slotToUpdate.end = element.end;
+        // Only touch the link if this payload actually carries the
+        // field — older/not-yet-updated app builds omit it entirely,
+        // and must not silently wipe a link already saved elsewhere
+        // (e.g. via the web tool) just by editing times.
+        if (element.dietitionLink !== undefined) {
+          slotToUpdate.dietitionLink = normalizeLink(element.dietitionLink);
+        }
         await slotToUpdate.save({ transaction: t });
       }
       // ids that don't belong to this dietitian+day are silently

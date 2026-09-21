@@ -34,9 +34,15 @@
  
 const nodemailer = require("nodemailer");
 
-// If the username is a gmail address, default to smtp.gmail.com unless EMAIL_HOST specifies otherwise.
-const isGmail = (process.env.EMAIL_USERNAME || "").toLowerCase().endsWith("@gmail.com");
-const emailHost = process.env.EMAIL_HOST && !isGmail ? process.env.EMAIL_HOST : "smtp.gmail.com";
+// Always honor EMAIL_HOST from .env (matches AdminController.js's
+// transporter). Previously this forced smtp.gmail.com whenever
+// EMAIL_USERNAME happened to end in @gmail.com, silently ignoring a
+// correctly-configured EMAIL_HOST (e.g. Titan Email) and sending every
+// OTP through the wrong provider with the wrong mailbox's credentials —
+// that mismatch is what caused the "Username and Password not accepted"
+// auth failures. Only fall back to Gmail's host when EMAIL_HOST isn't
+// set at all.
+const emailHost = process.env.EMAIL_HOST || "smtp.gmail.com";
 const emailPort = parseInt(process.env.EMAIL_PORT, 10) || 465;
 
 const transporter = nodemailer.createTransport({

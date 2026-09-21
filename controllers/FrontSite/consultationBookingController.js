@@ -2,6 +2,11 @@ const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
 const { createEscalation } = require("../../helper/escalation");
 const sendNotification = require("../../helper/notification");
+const { resolveDietitianNoShow } = require("../../helper/noShowResolution");
+const {
+  NO_SHOW_GRACE_MINUTES,
+  NO_SHOW_STALE_HOURS,
+} = require("../../helper/popupEligibility");
 const {
   Appointment,
   PendingPopupState,
@@ -19,6 +24,22 @@ function toIsoDate(d) {
   if (!d) return null;
   if (d instanceof Date) return d.toISOString().slice(0, 10);
   return String(d).slice(0, 10);
+}
+
+// Same rule popupEligibility.js's evaluateConsultantNoShows uses to
+// decide whether to fire POPUP_CONSULTANT_NO_SHOW — reused here so the
+// Diet tab's UpcomingConsultationCard can show a "consultant hasn't
+// joined" state inline on the appointment itself, in context, instead
+// of only via the (now non-blocking, see popup_orchestrator.dart)
+// interrupting sheet. False again past NO_SHOW_STALE_HOURS since by
+// then evaluateConsultantNoShows has auto-retired it and opened an
+// escalation for staff to follow up on instead.
+function isAwaitingConsultant(appt) {
+  if (!appt || appt.status !== "confirmed" || appt.noShowReportedAt) {
+    return false;
+  }
+  const minutesLate = (Date.now() - new Date(appt.date).getTime()) / 60000;
+  return minutesLate >= NO_SHOW_GRACE_MINUTES && minutesLate < NO_SHOW_STALE_HOURS * 60;
 }
 
 // Matches SLOT_WEEKDAY_NAMES in controllers/Admin/AdminController.js —
@@ -151,7 +172,10 @@ exports.reportNoShow = async (req, res) => {
       );
     }
 
-    await appt.update({ noShowReportedAt: new Date() });
+    // Cancels the appointment (freeing it up for a fresh, free rebook)
+    // and notifies the client, instead of just stamping a timestamp and
+    // leaving the booking stuck at "confirmed" indefinitely.
+    await resolveDietitianNoShow(appt, { actorUserId: userId });
 
     try {
       await createEscalation({
@@ -212,21 +236,84 @@ exports.getMyCurrentAppointment = async (req, res) => {
     const userId = req.user && req.user.id;
     if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
 
-    const appt = await Appointment.findOne({
+    const includeOpts = [
+      { model: SlotDiet, attributes: ["id", "start", "end", "dietitionLink"] },
+      // Unaliased on purpose — Appointment.belongsTo(User, {foreignKey:
+      // 'dietitionId'}) is the only un-aliased User association on this
+      // model (the client side is aliased "ClientUser"), so `{model:
+      // User}` resolves to the dietitian.
+      { model: User, attributes: ["id", "firstName", "lastName"] },
+    ];
+
+    // Priority 1: an appointment that's still actually active.
+    let appt = await Appointment.findOne({
       where: {
         userId,
         status: { [Op.in]: ["pending", "confirmed", "In Progress"] },
       },
-      include: [
-        { model: SlotDiet, attributes: ["id", "start", "end"] },
-        // Unaliased on purpose — Appointment.belongsTo(User, {foreignKey:
-        // 'dietitionId'}) is the only un-aliased User association on this
-        // model (the client side is aliased "ClientUser"), so `{model:
-        // User}` resolves to the dietitian.
-        { model: User, attributes: ["id", "firstName", "lastName"] },
-      ],
+      include: includeOpts,
       order: [["date", "ASC"]],
     });
+
+    // Priority 2 (fallback): nothing active, but something wrapped up
+    // recently — keep showing it for a short window afterward so the
+    // client sees the "your plan will be delivered" state instead of
+    // the card just vanishing the instant the auto-end cron marks it
+    // completed. RECENT_COMPLETION_WINDOW_HOURS controls how long.
+    if (!appt) {
+      const RECENT_COMPLETION_WINDOW_HOURS = 48;
+      const cutoff = new Date(Date.now() - RECENT_COMPLETION_WINDOW_HOURS * 60 * 60 * 1000);
+      appt = await Appointment.findOne({
+        where: {
+          userId,
+          status: "completed",
+          status_changed_at: { [Op.gte]: cutoff },
+        },
+        include: includeOpts,
+        order: [["status_changed_at", "DESC"]],
+      });
+    }
+
+    // Priority 3 (fallback): the dietitian never showed up and it's
+    // been resolved (see helper/noShowResolution.js — either the
+    // client reported it, or 24h passed with nobody showing). Same
+    // short-window idea as Priority 2, so the client sees the "missed
+    // session, rebook free" card instead of it just disappearing the
+    // instant the appointment gets canceled out from under them.
+    if (!appt) {
+      const RECENT_NOSHOW_WINDOW_HOURS = 48;
+      const cutoff = new Date(Date.now() - RECENT_NOSHOW_WINDOW_HOURS * 60 * 60 * 1000);
+      appt = await Appointment.findOne({
+        where: {
+          userId,
+          status: "canceled",
+          noShowReportedAt: { [Op.ne]: null },
+          status_changed_at: { [Op.gte]: cutoff },
+        },
+        include: includeOpts,
+        order: [["status_changed_at", "DESC"]],
+      });
+    }
+
+    // Priority 4 (fallback): the dietitian never even confirmed the
+    // booking and it auto-expired (see resolveUnconfirmedExpiry). Same
+    // short-window idea as Priority 3, but for "never confirmed" rather
+    // than "confirmed but didn't show" — the client sees a "please
+    // reschedule" card instead of the booking just vanishing.
+    if (!appt) {
+      const RECENT_EXPIRED_WINDOW_HOURS = 48;
+      const cutoff = new Date(Date.now() - RECENT_EXPIRED_WINDOW_HOURS * 60 * 60 * 1000);
+      appt = await Appointment.findOne({
+        where: {
+          userId,
+          status: "canceled",
+          expiredAt: { [Op.ne]: null },
+          status_changed_at: { [Op.gte]: cutoff },
+        },
+        include: includeOpts,
+        order: [["status_changed_at", "DESC"]],
+      });
+    }
 
     if (!appt) {
       return res.json(
@@ -252,6 +339,33 @@ exports.getMyCurrentAppointment = async (req, res) => {
           dietitianName: dietitianName || null,
           slotStart: appt.SlotDiet ? appt.SlotDiet.start : null,
           slotEnd: appt.SlotDiet ? appt.SlotDiet.end : null,
+          // Prefer this appointment's OWN frozen snapshot (set at the
+          // moment it was confirmed — see appointmentController.js
+          // updateAppointment) over the slot's live link. The slot's
+          // link is shared across every week's booking into it, so
+          // reading it live here would mean a dietitian updating it
+          // for one client's week could change what a DIFFERENT
+          // client (a different week, same weekly slot) sees too.
+          // Falls back to the live slot value only for older bookings
+          // confirmed before the snapshot existed. Null until either
+          // exists — the client app uses null vs non-null to decide
+          // the grey/yellow "Join Meeting" button state.
+          dietitionLink:
+            appt.meetLink ||
+            (appt.SlotDiet ? appt.SlotDiet.dietitionLink || null : null),
+          awaitingConsultant: isAwaitingConsultant(appt),
+          // True only for the Priority-3 fallback above: a canceled
+          // appointment specifically caused by the dietitian never
+          // showing up. Drives the "missed session, rebook free" card
+          // state on the client — never true for an ordinary
+          // client/dietitian-initiated cancellation.
+          noShow: appt.status === "canceled" && !!appt.noShowReportedAt,
+          // True only for the Priority-4 fallback above: a canceled
+          // appointment specifically caused by the dietitian never
+          // confirming it in time (as opposed to noShow, where she DID
+          // confirm but never joined). Drives the "please reschedule"
+          // card state on the client.
+          expired: appt.status === "canceled" && !!appt.expiredAt,
         },
       })
     );

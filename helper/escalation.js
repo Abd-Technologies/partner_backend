@@ -13,6 +13,7 @@ const notificationQueue = new Queue("notificationQueue", {
 const DIETITIAN_NOTIFIED_TRIGGERS = new Set([
   "PLAN_DELAYED",
   "CONSULT_NO_SHOW",
+  "CONSULT_UNCONFIRMED",
   "MEDICAL",
   "REVIEW_FLAG",
 ]);
@@ -28,6 +29,10 @@ const COPY = {
   CONSULT_NO_SHOW: {
     title: "Consultation no-show reported",
     body: "A user reported you didn't join the consultation. Tap to respond.",
+  },
+  CONSULT_UNCONFIRMED: {
+    title: "Booking expired unconfirmed",
+    body: "A client's booking passed its time without being confirmed. It's been auto-canceled and the client can rebook free.",
   },
   INACTIVITY: {
     title: "User went inactive",

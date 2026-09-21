@@ -262,7 +262,28 @@ router.post(
 );
 router.post(
   "/updateDietitionLink",
+  validateToken,
+  validateAdmin,
   asyncMiddleware(adminController.updateDietitionLink)
+);
+// Lists the logged-in dietitian's own consultation slot templates
+// (day/time + whatever link is currently saved), so the link tool page
+// has something to show her. Scoped to req.user.id — she can only ever
+// see and edit her own slots, never another dietitian's.
+router.get(
+  "/my-diet-slots",
+  validateToken,
+  validateAdmin,
+  asyncMiddleware(adminController.getMyDietSlots)
+);
+// Lists the logged-in dietitian's own upcoming confirmed bookings, so
+// the link tool page can show a "Start This Session" button per real
+// appointment (separate from the recurring slot templates above).
+router.get(
+  "/my-upcoming-consultations",
+  validateToken,
+  validateAdmin,
+  asyncMiddleware(adminController.getMyUpcomingConsultations)
 );
 router.post("/addReport", asyncMiddleware(adminController.addReport));
 router.get(

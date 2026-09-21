@@ -2902,7 +2902,6 @@ async function sendNotificaionTest(req, res) {
 }
 async function updateDietitionLink(req, res) {
   const { id, link, userId } = req.body;
-  const user = await User.findOne({ where: { id: userId } });
 
   // const plan = await UserPlan.findOne({ where: { id: id } });
   // if (plan) {
@@ -2914,21 +2913,105 @@ async function updateDietitionLink(req, res) {
   //     body: "Join the session now",
   //   };
   const slot = await SlotDiet.findOne({ where: { id: id } });
-  if (slot) {
-    slot.dietitionLink = link;
-    await slot.save();
-
-    let notification = {
-      title: "Class Link Added",
-      body: "Join the session now",
-    };
-    sendNotification([user.deviceToken], notification, { type: "classLinkAdded", isTrainer: "false" });
-    const response = ApiResponse("1", "Link updated successfully", {});
-    return res.json(response);
-  } else {
+  if (!slot) {
     const response = ApiResponse("0", "Slot not found", {});
     return res.json(response);
   }
+
+  // Ownership check — this endpoint had NO auth at all before (anyone
+  // who knew the URL could overwrite any dietitian's link, or spam a
+  // notification to any client). Now it's behind validateToken +
+  // validateAdmin, so req.user.id is the logged-in staff member; make
+  // sure they're only touching a slot that's actually theirs.
+  if (slot.dietitionId !== req.user.id) {
+    const response = ApiResponse("0", "You can only update your own slots.", {});
+    return res.json(response);
+  }
+
+  slot.dietitionLink = link;
+  await slot.save();
+
+  // userId is now optional — the dietitian link tool just updates the
+  // slot template and doesn't pick a specific client. Only notify when
+  // a real userId with a device token was actually supplied. (This also
+  // fixes a pre-existing crash: the old code called
+  // sendNotification([user.deviceToken], ...) even when User.findOne
+  // came back null, throwing on .deviceToken.)
+  if (userId) {
+    const notifyUser = await User.findOne({ where: { id: userId } });
+    if (notifyUser && notifyUser.deviceToken) {
+      let notification = {
+        title: "Class Link Added",
+        body: "Join the session now",
+      };
+      sendNotification([notifyUser.deviceToken], notification, { type: "classLinkAdded", isTrainer: "false" });
+    }
+  }
+
+  const response = ApiResponse("1", "Link updated successfully", {});
+  return res.json(response);
+}
+
+// Lists the logged-in dietitian's own SlotDiet templates with their
+// day/time and whatever link is currently saved. Backs the new
+// dietitian link tool page (public/dietitian-link-tool.html) — scoped
+// to req.user.id so a dietitian only ever sees her own slots.
+async function getMyDietSlots(req, res) {
+  const slots = await SlotDiet.findAll({
+    where: { dietitionId: req.user.id },
+    attributes: ["id", "start", "end", "dietitionLink"],
+    include: [{ model: TimeDietition, attributes: ["id", "day"] }],
+    order: [["id", "ASC"]],
+  });
+
+  const data = slots.map((slot) => ({
+    id: slot.id,
+    day: slot.TimeDietition ? slot.TimeDietition.day : null,
+    start: slot.start,
+    end: slot.end,
+    dietitionLink: slot.dietitionLink || "",
+  }));
+
+  const response = ApiResponse("1", "Slots fetched successfully", data);
+  return res.json(response);
+}
+
+// Lists the logged-in dietitian's own upcoming CONFIRMED consultations
+// (real bookings, not the recurring SlotDiet templates) — this is what
+// backs the "Start This Session" button in the link tool page. Only
+// confirmed ones show up here: pending hasn't been accepted yet,
+// In Progress/completed/canceled aren't startable.
+async function getMyUpcomingConsultations(req, res) {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const appointments = await Appointment.findAll({
+    where: {
+      dietitionId: req.user.id,
+      status: "confirmed",
+      date: { [Op.gte]: todayStart },
+    },
+    include: [
+      { model: User, as: "ClientUser", attributes: ["id", "firstName", "lastName"] },
+      { model: SlotDiet, attributes: ["id", "start", "end"] },
+    ],
+    order: [["date", "ASC"]],
+    limit: 15,
+  });
+
+  const data = appointments.map((appt) => {
+    const client = appt.ClientUser;
+    return {
+      id: appt.id,
+      date: appt.date,
+      start: appt.SlotDiet ? appt.SlotDiet.start : null,
+      end: appt.SlotDiet ? appt.SlotDiet.end : null,
+      clientName: client ? `${client.firstName || ""} ${client.lastName || ""}`.trim() : "Client",
+    };
+  });
+
+  const response = ApiResponse("1", "Consultations fetched successfully", data);
+  return res.json(response);
 }
 async function userHome(req, res) {
   try {
@@ -5260,6 +5343,8 @@ module.exports = {
   serverTime,
   updateLink,
   updateDietitionLink,
+  getMyDietSlots,
+  getMyUpcomingConsultations,
   userHome,
   addReport,
   userReports,

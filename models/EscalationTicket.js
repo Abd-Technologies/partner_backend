@@ -25,6 +25,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.ENUM(
           'PLAN_DELAYED',
           'CONSULT_NO_SHOW',
+          'CONSULT_UNCONFIRMED',
           'INACTIVITY',
           'MEDICAL',
           'REVIEW_FLAG',

@@ -23,7 +23,7 @@ const { User, PreConsultationProfile, DietPlan, DietPlanDay, DietPlanMeal } = db
 // reasoning as the shared allergy-keyword parsing in utils/allergies.js.
 // Every draft from this controller still goes through the dietitian for
 // review before activation.
-const { computeTargetCalories } = require('../../services/ai/utils/calorieTarget');
+const { computeTargetCalories, heightFeetToCm } = require('../../services/ai/utils/calorieTarget');
 
 /**
  * POST /admin/diet-plan/generate
@@ -69,11 +69,13 @@ async function generateDietPlanDraft(req, res) {
       id: user.id,
       firstName: user.firstName || 'User',
       age: user.age,
-      // weightKg / heightCm — User stores `weight` and `height` as STRING
-      // (legacy schema). The AI prompt treats them as numbers; let the
-      // prompt builder coerce / Gemini accept the value as-is.
+      // weightKg / heightCm — User stores `weight` as a plain kg string
+      // and `height` as a decimal-FEET string (legacy schema, e.g.
+      // "5.4" = 5.4 ft). heightFeetToCm() converts before use — this
+      // used to pass user.height straight through as if it were already
+      // centimeters, silently corrupting every BMR/TDEE calc below.
       weightKg: user.weight,
-      heightCm: user.height,
+      heightCm: heightFeetToCm(user.height),
       goal: profile.goals || user.mainGoal || 'general wellness',
       cyclePhase: 'follicular',
       hasPcos: ((profile.medicalConditions || '') + ' ' + (user.healthConditions || ''))
@@ -83,7 +85,7 @@ async function generateDietPlanDraft(req, res) {
       cuisinePreference: 'Pakistani',
       targetCalories: computeTargetCalories({
         weightKg: user.weight,
-        heightCm: user.height,
+        heightCm: heightFeetToCm(user.height),
         age: user.age,
         lifestyle: profile.lifestyle,
         goalKey: profile.goals || user.mainGoal,

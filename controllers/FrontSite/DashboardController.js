@@ -10,11 +10,16 @@ const {
   ClassPresence,
   Slot,
   Time,
+  PreConsultationProfile,
 } = require("../../models");
 const CyclePhase = require("../../helper/CyclePhaseCalculator");
 const { getInsight } = require("../../helper/StaticInsights");
 const { computeHydrationSummary } = require("./WaterController");
 const popupEligibility = require("../../helper/popupEligibility");
+const {
+  computeTargetCalories,
+  heightFeetToCm,
+} = require("../../services/ai/utils/calorieTarget");
 
 const DEFAULT_TIMEZONE = "Asia/Karachi";
 
@@ -83,7 +88,11 @@ async function buildUserBlock(userRow) {
   if (!userRow) return null;
   const firstName = userRow.firstName || "";
   const initial = firstName ? firstName.charAt(0).toUpperCase() : "";
-  return { firstName, initial };
+  // Signup goal category (Lose weight / Build strength & tone / etc.),
+  // set by GoalScreen and re-settable from the PaidHero "Set goal →"
+  // chip via POST /users/profile/main_goal. Distinct from goal.deltaKg
+  // below, which is weight-tracking progress, not this category.
+  return { firstName, initial, mainGoal: userRow.mainGoal || null };
 }
 
 async function buildCycleAndPhase(userId) {
@@ -169,6 +178,12 @@ async function buildGoal(userRow, userId) {
   }
 
   const targetWeightKg = userRow ? userRow.targetWeightKg ?? null : null;
+  // 'lose' | 'gain' | null — see save_target_weight's doc comment.
+  // mainGoal === 'Lose weight' already implies 'lose' on its own; the
+  // frontend resolves that fallback itself (it already has mainGoal in
+  // the dashboard's user block) rather than this function reaching
+  // outside its own userRow fields to duplicate that logic.
+  const weightGoalDirection = userRow ? userRow.weightGoalDirection ?? null : null;
   const deltaKg =
     currentWeightKg != null && targetWeightKg != null
       ? Number((currentWeightKg - targetWeightKg).toFixed(1))
@@ -197,6 +212,7 @@ async function buildGoal(userRow, userId) {
 
   return {
     targetWeightKg,
+    weightGoalDirection,
     currentWeightKg,
     startingWeightKg,
     deltaKg,
@@ -552,11 +568,42 @@ async function buildStats(userId) {
     console.error("DashboardController.buildStats weight:", err);
   }
 
+  // Daily calorie target: same Mifflin-St Jeor calculator that already
+  // drives AI diet-plan generation (services/ai/utils/calorieTarget.js),
+  // so the number shown on the home screen always matches the logic a
+  // generated plan is built around, instead of a second, possibly
+  // inconsistent formula. There's no calorie *consumption* tracking
+  // anywhere yet (meal logging only records followed/alternative/
+  // skipped, not food or kcal) — caloriesRemaining stays null; this is
+  // a daily target, not a live "remaining today" count.
+  let dailyKcalBudget = null;
+  try {
+    const userRow = await User.findOne({
+      where: { id: userId },
+      attributes: ["age", "weight", "height", "mainGoal"],
+    });
+    if (userRow && userRow.weight && userRow.height && userRow.age) {
+      const profile = await PreConsultationProfile.findOne({
+        where: { userId },
+        attributes: ["goals", "lifestyle"],
+      });
+      dailyKcalBudget = computeTargetCalories({
+        weightKg: userRow.weight,
+        heightCm: heightFeetToCm(userRow.height),
+        age: userRow.age,
+        lifestyle: profile ? profile.lifestyle : null,
+        goalKey: (profile && profile.goals) || userRow.mainGoal,
+      });
+    }
+  } catch (err) {
+    console.error("DashboardController.buildStats calories:", err);
+  }
+
   return {
     workoutsThisWeek,
     weightDeltaKgThisWeek,
     caloriesRemaining: null,
-    dailyKcalBudget: null,
+    dailyKcalBudget,
   };
 }
 
@@ -587,7 +634,14 @@ async function getDashboard(req, res) {
   try {
     userRow = await User.findOne({
       where: { id: userId },
-      attributes: ["id", "firstName", "targetWeightKg", "timeZone"],
+      attributes: [
+        "id",
+        "firstName",
+        "targetWeightKg",
+        "timeZone",
+        "mainGoal",
+        "weightGoalDirection",
+      ],
     });
   } catch (err) {
     console.error("DashboardController.getDashboard user lookup:", err);

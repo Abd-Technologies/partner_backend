@@ -90,6 +90,7 @@ const sendNotification = require("./helper/notification");
 const moment = require("moment");
 const { autoEndExpiredSessions, GRACE_MINUTES } = require("./helper/autoEndSessions");
 const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("./helper/autoEndExpiredAppointments");
+const { checkMeetAttendance } = require("./helper/checkMeetAttendance");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
 const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
 const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
@@ -180,6 +181,31 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Pulls real Google Meet attendance data for completed consultations
+// that have a link on file (SlotDiet.dietitionLink), instead of relying
+// on the dietitian remembering to report a no-show. See
+// services/meetAttendance/ and docs on the migration for what each
+// saved field means. Runs every 10 minutes rather than every minute —
+// attendance data doesn't need to be instant, and this keeps API call
+// volume low. Silently does nothing until a dietitian account has been
+// linked via scripts/linkDietitianMeetAccount.js.
+cron.schedule(
+  "*/10 * * * *",
+  async () => {
+    try {
+      const result = await checkMeetAttendance();
+      if (result.checked > 0 || result.errors > 0) {
+        console.log(
+          `[meet-attendance] checked ${result.checked}, skipped ${result.skipped}, errors ${result.errors}`
+        );
+      }
+    } catch (error) {
+      console.error("Error in check-meet-attendance job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Auto-unfreeze for the user-button freeze flow. When frozenAt +
 // freezeDays has elapsed the cron flips the plan back to active and
 // sets unfrozenBy = NULL as the audit signal (mirrors completed_by on
@@ -240,6 +266,26 @@ cron.schedule(
       await popupEligibility.evaluateConsultantNoShows();
     } catch (error) {
       console.error("Error in consultant-no-show job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Consultation-flow: per-minute unconfirmed-booking expiry. Looks for
+// "pending" appointments (client booked, dietitian never confirmed at
+// all) whose scheduled time has already passed, and auto-cancels them
+// right away — unlike the no-show check above, there's no grace period
+// to wait out here, since nothing was ever confirmed in the first
+// place. Tells the client to book a new time, and logs a
+// CONSULT_UNCONFIRMED escalation so missed booking requests are
+// trackable separately from no-shows.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      await popupEligibility.evaluateUnconfirmedBookings();
+    } catch (error) {
+      console.error("Error in unconfirmed-booking expiry job:", error);
     }
   },
   { timezone: CRON_TZ }
