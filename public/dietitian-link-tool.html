@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dietitian Meet Link Tool</title>
+<style>
+  :root {
+    --accent: #6DC55A;
+    --ink: #1c2b20;
+    --muted: #6f8b7a;
+    --border: #d8edd4;
+    --bg: #f6faf5;
+    --live: #c0392b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    margin: 0;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; font-size: 0.95rem; }
+  .card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 14px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+  }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+  input[type=email], input[type=password], input[type=url], input[type=text] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.95rem;
+    margin-bottom: 12px;
+  }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary { background: #eef6ec; color: var(--ink); }
+  button.start { background: var(--live); }
+  .slot-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .slot-row:last-child { border-bottom: none; }
+  .slot-meta { min-width: 140px; font-weight: 600; font-size: 0.9rem; }
+  .slot-meta small { display: block; font-weight: 400; color: var(--muted); }
+  .slot-row input[type=url] { flex: 1; min-width: 200px; margin-bottom: 0; }
+  .status { font-size: 0.85rem; margin-top: 6px; min-height: 18px; }
+  .status.ok { color: #2f8a3a; }
+  .status.err { color: #c0392b; }
+  #logoutBtn { float: right; }
+  .hidden { display: none; }
+  .empty-note { color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Dietitian Meet Link Tool</h1>
+  <p class="sub">Save the Google Meet link for each of your consultation slots, and start today's confirmed sessions when it's time.</p>
+
+  <div id="loginCard" class="card">
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="username" />
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" />
+    <button id="loginBtn">Log in</button>
+    <div id="loginStatus" class="status"></div>
+  </div>
+
+  <div id="sessionsCard" class="card hidden">
+    <h3 style="margin-top:0;">Start a session</h3>
+    <p class="sub" style="margin-bottom:12px;">
+      Your confirmed consultations from today onward. Starting one turns the
+      client's "Join Meeting" button green on their end.
+    </p>
+    <div id="sessionsStatus" class="status"></div>
+    <div id="sessionsList"></div>
+  </div>
+
+  <div id="slotsCard" class="card hidden">
+    <button id="logoutBtn" class="secondary">Log out</button>
+    <h3 style="margin-top:0;">Your consultation slots</h3>
+    <p class="sub" style="margin-bottom:12px;">Clients see and use this link once their booking is confirmed.</p>
+    <div id="slotsStatus" class="status"></div>
+    <div id="slotsList"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var API_BASE = window.location.origin;
+  var TOKEN_KEY = 'dietitianMeetTool.accessToken';
+
+  var loginCard = document.getElementById('loginCard');
+  var sessionsCard = document.getElementById('sessionsCard');
+  var slotsCard = document.getElementById('slotsCard');
+  var loginStatus = document.getElementById('loginStatus');
+  var sessionsStatus = document.getElementById('sessionsStatus');
+  var slotsStatus = document.getElementById('slotsStatus');
+  var sessionsList = document.getElementById('sessionsList');
+  var slotsList = document.getElementById('slotsList');
+
+  function setStatus(el, message, kind) {
+    el.textContent = message || '';
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function getToken() {
+    return sessionStorage.getItem(TOKEN_KEY);
+  }
+
+  function showSlots() {
+    loginCard.classList.add('hidden');
+    sessionsCard.classList.remove('hidden');
+    slotsCard.classList.remove('hidden');
+    loadSessions();
+    loadSlots();
+  }
+
+  function showLogin() {
+    sessionStorage.removeItem(TOKEN_KEY);
+    sessionsCard.classList.add('hidden');
+    slotsCard.classList.add('hidden');
+    loginCard.classList.remove('hidden');
+  }
+
+  document.getElementById('loginBtn').addEventListener('click', function () {
+    var email = document.getElementById('email').value.trim();
+    var password = document.getElementById('password').value;
+    if (!email || !password) {
+      setStatus(loginStatus, 'Enter your email and password.', 'err');
+      return;
+    }
+    setStatus(loginStatus, 'Logging in...', '');
+    fetch(API_BASE + '/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: email,
+        password: password,
+        deviceToken: '',
+        userType: 'Dietition',
+        timeZone: 'Asia/Karachi',
+      }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.status === '1' && res.data && res.data.accessToken) {
+          sessionStorage.setItem(TOKEN_KEY, res.data.accessToken);
+          setStatus(loginStatus, '', '');
+          showSlots();
+        } else {
+          setStatus(loginStatus, (res && res.message) || 'Login failed.', 'err');
+        }
+      })
+      .catch(function () {
+        setStatus(loginStatus, 'Could not reach the server. Try again.', 'err');
+      });
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', showLogin);
+
+  // ── Upcoming sessions / Start ──────────────────────────────────────
+
+  function loadSessions() {
+    var token = getToken();
+    if (!token) { showLogin(); return; }
+    setStatus(sessionsStatus, 'Loading your sessions...', '');
+    sessionsList.innerHTML = '';
+    fetch(API_BASE + '/admin/my-upcoming-consultations', {
+      headers: { accessToken: token },
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (!res || res.status !== '1') {
+          setStatus(sessionsStatus, (res && res.message) || 'Could not load sessions.', 'err');
+          if (res && /not logged ?in|invalid accessToken/i.test(res.message || '')) showLogin();
+          return;
+        }
+        setStatus(sessionsStatus, '', '');
+        renderSessions(res.data || []);
+      })
+      .catch(function () {
+        setStatus(sessionsStatus, 'Could not reach the server.', 'err');
+      });
+  }
+
+  function renderSessions(sessions) {
+    if (sessions.length === 0) {
+      sessionsList.innerHTML = '<p class="empty-note">No confirmed consultations coming up. Once a booking is confirmed, it will show up here to start.</p>';
+      return;
+    }
+    sessions.forEach(function (session) {
+      var row = document.createElement('div');
+      row.className = 'slot-row';
+
+      var meta = document.createElement('div');
+      meta.className = 'slot-meta';
+      meta.innerHTML = (session.clientName || 'Client') +
+        '<small>' + (session.date || '') + ' · ' + (session.start || '?') + ' – ' + (session.end || '?') + '</small>';
+
+      var startBtn = document.createElement('button');
+      startBtn.className = 'start';
+      startBtn.textContent = 'Start session';
+
+      var rowStatus = document.createElement('div');
+      rowStatus.className = 'status';
+      rowStatus.style.flexBasis = '100%';
+
+      startBtn.addEventListener('click', function () {
+        startBtn.disabled = true;
+        setStatus(rowStatus, 'Starting...', '');
+        var token = getToken();
+        fetch(API_BASE + '/appointment/' + session.id + '/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', accessToken: token },
+          body: JSON.stringify({}),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (res) {
+            if (res && res.status === '1') {
+              setStatus(rowStatus, 'Session started — the client can now join.', 'ok');
+              startBtn.textContent = 'Started';
+              // Leave it disabled; refresh the list shortly so it drops
+              // off once it's no longer "confirmed".
+              setTimeout(loadSessions, 1500);
+            } else {
+              startBtn.disabled = false;
+              setStatus(rowStatus, (res && res.message) || 'Could not start.', 'err');
+            }
+          })
+          .catch(function () {
+            startBtn.disabled = false;
+            setStatus(rowStatus, 'Could not reach the server.', 'err');
+          });
+      });
+
+      row.appendChild(meta);
+      row.appendChild(startBtn);
+      row.appendChild(rowStatus);
+      sessionsList.appendChild(row);
+    });
+  }
+
+  // ── Slot links ───────────────────────────────────────────────────────
+
+  function loadSlots() {
+    var token = getToken();
+    if (!token) { showLogin(); return; }
+    setStatus(slotsStatus, 'Loading your slots...', '');
+    slotsList.innerHTML = '';
+    fetch(API_BASE + '/admin/my-diet-slots', {
+      headers: { accessToken: token },
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (!res || res.status !== '1') {
+          setStatus(slotsStatus, (res && res.message) || 'Could not load slots.', 'err');
+          if (res && /not logged ?in|invalid accessToken/i.test(res.message || '')) showLogin();
+          return;
+        }
+        setStatus(slotsStatus, '', '');
+        renderSlots(res.data || []);
+      })
+      .catch(function () {
+        setStatus(slotsStatus, 'Could not reach the server.', 'err');
+      });
+  }
+
+  function renderSlots(slots) {
+    if (slots.length === 0) {
+      slotsList.innerHTML = '<p class="empty-note">No consultation slots found for your account yet.</p>';
+      return;
+    }
+    slots.forEach(function (slot) {
+      var row = document.createElement('div');
+      row.className = 'slot-row';
+
+      var meta = document.createElement('div');
+      meta.className = 'slot-meta';
+      meta.innerHTML = (slot.day || 'Any day') + '<small>' + (slot.start || '?') + ' – ' + (slot.end || '?') + '</small>';
+
+      var input = document.createElement('input');
+      input.type = 'url';
+      input.placeholder = 'https://meet.google.com/xxx-xxxx-xxx';
+      input.value = slot.dietitionLink || '';
+
+      var saveBtn = document.createElement('button');
+      saveBtn.textContent = 'Save';
+      var rowStatus = document.createElement('div');
+      rowStatus.className = 'status';
+      rowStatus.style.flexBasis = '100%';
+
+      saveBtn.addEventListener('click', function () {
+        saveBtn.disabled = true;
+        setStatus(rowStatus, 'Saving...', '');
+        var token = getToken();
+        fetch(API_BASE + '/admin/updateDietitionLink', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', accessToken: token },
+          body: JSON.stringify({ id: slot.id, link: input.value.trim() }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (res) {
+            saveBtn.disabled = false;
+            if (res && res.status === '1') {
+              setStatus(rowStatus, 'Saved.', 'ok');
+            } else {
+              setStatus(rowStatus, (res && res.message) || 'Could not save.', 'err');
+            }
+          })
+          .catch(function () {
+            saveBtn.disabled = false;
+            setStatus(rowStatus, 'Could not reach the server.', 'err');
+          });
+      });
+
+      row.appendChild(meta);
+      row.appendChild(input);
+      row.appendChild(saveBtn);
+      row.appendChild(rowStatus);
+      slotsList.appendChild(row);
+    });
+  }
+
+  if (getToken()) showSlots(); else showLogin();
+})();
+</script>
+</body>
+</html>

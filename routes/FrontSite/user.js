@@ -67,6 +67,12 @@ router.get('/weekly_checkins/recent',validateToken,asyncMiddleware(userControlle
 router.post('/weekly_checkin/weight',validateToken,asyncMiddleware(userController.save_weight_log));
 router.post('/profile/target_weight',validateToken,asyncMiddleware(userController.save_target_weight));
 
+// PaidHero "Set goal →" chip (Diet tab home screen) — reads/writes the
+// same User.mainGoal column GoalScreen sets at signup. Separate from
+// target_weight above: mainGoal is the goal CATEGORY (Lose weight, etc.),
+// targetWeightKg is a number.
+router.post('/profile/main_goal',validateToken,asyncMiddleware(userController.save_main_goal));
+
 // Progress Hub Phase E — minimal feature-flag toggle endpoint. Backed by
 // a hard-coded allow-list in userController.set_feature_flag — only flags
 // in that list can be toggled by clients (rest are admin-only).

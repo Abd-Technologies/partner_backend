@@ -52,6 +52,62 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: true,
         },
 
+        // Meet attendance tracking (migration 20260916150000). Populated
+        // by services/meetAttendance after the appointment's scheduled
+        // time passes — see that migration file for what each column
+        // means. All nullable; null = "not checked yet" or "couldn't
+        // tell", never assume it means false.
+        meetAttendanceCheckedAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+        meetDietitianAttended: {
+            type: DataTypes.BOOLEAN,
+            allowNull: true,
+        },
+        meetClientAttended: {
+            type: DataTypes.BOOLEAN,
+            allowNull: true,
+        },
+        meetConferenceRecordName: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+        },
+        meetAttendanceRaw: {
+            type: DataTypes.TEXT('long'),
+            allowNull: true,
+        },
+
+        // Snapshot of SlotDiet.dietitionLink taken the moment this
+        // appointment is confirmed (migration 20260920160000). Exists
+        // because dietitionLink lives on the recurring weekly slot
+        // template, shared by every week's booking into it — without a
+        // snapshot, updating the slot's link would live-affect every
+        // other currently-confirmed appointment against that same slot,
+        // even a different client's different week. Null for legacy
+        // rows confirmed before this existed, or if the slot had no
+        // link yet at confirm time — callers should fall back to
+        // SlotDiet.dietitionLink in that case, never assume "no link at
+        // all".
+        meetLink: {
+            type: DataTypes.TEXT('long'),
+            allowNull: true,
+        },
+
+        // Set the moment a "pending" (never-confirmed) appointment gets
+        // auto-canceled because its scheduled time passed with the
+        // dietitian never responding at all (migration 20260921120000).
+        // Distinct from noShowReportedAt: that one means "confirmed but
+        // she never joined"; this one means "never even confirmed it in
+        // the first place". Both end up status:"canceled", but the
+        // client sees a different message for each, and they're logged
+        // as separate escalation triggers so Shaista can tell the two
+        // apart in her history.
+        expiredAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+
     });
 
     Appointment.associate = (models) => {

@@ -19,7 +19,7 @@ const {
   activateDietPlan,
 } = require('../../services/dietPlanService');
 const { ensureTrialUserPlan } = require('../../services/trialPlanService');
-const { computeTargetCalories } = require('../../services/ai/utils/calorieTarget');
+const { computeTargetCalories, heightFeetToCm } = require('../../services/ai/utils/calorieTarget');
 
 const { User, PreConsultationProfile, DietPlan, TrialJourney } = db;
 
@@ -100,8 +100,12 @@ async function submitTrialQuickIntake(req, res) {
       id: user.id,
       firstName: user.firstName || 'User',
       age: user.age,
+      // heightFeetToCm() converts User.height (stored as decimal FEET,
+      // e.g. "5.4" = 5.4 ft — legacy schema) to real centimeters. This
+      // used to pass the raw feet value straight through as if it were
+      // already cm, silently corrupting every BMR/TDEE calc below.
       weightKg: user.weight,
-      heightCm: user.height,
+      heightCm: heightFeetToCm(user.height),
       goal: profile.goals,
       cyclePhase: 'follicular',
       hasPcos: ((profile.medicalConditions || '') + ' ' + (user.healthConditions || ''))
@@ -111,7 +115,7 @@ async function submitTrialQuickIntake(req, res) {
       cuisinePreference: 'Pakistani',
       targetCalories: computeTargetCalories({
         weightKg: user.weight,
-        heightCm: user.height,
+        heightCm: heightFeetToCm(user.height),
         age: user.age,
         lifestyle: profile.lifestyle,
         goalKey: profile.goals,

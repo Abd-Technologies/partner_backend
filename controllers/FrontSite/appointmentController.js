@@ -438,6 +438,19 @@ exports.updateAppointment = async (req, res) => {
       return res.status(404).json(ApiResponse("0", "Appointment not found", {}));
     }
 
+    // This endpoint used to trust the caller completely — no auth at
+    // all, anyone who knew an appointment id could confirm/cancel it.
+    // Now behind validateToken + validateAdmin (see routes file); this
+    // is the ownership check, same pattern as /:id/start.
+    const caller = req.user || {};
+    const isOwningDietitian = caller.id === appointment.dietitionId;
+    const isAdmin = caller.userType === "Admin";
+    if (!isOwningDietitian && !isAdmin) {
+      return res.status(403).json(
+        ApiResponse("0", "You can only update your own appointments.", {})
+      );
+    }
+
     const statusChanged = status != null && status !== appointment.status;
 
     if (status != null) {
@@ -455,6 +468,24 @@ exports.updateAppointment = async (req, res) => {
     if (statusChanged) {
       appointment.completed_by = actorUserId != null ? actorUserId : appointment.dietitionId;
       appointment.status_changed_at = new Date();
+    }
+
+    // Snapshot the slot's current Meet link onto this appointment the
+    // moment it's confirmed. dietitionLink lives on SlotDiet (the
+    // recurring weekly slot template), shared across every week's
+    // booking into it — without this snapshot, the dietitian updating
+    // the link later would live-affect every other still-upcoming
+    // appointment on that same weekly slot, including a different
+    // client's different week. Once frozen here, only a fresh
+    // confirmation (a fresh snapshot) picks up a later link change.
+    // Only fires on the transition INTO "confirmed", and only if we
+    // haven't already got one (so re-saving an already-confirmed
+    // appointment for an unrelated reason doesn't re-snapshot it).
+    if (statusChanged && status === "confirmed" && !appointment.meetLink) {
+      const slot = await SlotDiet.findByPk(appointment.timeSlotId);
+      if (slot && slot.dietitionLink) {
+        appointment.meetLink = slot.dietitionLink;
+      }
     }
 
     await appointment.save();
@@ -520,13 +551,41 @@ exports.startAppointment = async (req, res) => {
   const { id } = req.params;
   const { actorUserId } = req.body;
 
+  // TEMP DEBUG (remove once Start Session is confirmed working end to
+  // end) — proves whether the click is even reaching the server at
+  // all, and if so, exactly why it's being rejected.
+  console.log(
+    `[startAppointment] REQUEST RECEIVED — appointmentId=${id} callerId=${req.user && req.user.id} callerType=${req.user && req.user.userType}`
+  );
+
   try {
     const appointment = await Appointment.findOne({ where: { id } });
     if (!appointment) {
+      console.log(`[startAppointment] REJECTED — no appointment with id=${id}`);
       return res.status(404).json(ApiResponse("0", "Appointment not found", {}));
     }
 
+    // Ownership check — this route had no auth at all before (anyone
+    // could flip anyone's appointment live). Now it's behind
+    // validateToken + validateAdmin, so req.user.id is the logged-in
+    // staff member; only the dietitian who owns this appointment (or an
+    // Admin, for support/override cases) may start it.
+    const caller = req.user || {};
+    const isOwningDietitian = caller.id === appointment.dietitionId;
+    const isAdmin = caller.userType === "Admin";
+    if (!isOwningDietitian && !isAdmin) {
+      console.log(
+        `[startAppointment] REJECTED — not owner. callerId=${caller.id} appointment.dietitionId=${appointment.dietitionId} callerType=${caller.userType}`
+      );
+      return res.status(403).json(
+        ApiResponse("0", "You can only start your own consultations.", {})
+      );
+    }
+
     if (appointment.status !== "confirmed") {
+      console.log(
+        `[startAppointment] REJECTED — status is "${appointment.status}", not "confirmed"`
+      );
       return res.status(200).json(
         ApiResponse(
           "0",
@@ -540,6 +599,27 @@ exports.startAppointment = async (req, res) => {
     appointment.completed_by = actorUserId != null ? actorUserId : appointment.dietitionId;
     appointment.status_changed_at = new Date();
     await appointment.save();
+    console.log(`[startAppointment] SUCCESS — appointmentId=${id} now In Progress`);
+
+    // Client-facing heads-up that the session is live. The Join Meeting
+    // button on her screen also flips green on its own (it polls every
+    // 20s), but a push means she doesn't have to have the app open and
+    // staring at the card to notice.
+    try {
+      const client = await User.findByPk(appointment.userId);
+      if (client && client.deviceToken) {
+        await sendNotification(
+          [client.deviceToken],
+          {
+            title: "Your session is starting",
+            body: "Your dietitian has started the consultation — tap to join.",
+          },
+          { type: "appointmentStarted", appointmentId: appointment.id }
+        );
+      }
+    } catch (notifyErr) {
+      console.error("[appointmentController] start notify failed:", notifyErr);
+    }
 
     return res.status(200).json(
       ApiResponse("1", "Appointment started", { appointment })

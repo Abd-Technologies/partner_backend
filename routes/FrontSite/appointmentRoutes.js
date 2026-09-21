@@ -3,6 +3,7 @@ const router = express.Router();
 const appointmentController = require("../../controllers/FrontSite/appointmentController");
 const consultationBookingController = require("../../controllers/FrontSite/consultationBookingController");
 const { validateToken } = require("../../middlewares/AuthorizationMW");
+const { validateAdmin } = require("../../middlewares/ValidateAdmin");
 // const authenticate = require('../middleware/middlewares/authMiddleware');
 
 // // Create a new appointment (requires authentication)
@@ -38,23 +39,25 @@ const { validateToken } = require("../../middlewares/AuthorizationMW");
  router.post("/", appointmentController.createAppointment);
 
 // Route to flip confirmed → In Progress when the dietitian starts the session
- router.post("/:id/start", appointmentController.startAppointment);
+ router.post("/:id/start", validateToken, validateAdmin, appointmentController.startAppointment);
 
 // User reports the dietitian didn't show up. Auth-gated; controller
 // enforces ownership. Opens a CONSULT_NO_SHOW escalation. Phase 1B addition.
  router.post("/:id/no-show", validateToken, consultationBookingController.reportNoShow);
 
 // User-initiated cancel (ownership-checked, only from pending/confirmed).
-// Distinct from the dietitian-facing PUT /:id below, which trusts the
-// caller and allows any status transition.
+// Distinct from the dietitian-facing PUT /:id below.
  router.post("/:id/cancel", validateToken, consultationBookingController.cancelMyAppointment);
 
 // Per-consultation review by the client. Auth-gated; the controller
 // enforces that req.user.id matches the appointment's userId.
  router.post("/:id/review", validateToken, appointmentController.createAppointmentReview);
 
-// Route to update an existing appointment
- router.put("/:id", appointmentController.updateAppointment);
+// Dietitian-facing confirm/cancel/status-update. Used to have no auth
+// at all — anyone who knew an appointment id could flip its status.
+// Now behind validateToken + validateAdmin; the controller enforces
+// that the caller owns the appointment (or is an Admin).
+ router.put("/:id", validateToken, validateAdmin, appointmentController.updateAppointment);
 
 // Route to delete an appointment
  router.delete("/:id", appointmentController.deleteAppointment);

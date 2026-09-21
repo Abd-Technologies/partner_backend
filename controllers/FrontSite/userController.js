@@ -954,8 +954,18 @@ async function mark_notifications_read(req, res) {
 const { currentWeekMonday } = require("../../helper/dateUtils");
 
 // POST /users/profile/target_weight
-// Body: { targetWeightKg: number|null }  (null clears the goal)
-// Updates User.targetWeightKg and returns status-only success envelope.
+// Body: { targetWeightKg: number|null, weightGoalDirection?: 'lose'|'gain'|null }
+// Updates User.targetWeightKg (+ optionally weightGoalDirection) and
+// returns a status-only success envelope.
+//
+// weightGoalDirection is only meaningful when the signup mainGoal
+// doesn't already say which way weight should move ('Lose weight'
+// implies 'lose' on its own — the Flutter modal doesn't even show the
+// picker in that case, so this field usually arrives null there).
+// Sent as an explicit key to CLEAR it — omitted entirely to leave
+// whatever's already saved untouched, same "undefined vs null" contract
+// as targetWeightKg.
+const VALID_WEIGHT_GOAL_DIRECTIONS = ["lose", "gain"];
 async function save_target_weight(req, res) {
   try {
     const raw = req.body && req.body.targetWeightKg;
@@ -970,17 +980,71 @@ async function save_target_weight(req, res) {
       }
       value = Math.round(n * 10) / 10; // one-decimal precision
     }
+
+    const hasDirection =
+      req.body && Object.prototype.hasOwnProperty.call(req.body, "weightGoalDirection");
+    let direction = null;
+    if (hasDirection) {
+      const rawDirection = req.body.weightGoalDirection;
+      if (rawDirection !== null && !VALID_WEIGHT_GOAL_DIRECTIONS.includes(rawDirection)) {
+        return res.json(
+          ApiResponse("0", "weightGoalDirection must be 'lose', 'gain', or null", {})
+        );
+      }
+      direction = rawDirection;
+    }
+
     const user = await User.findOne({ where: { id: req.user.id } });
     if (!user) {
       return res.json(ApiResponse("0", "User not found", {}));
     }
     user.targetWeightKg = value;
+    if (hasDirection) {
+      user.weightGoalDirection = direction;
+    }
     await user.save();
     return res.json(
-      ApiResponse("1", "Target weight saved", { targetWeightKg: value })
+      ApiResponse("1", "Target weight saved", {
+        targetWeightKg: value,
+        weightGoalDirection: user.weightGoalDirection,
+      })
     );
   } catch (err) {
     console.error("save_target_weight:", err);
+    return res.json(ApiResponse("0", "Internal server error", {}));
+  }
+}
+
+// POST /users/profile/main_goal
+// Body: { mainGoal: string }
+//
+// Lets a signed-in user set/update their onboarding goal category (the
+// same `User.mainGoal` column GoalScreen writes at signup) from outside
+// the signup flow — e.g. the paid home screen's "Set goal →" chip.
+// Deliberately touches ONLY mainGoal, mirroring save_target_weight
+// above. AdminController.addUserDetails also writes mainGoal, but it
+// unconditionally overwrites age/height/weight/bmiResult too (even when
+// not sent) — reusing it here would silently wipe those fields for an
+// already-onboarded paid user, so this is a separate, narrower endpoint.
+async function save_main_goal(req, res) {
+  try {
+    const raw = req.body && req.body.mainGoal;
+    const value = typeof raw === "string" ? raw.trim() : "";
+    if (!value) {
+      return res.json(ApiResponse("0", "mainGoal is required", {}));
+    }
+    if (value.length > 100) {
+      return res.json(ApiResponse("0", "mainGoal is too long", {}));
+    }
+    const user = await User.findOne({ where: { id: req.user.id } });
+    if (!user) {
+      return res.json(ApiResponse("0", "User not found", {}));
+    }
+    user.mainGoal = value;
+    await user.save();
+    return res.json(ApiResponse("1", "Goal saved", { mainGoal: value }));
+  } catch (err) {
+    console.error("save_main_goal:", err);
     return res.json(ApiResponse("0", "Internal server error", {}));
   }
 }
@@ -1106,6 +1170,7 @@ module.exports = {
   get_notifications,
   mark_notifications_read,
   save_target_weight,
+  save_main_goal,
   save_weight_log,
   set_feature_flag,
 };

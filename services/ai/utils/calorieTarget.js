@@ -37,6 +37,20 @@ function resolveActivityMultiplier(lifestyle) {
   return ACTIVITY_MULTIPLIERS.light; // unknown — assume lightly active
 }
 
+// User.height is stored as a decimal number of FEET (e.g. "5.4" means
+// 5.4 feet — the signup height slider's raw value, NOT "5 ft 4 in"
+// clock notation). Confirmed against the exact conversion the signup
+// flow itself uses for its own BMI calc: heightInMeters = height *
+// 0.3048 (sign_up_screen_questions.dart, _finish()). 1 ft = 30.48 cm.
+// Callers must run User.height through this before passing it in as
+// heightCm — passing the raw string directly (as this file's callers
+// used to) silently treats "5.4 feet" as "5.4 centimeters".
+function heightFeetToCm(heightFeet) {
+  const ft = parseFloat(heightFeet);
+  if (!Number.isFinite(ft) || ft <= 0) return null;
+  return ft * 30.48;
+}
+
 function computeTargetCalories({ weightKg, heightCm, age, lifestyle, goalKey }) {
   const w = parseFloat(weightKg);
   const h = parseFloat(heightCm);
@@ -67,5 +81,6 @@ function computeTargetCalories({ weightKg, heightCm, age, lifestyle, goalKey }) 
 module.exports = {
   ACTIVITY_MULTIPLIERS,
   resolveActivityMultiplier,
+  heightFeetToCm,
   computeTargetCalories,
 };

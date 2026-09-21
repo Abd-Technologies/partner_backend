@@ -13,6 +13,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google-apps/meet": "^0.4.0",
+    "@google-cloud/local-auth": "^3.0.1",
     "@google-cloud/vertexai": "^1.12.0",
     "agora-token": "^2.0.3",
     "apollo-server-express": "^3.12.1",
@@ -27,6 +29,7 @@
     "express-validator": "^7.2.0",
     "fcm-node": "^1.6.1",
     "firebase-admin": "^13.1.0",
+    "google-auth-library": "^11.1.0",
     "jsonwebtoken": "^8.5.1",
     "moment": "^2.29.4",
     "moment-timezone": "^0.5.48",
