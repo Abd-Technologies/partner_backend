@@ -3878,20 +3878,6 @@ async function addImage(req, res) {
 
     await newImage.save();
 
-    // End-of-trial offer: if this slip is for a plan + duration in her
-    // live trial offer at the offer price, record the discount on the
-    // slip (listPrice / discountAmount / discountReason) so admins see
-    // why the amount is lower, and mark the offer used.
-    try {
-      const { applyOfferToSlip } = require("../../helper/trialOffer");
-      const matched = await applyOfferToSlip({
-        userId, planId, durationId, price, planImage: newImage,
-      });
-      if (matched) await newImage.save();
-    } catch (e) {
-      console.warn("Trial offer check failed (non-fatal):", e.message);
-    }
-
     // ─── Auto-activate the plan if OCR auto-approved it ───
     let activationResult = null;
     if (autoApproved) {

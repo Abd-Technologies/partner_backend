@@ -28,13 +28,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
-      // Class goal for this trial (TRIAL_CLASS_GOAL at the moment her
-      // trial started). NULL on trials started before this existed; the
-      // API falls back to the current setting for those.
-      classGoal: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-      },
       day1SlotId: {
         type: DataTypes.INTEGER,
         allowNull: true,

@@ -4,72 +4,7 @@ const {
   VALID_MEAL_TYPES,
 } = require('./ai/constants/mealTemplates');
 
-const { DietPlan, DietPlanDay, DietPlanMeal, User, UserPlan, Appointment, EscalationTicket } = db;
-
-// Plan is owed within 48h of the consultation ending. Keep in sync with
-// helper/popupEligibility.js (PLAN_DELAY_BREACH_HOURS).
-const PLAN_DUE_HOURS = 48;
-
-/**
- * If this delivery missed the 48h window, add the days she waited back
- * onto her UserPlan so she never pays for days without a plan. Returns
- * the number of days added (0 when on time or already compensated).
- *
- * Only the FIRST plan delivered after a consultation is compensated, so
- * a replacement plan for the same consultation can't extend twice.
- */
-async function compensateLateDelivery(target, now, transaction) {
-  if (!target.userPlanId) return 0;
-  const consult = await Appointment.findOne({
-    where: {
-      userId: target.userId,
-      status: 'completed',
-      status_changed_at: { [Op.lte]: now },
-    },
-    order: [['status_changed_at', 'DESC']],
-    transaction,
-  });
-  if (!consult || !consult.status_changed_at) return 0;
-  const doneAt = new Date(consult.status_changed_at);
-  const dueAt = new Date(doneAt.getTime() + PLAN_DUE_HOURS * 3600000);
-  if (now <= dueAt) return 0;
-
-  const earlier = await DietPlan.findOne({
-    where: {
-      userId: target.userId,
-      id: { [Op.ne]: target.id },
-      activatedAt: { [Op.gte]: doneAt },
-    },
-    transaction,
-  });
-  if (earlier) return 0;
-
-  const lateDays = Math.ceil((now.getTime() - dueAt.getTime()) / 86400000);
-  const userPlan = await UserPlan.findByPk(target.userPlanId, { transaction });
-  if (!userPlan || !userPlan.expireDate) return 0;
-  const newExpire = new Date(
-    new Date(userPlan.expireDate).getTime() + lateDays * 86400000
-  );
-  await userPlan.update({ expireDate: newExpire }, { transaction });
-
-  // The plan has now arrived, so close any open "plan delayed" tickets
-  // for her. Admin can still see them in the resolved list.
-  await EscalationTicket.update(
-    {
-      status: 'resolved',
-      resolvedAt: now,
-      resolutionNote: `Plan delivered late. ${lateDays} day(s) added to the client's plan automatically.`,
-    },
-    {
-      where: { userId: target.userId, trigger: 'PLAN_DELAYED', status: 'open' },
-      transaction,
-    }
-  );
-  console.log(
-    `[activateDietPlan] late delivery for user ${target.userId}: +${lateDays}d on UserPlan ${userPlan.id}`
-  );
-  return lateDays;
-}
+const { DietPlan, DietPlanDay, DietPlanMeal, User, UserPlan } = db;
 const { Op } = db.Sequelize;
 
 const TIME_PATTERN = /^\d{2}:\d{2}$/;
@@ -198,7 +133,6 @@ async function stampPlanDeliveryAnchors(userPlanId, transaction) {
  * @throws on missing/closed plans.
  */
 async function activateDietPlan(dietPlanId, dietitianId = null) {
-  let lateDaysAdded = 0;
   const plan = await db.sequelize.transaction(async (t) => {
     const target = await DietPlan.findByPk(dietPlanId, { transaction: t });
     if (!target) throw new Error('Diet plan not found');
@@ -237,14 +171,6 @@ async function activateDietPlan(dietPlanId, dietitianId = null) {
       console.error('[activateDietPlan] anchor stamp failed:', e.message);
     }
 
-    // Missed the 48h promise? Give her the days back. Non-fatal: the
-    // plan still goes out even if this bookkeeping fails.
-    try {
-      lateDaysAdded = await compensateLateDelivery(target, now, t);
-    } catch (e) {
-      console.error('[activateDietPlan] late compensation failed:', e.message);
-    }
-
     return DietPlan.findByPk(target.id, {
       include: [{ model: DietPlanDay, include: [DietPlanMeal] }],
       order: [
@@ -262,9 +188,7 @@ async function activateDietPlan(dietPlanId, dietitianId = null) {
     if (user && user.deviceToken) {
       sendNotification([user.deviceToken], {
         title: 'Your Diet Plan is Ready',
-        body: lateDaysAdded > 0
-          ? `Your personalized plan is here. Sorry for the wait, we've added ${lateDaysAdded} extra day${lateDaysAdded > 1 ? 's' : ''} to your plan.`
-          : 'Your dietitian has activated your personalized plan.',
+        body: 'Your dietitian has activated your personalized plan.',
       }, { type: 'dietPlanReady' });
     }
   } catch (e) {

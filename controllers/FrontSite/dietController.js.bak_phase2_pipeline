@@ -1,4 +1,4 @@
-const { TimeDietition, SlotDiet, Plan, UserPlan, User, Appointment, DietPlan, PdfDietsForUserNew, Day7Review, PreConsultationProfile, sequelize } = require("../../models");
+const { TimeDietition, SlotDiet, Plan, UserPlan, User, Appointment, DietPlan, PdfDietsForUserNew, Day7Review, sequelize } = require("../../models");
 const axios = require('axios');
 const ApiResponse = require("../../helper/ApiResponse");
 const { Op } = require("sequelize");
@@ -238,7 +238,7 @@ exports.getAllClients = async (req, res, next) => {
       return res.json(ApiResponse("0", "No Plan assigned to you yet", {}));
     }
 
-    const [userPlans, appts, dietPlans, pdfRows, flaggedReviews, draftPlans, profiles] =
+    const [userPlans, appts, dietPlans, pdfRows, flaggedReviews] =
       await Promise.all([
         UserPlan.findAll({
           where: { userId: { [Op.in]: assignedIds } },
@@ -278,22 +278,6 @@ exports.getAllClients = async (req, res, next) => {
             flagResolvedAt: null,
           },
           attributes: ["id", "userId"],
-        }),
-        // Drafts waiting for the dietitian to review and deliver.
-        DietPlan.findAll({
-          where: {
-            userId: { [Op.in]: assignedIds },
-            dietitianId: id,
-            status: "draft",
-          },
-          attributes: ["id", "userId", "createdAt"],
-          order: [["createdAt", "DESC"]],
-        }),
-        // When the dietitian last edited each client's form, so the
-        // pipeline can show "form reviewed" as done.
-        PreConsultationProfile.findAll({
-          where: { userId: { [Op.in]: assignedIds } },
-          attributes: ["userId", "lastDietitianEdit", "isComplete"],
         }),
       ]);
 
@@ -343,12 +327,6 @@ exports.getAllClients = async (req, res, next) => {
     for (const p of dietPlans) noteDelivery(p.userId, p.activatedAt);
     for (const p of pdfRows) noteDelivery(p.userId, p.createdAt);
     const flaggedUserIds = new Set(flaggedReviews.map((r) => r.userId));
-    const latestDraftByUser = new Map();
-    for (const d of draftPlans) {
-      if (!latestDraftByUser.has(d.userId)) latestDraftByUser.set(d.userId, d);
-    }
-    const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
-    const PLAN_SLA_HOURS = CLIENT_PLAN_OVERDUE_DAYS * 24;
 
     const clients = [];
     for (const [userId, plan] of latestPlanByUser) {
@@ -396,35 +374,6 @@ exports.getAllClients = async (req, res, next) => {
         statusDetail = "Flagged Day 7 review needs attention";
       }
 
-      // Plan-delivery pipeline for this client. Computed independently
-      // of `status`, so a client who is owed a plan still shows in
-      // "Plans to deliver" even if she also has a follow-up today or a
-      // flagged review (those win the single status badge).
-      let planPipeline = null;
-      if (lastCompleted && !delivered) {
-        const consultStartedAt = new Date(lastCompleted.date).getTime();
-        const dueAt = consultEndedAt + PLAN_SLA_HOURS * 3600000;
-        const hoursLeft = Math.round((dueAt - Date.now()) / 3600000);
-        const profileRow = profileByUser.get(userId);
-        const editedAt = profileRow && profileRow.lastDietitianEdit
-          ? new Date(profileRow.lastDietitianEdit).getTime()
-          : null;
-        const draft = latestDraftByUser.get(userId);
-        const draftIsForThisConsult =
-          draft && new Date(draft.createdAt).getTime() >= consultStartedAt;
-        planPipeline = {
-          owed: true,
-          appointmentId: lastCompleted.id,
-          consultationEndedAt: new Date(consultEndedAt).toISOString(),
-          dueAt: new Date(dueAt).toISOString(),
-          hoursLeft,
-          overdue: hoursLeft <= 0,
-          hasForm: !!profileRow,
-          formReviewed: editedAt != null && editedAt >= consultStartedAt,
-          draftPlanId: draftIsForThisConsult ? draft.id : null,
-        };
-      }
-
       const planJson = plan.toJSON();
       clients.push({
         id: planJson.id,
@@ -436,7 +385,6 @@ exports.getAllClients = async (req, res, next) => {
         statusDetail,
         hasConsultationToday: !!todayAppt,
         consultationTodayAt: todayAppt ? todayAppt.date : null,
-        planPipeline,
       });
     }
 

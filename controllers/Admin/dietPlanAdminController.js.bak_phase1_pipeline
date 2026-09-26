@@ -34,18 +34,6 @@ const { computeTargetCalories, heightFeetToCm } = require('../../services/ai/uti
  * Vertex AI generator, and persists the result as a draft DietPlan.
  * The dietitian still has to call /:id/activate before the user sees it.
  */
-// MariaDB returns JSON columns as raw strings (see the note in
-// models/PendingPopupState.js), so parse defensively before use.
-function asJson(value, fallback) {
-  if (value == null || value === '') return fallback;
-  if (typeof value !== 'string') return value;
-  try {
-    return JSON.parse(value);
-  } catch (e) {
-    return fallback;
-  }
-}
-
 async function generateDietPlanDraft(req, res) {
   try {
     const {
@@ -103,21 +91,6 @@ async function generateDietPlanDraft(req, res) {
         goalKey: profile.goals || user.mainGoal,
       }),
       mealsPerDay: mealsPerDay || profile.mealsPerDay || 5,
-
-      // Full pre-consultation form, as last edited by the dietitian
-      // during the consultation. Everything below goes to the AI so the
-      // plan reflects what was actually agreed in the session.
-      pregnancyMenstrualStatus: profile.pregnancyMenstrualStatus || '',
-      medicalConditions: profile.medicalConditions || '',
-      currentMedications: profile.currentMedications || '',
-      dietaryPreferences: asJson(profile.dietaryPreferences, []),
-      fastingHabits: profile.fastingHabits || '',
-      surgeries: profile.surgeries || '',
-      familyHistory: profile.familyHistory || '',
-      lifestyle: asJson(profile.lifestyle, {}),
-      dietitianNotes: asJson(profile.dietitianComments, [])
-        .map((c) => (c && c.text ? String(c.text).trim() : ''))
-        .filter(Boolean),
     };
 
     const result = await generateDietPlan(userInput, planDays, req.user.id);

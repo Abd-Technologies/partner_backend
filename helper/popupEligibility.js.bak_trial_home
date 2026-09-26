@@ -696,7 +696,7 @@ async function evalPlanDelayed(user, plans) {
 //     sees the booking popup immediately without waiting for the cron.
 async function evaluateForUser(userId) {
   try {
-    const allPlans = await UserPlan.findAll({
+    const plans = await UserPlan.findAll({
       where: {
         userId,
         status: true,
@@ -704,14 +704,7 @@ async function evaluateForUser(userId) {
       },
       include: [{ model: Plan, attributes: ["id", "title", "CategoryId"] }],
     });
-    // The free trial's system UserPlan ("System — Trial Auto Diet Plan")
-    // looks like a diet package by title, which would wrongly fire paid
-    // popups (book consultation, pre-consultation form, reviews...) for
-    // trial users now that they see the paid home. Paid popups are for
-    // paid packages only.
-    const paidPlans = allPlans.filter((p) => !p.isTrial);
-    if (paidPlans.length === 0) return;
-    const plans = paidPlans;
+    if (plans.length === 0) return;
 
     const user = { id: userId };
 

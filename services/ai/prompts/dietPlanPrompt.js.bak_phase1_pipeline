@@ -50,28 +50,6 @@ function buildDietPlanPrompt(user, planDays) {
     ? `NEVER include foods containing any of: ${allergyList}.`
     : 'No known allergies reported for this client — no exclusions needed on that front.';
 
-  // ── Pre-consultation form (dietitian-reviewed) ──────────────────────
-  const clean = (v) => (v == null ? '' : String(v).trim());
-  const orNone = (v) => clean(v) || 'None reported';
-  const prefs = Array.isArray(user.dietaryPreferences)
-    ? user.dietaryPreferences.map(clean).filter(Boolean)
-    : [];
-  const ls = user.lifestyle && typeof user.lifestyle === 'object' ? user.lifestyle : {};
-  const lifestyleLine =
-    [
-      ls.activityLevel && `activity: ${ls.activityLevel}`,
-      ls.workHours && `work hours: ${ls.workHours}`,
-      ls.sleepPattern && `sleep: ${ls.sleepPattern}`,
-      ls.smoking && `smoking: ${ls.smoking}`,
-      ls.alcohol && `alcohol: ${ls.alcohol}`,
-    ]
-      .filter(Boolean)
-      .join(', ') || 'Not reported';
-  const notes = Array.isArray(user.dietitianNotes) ? user.dietitianNotes : [];
-  const notesBlock = notes.length
-    ? notes.map((n) => `  - ${n}`).join('\n')
-    : '  - None';
-
   return `You are an expert women's wellness dietitian assistant for Fit Her, a Pakistan-based wellness app. Generate a personalized ${planDays}-day diet plan for this user.
 
 USER DATA:
@@ -86,17 +64,6 @@ USER DATA:
 - Cuisine preference: ${user.cuisinePreference}
 - Daily calorie target: ${user.targetCalories} kcal
 - Meals per day: ${user.mealsPerDay}
-- Pregnancy / menstrual status: ${orNone(user.pregnancyMenstrualStatus)}
-- Medical conditions: ${orNone(user.medicalConditions)}
-- Current medications: ${orNone(user.currentMedications)}
-- Dietary preferences: ${prefs.length ? prefs.join(', ') : 'None reported'}
-- Fasting habits: ${orNone(user.fastingHabits)}
-- Past surgeries: ${orNone(user.surgeries)}
-- Family history: ${orNone(user.familyHistory)}
-- Lifestyle: ${lifestyleLine}
-
-DIETITIAN'S NOTES FROM THE CONSULTATION (highest priority, follow these over any general rule below):
-${notesBlock}
 
 REQUIREMENTS:
 1. Exactly ${planDays} days, ${user.mealsPerDay} meals per day, in this order: ${mealTypesList}.
@@ -111,8 +78,7 @@ REQUIREMENTS:
    - ovulatory: light, fiber-rich (salads, fruits, sprouts)
 7. notes: one short tip per meal explaining the choice.
 8. mealType MUST be lowercase snake_case: ${mealTypesPipe}. Use ONLY these — do not introduce other types.
-9. Respect every medical condition, medication, dietary preference and fasting habit above (e.g. no meat for a vegetarian, low glycemic foods for diabetes or PCOS, avoid foods that interact with listed medications, safe foods only if pregnant or breastfeeding). These override the example foods in rule 3.
-10. time MUST be 24h "HH:MM" wall-clock time (e.g. "08:00", "13:30"). It is intentionally timezone-naive — see CLAUDE.md timezone rules.`;
+9. time MUST be 24h "HH:MM" wall-clock time (e.g. "08:00", "13:30"). It is intentionally timezone-naive — see CLAUDE.md timezone rules.`;
 }
 
 module.exports = { buildDietPlanPrompt };

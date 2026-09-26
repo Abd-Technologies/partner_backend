@@ -17,10 +17,6 @@ router.post(
 );
 router.post("/start", validateToken, asyncMiddleware(trialController.startTrial));
 router.get("/me", validateToken, asyncMiddleware(trialController.getMyTrial));
-// Class schedule for the trial onboarding class picker (no booking).
-router.get("/classes", validateToken, asyncMiddleware(trialController.listClasses));
-// End-of-trial summary + offer (her country's prices).
-router.get("/summary", validateToken, asyncMiddleware(trialController.getSummary));
 router.post("/book-day", validateToken, asyncMiddleware(trialController.bookDay));
 router.post(
   "/attendance",

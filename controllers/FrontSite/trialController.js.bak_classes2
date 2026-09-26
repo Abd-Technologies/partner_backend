@@ -9,7 +9,6 @@ const {
   getJoinWindowMinutes,
 } = require("../../helper/trialState");
 const { countTrialClassesAttended, listTrialClasses } = require("../../helper/trialClasses");
-const { getTrialSummary } = require("../../helper/trialOffer");
 const { ensureTrialUserPlan } = require("../../services/trialPlanService");
 
 const TOKEN_STATUSES = {
@@ -89,8 +88,6 @@ function serializeJourney(journey) {
     // setting) and the late-join window, both from .env.
     classGoal: journey.classGoal || getTrialClassGoal(),
     joinWindowMinutes: getJoinWindowMinutes(),
-    // Minutes she must stay in a class for it to count.
-    attendanceMinutes: Math.round(require("../../helper/trialAttendance").minTrialAttendanceSeconds() / 60),
     tokenValidatedAt: journey.tokenValidatedAt,
     startedAt: journey.startedAt,
     day1SlotId: journey.day1SlotId,
@@ -332,20 +329,6 @@ exports.getMyTrial = async (req, res) => {
  * time zone, with trainer, popularity, "recommended for you" and her
  * current picks. No booking: picks only drive reminders.
  */
-/**
- * GET /trial/summary?country=<country name, same as the plans screen>
- * "My trial" summary: classes, meals logged, a short note, and (from her
- * last trial day) the offer in her country's prices.
- */
-exports.getSummary = async (req, res) => {
-  const userId = req.user && req.user.id;
-  if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
-  const country = String((req.query && req.query.country) || "").trim() || null;
-  const data = await getTrialSummary(userId, country);
-  if (!data) return res.json(ApiResponse("0", "No trial found", {}));
-  return res.json(ApiResponse("1", "Trial summary", data));
-};
-
 exports.listClasses = async (req, res) => {
   const userId = req.user && req.user.id;
   if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));

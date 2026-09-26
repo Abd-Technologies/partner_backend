@@ -24,19 +24,8 @@ const { computeTargetCalories, heightFeetToCm } = require('../../services/ai/uti
 const { User, PreConsultationProfile, DietPlan, TrialJourney } = db;
 
 const DEFAULT_TRIAL_MEALS_PER_DAY = 4;
-const { getTrialDays } = require('../../helper/trialState');
+const TRIAL_PLAN_DAYS = 7;
 const VALID_MEALS_PER_DAY = [3, 4, 5, 6];
-
-// MariaDB hands JSON columns back as strings; parse defensively.
-function asJson(value, fallback) {
-  if (value == null || value === '') return fallback;
-  if (typeof value !== 'string') return value;
-  try {
-    return JSON.parse(value);
-  } catch (e) {
-    return fallback;
-  }
-}
 
 /**
  * POST /trial/quick-intake
@@ -58,18 +47,8 @@ async function submitTrialQuickIntake(req, res) {
       return res.json(ApiResponse('0', 'Start your free trial first', {}));
     }
 
-    // The trial now uses the SAME full pre-consultation form as paid
-    // users (it saves itself through PATCH /users/pre-consultation), so
-    // the body here is usually empty and everything is read from the
-    // saved profile. goal / allergies / mealsPerDay in the body are
-    // still honoured for older app versions using the 3-field screen.
     const { goal, allergies, mealsPerDay } = req.body || {};
-    const existingProfile = await PreConsultationProfile.findOne({ where: { userId } });
-    const resolvedGoal =
-      (goal && String(goal).trim()) ||
-      (existingProfile && existingProfile.goals) ||
-      null;
-    if (!resolvedGoal) {
+    if (!goal || !String(goal).trim()) {
       return res.json(ApiResponse('0', 'Please tell us your main goal', {}));
     }
 
@@ -91,26 +70,22 @@ async function submitTrialQuickIntake(req, res) {
 
     const trialUserPlan = await ensureTrialUserPlan(userId);
 
-    let profile = existingProfile;
-    const savedMeals = profile ? Number(profile.mealsPerDay) : NaN;
     const resolvedMealsPerDay = VALID_MEALS_PER_DAY.includes(Number(mealsPerDay))
       ? Number(mealsPerDay)
-      : VALID_MEALS_PER_DAY.includes(savedMeals)
-        ? savedMeals
-        : DEFAULT_TRIAL_MEALS_PER_DAY;
+      : DEFAULT_TRIAL_MEALS_PER_DAY;
 
+    let profile = await PreConsultationProfile.findOne({ where: { userId } });
     const profileFields = {
       userId,
-      goals: resolvedGoal,
+      goals: String(goal).trim(),
       allergies:
         allergies != null && String(allergies).trim() !== ''
           ? String(allergies).trim()
           : (profile ? profile.allergies : null),
       mealsPerDay: resolvedMealsPerDay,
-      // Filled during the free trial. When she later buys a package she
-      // is asked to REVIEW and CONFIRM these answers instead of filling
-      // the form again (see evalPreConsultationForm).
-      intakeSource: 'trial',
+      // Marks this as the trimmed trial form, not the full consultation
+      // — see PreConsultationProfile.js's intakeSource comment.
+      intakeSource: 'trial_quick',
       isComplete: true,
       lastUserUpdate: new Date(),
     };
@@ -146,22 +121,9 @@ async function submitTrialQuickIntake(req, res) {
         goalKey: profile.goals,
       }),
       mealsPerDay: resolvedMealsPerDay,
-      // Rest of the full form, same as the dietitian flow.
-      pregnancyMenstrualStatus: profile.pregnancyMenstrualStatus || '',
-      medicalConditions: profile.medicalConditions || '',
-      currentMedications: profile.currentMedications || '',
-      dietaryPreferences: asJson(profile.dietaryPreferences, []),
-      fastingHabits: profile.fastingHabits || '',
-      surgeries: profile.surgeries || '',
-      familyHistory: profile.familyHistory || '',
-      lifestyle: asJson(profile.lifestyle, {}),
-      dietitianNotes: [],
     };
 
     // dietitianId: null throughout — server-triggered, not staff-triggered.
-    // The starter plan covers exactly the trial (3 days by default, or
-    // whatever TRIAL_DAYS is set to), not a fixed 7.
-    const TRIAL_PLAN_DAYS = getTrialDays();
     const result = await generateDietPlan(userInput, TRIAL_PLAN_DAYS, null);
     if (!result.success) {
       return res.json(
