@@ -51,20 +51,7 @@ function computeNextBookableDay(journey) {
 }
 
 /**
- * Free trial length in days. Change it in .env (TRIAL_DAYS=7) and
- * restart the server; no code change or app release needed. Drives the
- * trial expiry, the length of the trial AI meal plan, and what the app
- * shows (banner, home switch). Clamped to 1..14 (the AI plan supports
- * up to 14 days). The live classes stay 3 bookable sessions.
- */
-function getTrialDays() {
-  const n = parseInt(process.env.TRIAL_DAYS, 10);
-  if (!Number.isInteger(n)) return 3;
-  return Math.min(Math.max(n, 1), 14);
-}
-
-/**
- * Return true if the trial window (TRIAL_DAYS) has passed.
+ * Return true if the 3-day trial window has passed.
  * startedAt must be a Date instance or parseable date string.
  *
  * @param {Date|string} startedAt
@@ -72,37 +59,8 @@ function getTrialDays() {
  */
 function isTrialExpired(startedAt) {
   if (!startedAt) return false;
-  const end = new Date(new Date(startedAt).getTime() + getTrialDays() * 24 * 60 * 60 * 1000);
+  const end = new Date(new Date(startedAt).getTime() + 3 * 24 * 60 * 60 * 1000);
   return new Date() > end;
 }
 
-/**
- * How many live classes a trial user aims to join (TRIAL_CLASS_GOAL in
- * .env, default 3). Saved on her TrialJourney when her trial starts, so
- * changing it later only affects new trials. Capped at 2 per trial day.
- */
-function getTrialClassGoal() {
-  const n = parseInt(process.env.TRIAL_CLASS_GOAL, 10);
-  const max = getTrialDays() * 2;
-  if (!Number.isInteger(n) || n < 1) return Math.min(3, max);
-  return Math.min(n, max);
-}
-
-/**
- * How many minutes after a class starts a trial user can still join
- * (TRIAL_JOIN_WINDOW_MINUTES, default 10).
- */
-function getJoinWindowMinutes() {
-  const n = parseInt(process.env.TRIAL_JOIN_WINDOW_MINUTES, 10);
-  if (!Number.isInteger(n) || n < 1) return 10;
-  return Math.min(n, 60);
-}
-
-module.exports = {
-  computeState,
-  computeNextBookableDay,
-  isTrialExpired,
-  getTrialDays,
-  getTrialClassGoal,
-  getJoinWindowMinutes,
-};
+module.exports = { computeState, computeNextBookableDay, isTrialExpired };

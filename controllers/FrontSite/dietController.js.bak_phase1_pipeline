@@ -1,4 +1,4 @@
-const { TimeDietition, SlotDiet, Plan, UserPlan, User, Appointment, DietPlan, PdfDietsForUserNew, Day7Review, PreConsultationProfile, sequelize } = require("../../models");
+const { TimeDietition, SlotDiet, Plan, UserPlan, User, Appointment, DietPlan, PdfDietsForUserNew, Day7Review, sequelize } = require("../../models");
 const axios = require('axios');
 const ApiResponse = require("../../helper/ApiResponse");
 const { Op } = require("sequelize");
@@ -238,7 +238,7 @@ exports.getAllClients = async (req, res, next) => {
       return res.json(ApiResponse("0", "No Plan assigned to you yet", {}));
     }
 
-    const [userPlans, appts, dietPlans, pdfRows, flaggedReviews, draftPlans, profiles] =
+    const [userPlans, appts, dietPlans, pdfRows, flaggedReviews] =
       await Promise.all([
         UserPlan.findAll({
           where: { userId: { [Op.in]: assignedIds } },
@@ -256,20 +256,13 @@ exports.getAllClients = async (req, res, next) => {
           attributes: ["id", "userId", "date", "status", "status_changed_at", "updatedAt"],
           order: [["date", "DESC"]],
         }),
-        // Only plans the client actually received count as "delivered".
-        // A draft (generated but not yet sent) must keep the client in
-        // "Plans to deliver", otherwise the dietitian loses track of it.
         DietPlan.findAll({
-          where: {
-            userId: { [Op.in]: assignedIds },
-            dietitianId: id,
-            activatedAt: { [Op.ne]: null },
-          },
-          attributes: ["id", "userId", "activatedAt"],
+          where: { userId: { [Op.in]: assignedIds }, dietitianId: id },
+          attributes: ["id", "userId"],
         }),
         PdfDietsForUserNew.findAll({
           where: { userId: { [Op.in]: assignedIds } },
-          attributes: ["id", "userId", "createdAt"],
+          attributes: ["id", "userId"],
         }),
         Day7Review.findAll({
           where: {
@@ -278,22 +271,6 @@ exports.getAllClients = async (req, res, next) => {
             flagResolvedAt: null,
           },
           attributes: ["id", "userId"],
-        }),
-        // Drafts waiting for the dietitian to review and deliver.
-        DietPlan.findAll({
-          where: {
-            userId: { [Op.in]: assignedIds },
-            dietitianId: id,
-            status: "draft",
-          },
-          attributes: ["id", "userId", "createdAt"],
-          order: [["createdAt", "DESC"]],
-        }),
-        // When the dietitian last edited each client's form, so the
-        // pipeline can show "form reviewed" as done.
-        PreConsultationProfile.findAll({
-          where: { userId: { [Op.in]: assignedIds } },
-          attributes: ["userId", "lastDietitianEdit", "isComplete"],
         }),
       ]);
 
@@ -330,37 +307,17 @@ exports.getAllClients = async (req, res, next) => {
       }
     }
 
-    // Latest delivery time per client, across both diet systems. A plan
-    // only counts as delivered for THIS consultation if it was delivered
-    // after the consultation ended, so a returning client's old plan from
-    // a previous cycle doesn't hide the new one that is still owed.
-    const lastDeliveredAtByUser = new Map();
-    const noteDelivery = (userId, at) => {
-      if (!at) return;
-      const t = new Date(at).getTime();
-      if (!(lastDeliveredAtByUser.get(userId) >= t)) lastDeliveredAtByUser.set(userId, t);
-    };
-    for (const p of dietPlans) noteDelivery(p.userId, p.activatedAt);
-    for (const p of pdfRows) noteDelivery(p.userId, p.createdAt);
+    const deliveredUserIds = new Set([
+      ...dietPlans.map((p) => p.userId),
+      ...pdfRows.map((p) => p.userId),
+    ]);
     const flaggedUserIds = new Set(flaggedReviews.map((r) => r.userId));
-    const latestDraftByUser = new Map();
-    for (const d of draftPlans) {
-      if (!latestDraftByUser.has(d.userId)) latestDraftByUser.set(d.userId, d);
-    }
-    const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
-    const PLAN_SLA_HOURS = CLIENT_PLAN_OVERDUE_DAYS * 24;
 
     const clients = [];
     for (const [userId, plan] of latestPlanByUser) {
       const todayAppt = apptTodayByUser.get(userId);
       const lastCompleted = lastCompletedByUser.get(userId);
-      const lastDeliveredAt = lastDeliveredAtByUser.get(userId);
-      const consultEndedAt = lastCompleted
-        ? new Date(lastCompleted.status_changed_at || lastCompleted.updatedAt).getTime()
-        : null;
-      const delivered =
-        lastDeliveredAt != null &&
-        (consultEndedAt == null || lastDeliveredAt >= consultEndedAt);
+      const delivered = deliveredUserIds.has(userId);
       const flagged = flaggedUserIds.has(userId);
 
       let status = "NEW";
@@ -396,35 +353,6 @@ exports.getAllClients = async (req, res, next) => {
         statusDetail = "Flagged Day 7 review needs attention";
       }
 
-      // Plan-delivery pipeline for this client. Computed independently
-      // of `status`, so a client who is owed a plan still shows in
-      // "Plans to deliver" even if she also has a follow-up today or a
-      // flagged review (those win the single status badge).
-      let planPipeline = null;
-      if (lastCompleted && !delivered) {
-        const consultStartedAt = new Date(lastCompleted.date).getTime();
-        const dueAt = consultEndedAt + PLAN_SLA_HOURS * 3600000;
-        const hoursLeft = Math.round((dueAt - Date.now()) / 3600000);
-        const profileRow = profileByUser.get(userId);
-        const editedAt = profileRow && profileRow.lastDietitianEdit
-          ? new Date(profileRow.lastDietitianEdit).getTime()
-          : null;
-        const draft = latestDraftByUser.get(userId);
-        const draftIsForThisConsult =
-          draft && new Date(draft.createdAt).getTime() >= consultStartedAt;
-        planPipeline = {
-          owed: true,
-          appointmentId: lastCompleted.id,
-          consultationEndedAt: new Date(consultEndedAt).toISOString(),
-          dueAt: new Date(dueAt).toISOString(),
-          hoursLeft,
-          overdue: hoursLeft <= 0,
-          hasForm: !!profileRow,
-          formReviewed: editedAt != null && editedAt >= consultStartedAt,
-          draftPlanId: draftIsForThisConsult ? draft.id : null,
-        };
-      }
-
       const planJson = plan.toJSON();
       clients.push({
         id: planJson.id,
@@ -436,7 +364,6 @@ exports.getAllClients = async (req, res, next) => {
         statusDetail,
         hasConsultationToday: !!todayAppt,
         consultationTodayAt: todayAppt ? todayAppt.date : null,
-        planPipeline,
       });
     }
 

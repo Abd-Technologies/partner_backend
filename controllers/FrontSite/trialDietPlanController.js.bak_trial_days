@@ -24,7 +24,7 @@ const { computeTargetCalories, heightFeetToCm } = require('../../services/ai/uti
 const { User, PreConsultationProfile, DietPlan, TrialJourney } = db;
 
 const DEFAULT_TRIAL_MEALS_PER_DAY = 4;
-const { getTrialDays } = require('../../helper/trialState');
+const TRIAL_PLAN_DAYS = 7;
 const VALID_MEALS_PER_DAY = [3, 4, 5, 6];
 
 // MariaDB hands JSON columns back as strings; parse defensively.
@@ -159,9 +159,6 @@ async function submitTrialQuickIntake(req, res) {
     };
 
     // dietitianId: null throughout — server-triggered, not staff-triggered.
-    // The starter plan covers exactly the trial (3 days by default, or
-    // whatever TRIAL_DAYS is set to), not a fixed 7.
-    const TRIAL_PLAN_DAYS = getTrialDays();
     const result = await generateDietPlan(userInput, TRIAL_PLAN_DAYS, null);
     if (!result.success) {
       return res.json(

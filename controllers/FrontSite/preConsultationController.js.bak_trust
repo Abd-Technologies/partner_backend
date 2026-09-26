@@ -4,10 +4,6 @@ const { PreConsultationProfile } = require("../../models");
 // Fields the user is allowed to set/update on their own profile. Anything
 // else in the request body is silently ignored (whitelist, not blacklist —
 // safer if new admin-only fields are added later).
-// Bump when the consent wording in the app changes, so we always know
-// which text each woman agreed to.
-const HEALTH_CONSENT_VERSION = "v1";
-
 const USER_EDITABLE_FIELDS = [
   "goals",
   "allergies",
@@ -118,15 +114,6 @@ exports.updateOwnProfile = async (req, res) => {
       ![3, 4, 5, 6].includes(Number(updates.mealsPerDay))
     ) {
       delete updates.mealsPerDay;
-    }
-
-    // Health data consent from the review screen. The server stamps the
-    // time; the app sends which wording version she agreed to.
-    if (req.body && req.body.healthConsent === true) {
-      updates.healthConsentAt = new Date();
-      updates.healthConsentVersion = String(
-        req.body.consentVersion || HEALTH_CONSENT_VERSION
-      ).slice(0, 16);
     }
 
     // A paid user reviewed the answers she gave during her free trial

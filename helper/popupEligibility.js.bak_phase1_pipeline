@@ -69,10 +69,7 @@ const DAILY_LOG_REMINDER_THRESHOLD_DAYS = 2;
 const INACTIVITY_THRESHOLD_DAYS = 3;
 const INACTIVITY_REFIRE_DAYS = 3;
 const RENEW_PLAN_REFIRE_DAYS = 7;
-// Plan must reach the client within 48 hours of the consultation ending.
-// Measured in real hours (not calendar days) so a 11pm consultation still
-// gets its full 48h.
-const PLAN_DELAY_BREACH_HOURS = 48;
+const PLAN_DELAY_BREACH_DAYS = 3;
 const EARLY_CHECKIN_DAY_LOW = 3;
 const EARLY_CHECKIN_DAY_HIGH = 4;
 const NO_SHOW_GRACE_MINUTES = 10;
@@ -185,10 +182,7 @@ async function evalPreConsultationForm(user, plans) {
   const profile = await PreConsultationProfile.findOne({
     where: { userId: user.id },
   });
-  // Answers from the free trial are kept, but a paying client must
-  // confirm them once (the popup opens as a "review and confirm" view).
-  const fromTrial = String((profile && profile.intakeSource) || "").startsWith("trial");
-  if (profile && profile.isComplete && !fromTrial) {
+  if (profile && profile.isComplete) {
     // Retire any row this popup already left eligible from before the
     // form was completed. setEligible only ever CREATES/REFRESHES a row
     // — nothing else marks it done — so without this, a user who fills
@@ -617,41 +611,14 @@ async function evalPlanDelayed(user, plans) {
   if (!consultation) return;
   const completedAt = consultation.status_changed_at || consultation.updatedAt;
   if (!completedAt) return;
-  const sinceHours = (Date.now() - new Date(completedAt).getTime()) / 3600000;
-  if (!(sinceHours >= PLAN_DELAY_BREACH_HOURS)) return;
   const sinceDays = daysSince(completedAt);
+  if (sinceDays == null || sinceDays < PLAN_DELAY_BREACH_DAYS) return;
 
-  // Already delivered after this consultation? Skip. Checks both the AI
-  // plan (activated DietPlan) and the legacy PDF upload.
-  const aiPlan = await DietPlan.findOne({
-    where: {
-      userId: user.id,
-      activatedAt: { [Op.gte]: completedAt },
-    },
+  // Already delivered? Skip.
+  const pdf = await PdfDietsForUserNew.findOne({
+    where: { userPlanId: dietOrCombined.id },
   });
-  const pdf = aiPlan
-    ? null
-    : await PdfDietsForUserNew.findOne({
-        where: {
-          userPlanId: dietOrCombined.id,
-          createdAt: { [Op.gte]: completedAt },
-        },
-      });
-  if (aiPlan || pdf) {
-    // Plan arrived, so any "your plan is delayed" popup still waiting
-    // for this user is now wrong. Retire it so she never sees it.
-    await PendingPopupState.update(
-      { completedAt: new Date() },
-      {
-        where: {
-          userId: user.id,
-          popupVariable: "POPUP_PLAN_DELAYED",
-          completedAt: null,
-        },
-      }
-    );
-    return;
-  }
+  if (pdf) return;
 
   // Open the popup AND open an escalation if not already open. The
   // dedup happens via PendingPopupState's recent-row check.
@@ -696,7 +663,7 @@ async function evalPlanDelayed(user, plans) {
 //     sees the booking popup immediately without waiting for the cron.
 async function evaluateForUser(userId) {
   try {
-    const allPlans = await UserPlan.findAll({
+    const plans = await UserPlan.findAll({
       where: {
         userId,
         status: true,
@@ -704,14 +671,7 @@ async function evaluateForUser(userId) {
       },
       include: [{ model: Plan, attributes: ["id", "title", "CategoryId"] }],
     });
-    // The free trial's system UserPlan ("System — Trial Auto Diet Plan")
-    // looks like a diet package by title, which would wrongly fire paid
-    // popups (book consultation, pre-consultation form, reviews...) for
-    // trial users now that they see the paid home. Paid popups are for
-    // paid packages only.
-    const paidPlans = allPlans.filter((p) => !p.isTrial);
-    if (paidPlans.length === 0) return;
-    const plans = paidPlans;
+    if (plans.length === 0) return;
 
     const user = { id: userId };
 

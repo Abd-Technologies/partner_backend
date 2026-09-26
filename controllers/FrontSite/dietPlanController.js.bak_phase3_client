@@ -5,55 +5,7 @@ const {
   getActiveDietPlanForUser,
 } = require('../../services/dietPlanService');
 
-const { User, UserPlan, Appointment, DietPlan, Plan, PdfDietsForUserNew } = db;
-const { Op } = require('sequelize');
-
-// A plan must reach the client within 48 hours of her consultation.
-// Keep in sync with PLAN_DELAY_BREACH_HOURS in helper/popupEligibility.js.
-const PLAN_DUE_HOURS = 48;
-
-/**
- * When the client has finished her consultation but hasn't received her
- * plan yet, returns what her "plan is being prepared" card needs.
- * Returns null in every other case (no consultation yet, or delivered).
- */
-async function buildPlanPreparing(userId) {
-  const consult = await Appointment.findOne({
-    where: { userId, status: 'completed' },
-    order: [['status_changed_at', 'DESC'], ['date', 'DESC']],
-  });
-  if (!consult) return null;
-  const doneAt = new Date(consult.status_changed_at || consult.updatedAt);
-  if (Number.isNaN(doneAt.getTime())) return null;
-
-  // Already delivered after this consultation (AI plan or legacy PDF)?
-  const delivered = await DietPlan.findOne({
-    where: { userId, activatedAt: { [Op.gte]: doneAt } },
-    attributes: ['id'],
-  });
-  if (delivered) return null;
-  const pdf = await PdfDietsForUserNew.findOne({
-    where: { userId, createdAt: { [Op.gte]: doneAt } },
-    attributes: ['id'],
-  });
-  if (pdf) return null;
-
-  const dueAt = new Date(doneAt.getTime() + PLAN_DUE_HOURS * 3600000);
-  let dietitianName = null;
-  if (consult.dietitionId) {
-    const d = await User.findByPk(consult.dietitionId, {
-      attributes: ['firstName', 'lastName'],
-    });
-    if (d) dietitianName = `${d.firstName || ''} ${d.lastName || ''}`.trim() || null;
-  }
-  return {
-    consultationDoneAt: doneAt.toISOString(),
-    dueAt: dueAt.toISOString(),
-    delayed: Date.now() > dueAt.getTime(),
-    dietitianId: consult.dietitionId || null,
-    dietitianName,
-  };
-}
+const { User, UserPlan, Appointment, DietPlan, Plan } = db;
 
 /**
  * GET /users/diet-plan/me/active
@@ -210,8 +162,6 @@ async function getMyBookingContext(req, res) {
         userPlanId,
         dietitianId,
         hasActivePlan: !!activeDietPlan,
-        // Filled only between "consultation done" and "plan delivered".
-        planPreparing: activeDietPlan ? null : await buildPlanPreparing(userId),
       })
     );
   } catch (err) {

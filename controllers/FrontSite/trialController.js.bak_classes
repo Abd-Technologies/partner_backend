@@ -1,15 +1,6 @@
 const ApiResponse = require("../../helper/ApiResponse");
 const { TrialJourney, TrialToken, Slot, User, FreeTrailUsers, PreConsultationProfile, sequelize } = require("../../models");
-const {
-  computeState,
-  computeNextBookableDay,
-  isTrialExpired,
-  getTrialDays,
-  getTrialClassGoal,
-  getJoinWindowMinutes,
-} = require("../../helper/trialState");
-const { countTrialClassesAttended, listTrialClasses } = require("../../helper/trialClasses");
-const { getTrialSummary } = require("../../helper/trialOffer");
+const { computeState, computeNextBookableDay, isTrialExpired, getTrialDays } = require("../../helper/trialState");
 const { ensureTrialUserPlan } = require("../../services/trialPlanService");
 
 const TOKEN_STATUSES = {
@@ -52,23 +43,6 @@ function isTokenExpired(tokenRow) {
   return !!(tokenRow && tokenRow.expiresAt && new Date(tokenRow.expiresAt) < new Date());
 }
 
-/** serializeJourney + how many classes she has attended so far. */
-async function withClassProgress(userId, journey) {
-  const base = serializeJourney(journey);
-  if (!base) return base;
-  let attended = 0;
-  try {
-    attended = await countTrialClassesAttended(userId, journey);
-  } catch (e) {
-    console.error("[trial] class progress:", e.message);
-  }
-  return {
-    ...base,
-    classesAttended: attended,
-    classGoalReached: attended >= base.classGoal,
-  };
-}
-
 function serializeJourney(journey) {
   if (!journey) return null;
 
@@ -85,12 +59,6 @@ function serializeJourney(journey) {
     isExpired: !journey.convertedAt && isTrialExpired(journey.startedAt),
     // Trial length from TRIAL_DAYS in .env, so the app never hardcodes it.
     trialDays: getTrialDays(),
-    // Class goal saved when her trial started (older trials: current
-    // setting) and the late-join window, both from .env.
-    classGoal: journey.classGoal || getTrialClassGoal(),
-    joinWindowMinutes: getJoinWindowMinutes(),
-    // Minutes she must stay in a class for it to count.
-    attendanceMinutes: Math.round(require("../../helper/trialAttendance").minTrialAttendanceSeconds() / 60),
     tokenValidatedAt: journey.tokenValidatedAt,
     startedAt: journey.startedAt,
     day1SlotId: journey.day1SlotId,
@@ -235,7 +203,6 @@ exports.startTrial = async (req, res) => {
           startedAt: new Date(),
           state: "trial_started",
           nextBookableDay: 1,
-          classGoal: getTrialClassGoal(),
         },
         { transaction }
       );
@@ -281,9 +248,7 @@ exports.startTrial = async (req, res) => {
     await transaction.commit();
 
     return res.json(
-      ApiResponse("1", "Trial started", {
-        journey: await withClassProgress(userId, journey),
-      })
+      ApiResponse("1", "Trial started", { journey: serializeJourney(journey) })
     );
   } catch (error) {
     await transaction.rollback();
@@ -320,37 +285,8 @@ exports.getMyTrial = async (req, res) => {
 
   await persistDerivedState(journey);
   return res.json(
-    ApiResponse("1", "Trial loaded", {
-      journey: await withClassProgress(userId, journey),
-    })
+    ApiResponse("1", "Trial loaded", { journey: serializeJourney(journey) })
   );
-};
-
-/**
- * GET /trial/classes
- * The live class schedule for the trial onboarding class picker, in her
- * time zone, with trainer, popularity, "recommended for you" and her
- * current picks. No booking: picks only drive reminders.
- */
-/**
- * GET /trial/summary?country=<country name, same as the plans screen>
- * "My trial" summary: classes, meals logged, a short note, and (from her
- * last trial day) the offer in her country's prices.
- */
-exports.getSummary = async (req, res) => {
-  const userId = req.user && req.user.id;
-  if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
-  const country = String((req.query && req.query.country) || "").trim() || null;
-  const data = await getTrialSummary(userId, country);
-  if (!data) return res.json(ApiResponse("0", "No trial found", {}));
-  return res.json(ApiResponse("1", "Trial summary", data));
-};
-
-exports.listClasses = async (req, res) => {
-  const userId = req.user && req.user.id;
-  if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
-  const data = await listTrialClasses(userId);
-  return res.json(ApiResponse("1", "Classes loaded", data));
 };
 
 exports.bookDay = async (req, res) => {

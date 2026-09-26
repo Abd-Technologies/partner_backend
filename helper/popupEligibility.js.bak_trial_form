@@ -185,10 +185,7 @@ async function evalPreConsultationForm(user, plans) {
   const profile = await PreConsultationProfile.findOne({
     where: { userId: user.id },
   });
-  // Answers from the free trial are kept, but a paying client must
-  // confirm them once (the popup opens as a "review and confirm" view).
-  const fromTrial = String((profile && profile.intakeSource) || "").startsWith("trial");
-  if (profile && profile.isComplete && !fromTrial) {
+  if (profile && profile.isComplete) {
     // Retire any row this popup already left eligible from before the
     // form was completed. setEligible only ever CREATES/REFRESHES a row
     // — nothing else marks it done — so without this, a user who fills
@@ -696,7 +693,7 @@ async function evalPlanDelayed(user, plans) {
 //     sees the booking popup immediately without waiting for the cron.
 async function evaluateForUser(userId) {
   try {
-    const allPlans = await UserPlan.findAll({
+    const plans = await UserPlan.findAll({
       where: {
         userId,
         status: true,
@@ -704,14 +701,7 @@ async function evaluateForUser(userId) {
       },
       include: [{ model: Plan, attributes: ["id", "title", "CategoryId"] }],
     });
-    // The free trial's system UserPlan ("System — Trial Auto Diet Plan")
-    // looks like a diet package by title, which would wrongly fire paid
-    // popups (book consultation, pre-consultation form, reviews...) for
-    // trial users now that they see the paid home. Paid popups are for
-    // paid packages only.
-    const paidPlans = allPlans.filter((p) => !p.isTrial);
-    if (paidPlans.length === 0) return;
-    const plans = paidPlans;
+    if (plans.length === 0) return;
 
     const user = { id: userId };
 

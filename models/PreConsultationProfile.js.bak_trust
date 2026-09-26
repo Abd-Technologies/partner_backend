@@ -138,20 +138,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(32),
         allowNull: true,
       },
-
-      // ── Health data consent ────────────────────────────────────────
-      // When she agreed "use my health info only to create my plan and
-      // keep my classes safe", and which wording version she saw
-      // (HEALTH_CONSENT_VERSION in preConsultationController.js). Kept as
-      // our record of consent.
-      healthConsentAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-      },
-      healthConsentVersion: {
-        type: DataTypes.STRING(16),
-        allowNull: true,
-      },
     },
     {
       tableName: 'PreConsultationProfiles',

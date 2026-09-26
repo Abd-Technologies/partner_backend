@@ -96,14 +96,11 @@ async function sendTrialJourneyChurnedNudges() {
   try {
     const paidPlanUserIds = await getPaidPlanUserIds();
 
-    // Trials that have ENDED without converting. Anchored on the trial's
-    // end (startedAt + TRIAL_DAYS) now that the Day 1/2/3 ladder is gone
-    // (day3AttendedAt is no longer set for new trials).
-    const trialDays = require('../trialState').getTrialDays();
+    // Fetch completed-but-unconverted journeys with the linked user.
     const journeys = await TrialJourney.findAll({
       where: {
-        startedAt:   { [Op.lte]: new Date(Date.now() - trialDays * 86400000) },
-        convertedAt: null,
+        day3AttendedAt: { [Op.ne]: null },
+        convertedAt:    null,
       },
       include: [{
         model:    User,
@@ -115,7 +112,7 @@ async function sendTrialJourneyChurnedNudges() {
         },
         attributes: ['id', 'deviceToken'],
       }],
-      attributes: ['userId', 'startedAt'],
+      attributes: ['userId', 'day3AttendedAt'],
     });
 
     const results = { sent: 0, skippedPaid: 0, skippedWindow: 0, skippedDedup: 0 };
@@ -127,8 +124,7 @@ async function sendTrialJourneyChurnedNudges() {
       // lifecycle.js owns paid-plan users — skip them here.
       if (paidPlanUserIds.has(user.id)) { results.skippedPaid++; continue; }
 
-      const trialEnd  = moment(journey.startedAt).add(trialDays, 'days');
-      const daysSince = moment().diff(trialEnd, 'days');
+      const daysSince = moment().diff(moment(journey.day3AttendedAt), 'days');
       const bucket    = getBucket(daysSince);
       if (!bucket) { results.skippedWindow++; continue; }
 

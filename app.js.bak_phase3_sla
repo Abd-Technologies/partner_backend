@@ -92,9 +92,6 @@ const { autoEndExpiredSessions, GRACE_MINUTES } = require("./helper/autoEndSessi
 const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("./helper/autoEndExpiredAppointments");
 const { checkMeetAttendance } = require("./helper/checkMeetAttendance");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
-const { sendPlanDeliveryReminders } = require("./helper/planDeliveryReminders");
-const { sendTrialClassReminders } = require("./helper/trialClasses");
-const { sendTrialOfferReminders } = require("./helper/trialOffer");
 const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
 const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
 const popupEligibility = require("./helper/popupEligibility");
@@ -134,49 +131,6 @@ cron.schedule(
       }
     } catch (error) {
       console.error("Error in missed-session-recovery job:", error);
-    }
-  },
-  { timezone: CRON_TZ }
-);
-
-// Free trial class reminders: 15 min before her picked class and "live
-// now" at start if she hasn't joined. Max 2 a day, none once she has
-// joined a class today. See helper/trialClasses.js.
-cron.schedule(
-  "*/5 * * * *",
-  async () => {
-    try {
-      await sendTrialClassReminders();
-    } catch (error) {
-      console.error("Error in trial-class-reminders job:", error);
-    }
-  },
-  { timezone: CRON_TZ }
-);
-
-// End-of-trial offer: one reminder when about a day is left. Hourly.
-cron.schedule(
-  "41 * * * *",
-  async () => {
-    try {
-      await sendTrialOfferReminders();
-    } catch (error) {
-      console.error("Error in trial-offer-reminders job:", error);
-    }
-  },
-  { timezone: CRON_TZ }
-);
-
-// Plan delivery SLA reminders to the dietitian (24h, 36h after the
-// consultation) plus an admin heads-up at 36h. Hourly; the 48h breach is
-// handled by the popup eligibility cron (evalPlanDelayed).
-cron.schedule(
-  "23 * * * *",
-  async () => {
-    try {
-      await sendPlanDeliveryReminders();
-    } catch (error) {
-      console.error("Error in plan-delivery-reminders job:", error);
     }
   },
   { timezone: CRON_TZ }

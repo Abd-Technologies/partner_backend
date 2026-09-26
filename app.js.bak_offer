@@ -94,7 +94,6 @@ const { checkMeetAttendance } = require("./helper/checkMeetAttendance");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
 const { sendPlanDeliveryReminders } = require("./helper/planDeliveryReminders");
 const { sendTrialClassReminders } = require("./helper/trialClasses");
-const { sendTrialOfferReminders } = require("./helper/trialOffer");
 const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
 const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
 const popupEligibility = require("./helper/popupEligibility");
@@ -149,19 +148,6 @@ cron.schedule(
       await sendTrialClassReminders();
     } catch (error) {
       console.error("Error in trial-class-reminders job:", error);
-    }
-  },
-  { timezone: CRON_TZ }
-);
-
-// End-of-trial offer: one reminder when about a day is left. Hourly.
-cron.schedule(
-  "41 * * * *",
-  async () => {
-    try {
-      await sendTrialOfferReminders();
-    } catch (error) {
-      console.error("Error in trial-offer-reminders job:", error);
     }
   },
   { timezone: CRON_TZ }

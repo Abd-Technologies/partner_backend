@@ -76,33 +76,4 @@ function isTrialExpired(startedAt) {
   return new Date() > end;
 }
 
-/**
- * How many live classes a trial user aims to join (TRIAL_CLASS_GOAL in
- * .env, default 3). Saved on her TrialJourney when her trial starts, so
- * changing it later only affects new trials. Capped at 2 per trial day.
- */
-function getTrialClassGoal() {
-  const n = parseInt(process.env.TRIAL_CLASS_GOAL, 10);
-  const max = getTrialDays() * 2;
-  if (!Number.isInteger(n) || n < 1) return Math.min(3, max);
-  return Math.min(n, max);
-}
-
-/**
- * How many minutes after a class starts a trial user can still join
- * (TRIAL_JOIN_WINDOW_MINUTES, default 10).
- */
-function getJoinWindowMinutes() {
-  const n = parseInt(process.env.TRIAL_JOIN_WINDOW_MINUTES, 10);
-  if (!Number.isInteger(n) || n < 1) return 10;
-  return Math.min(n, 60);
-}
-
-module.exports = {
-  computeState,
-  computeNextBookableDay,
-  isTrialExpired,
-  getTrialDays,
-  getTrialClassGoal,
-  getJoinWindowMinutes,
-};
+module.exports = { computeState, computeNextBookableDay, isTrialExpired, getTrialDays };

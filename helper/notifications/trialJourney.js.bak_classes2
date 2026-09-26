@@ -52,64 +52,68 @@ const { TrialJourney, User } = require('../../models');
 const sendNotification = require('../notification');
 const { buildBody, getPhase, recentlySent, getPaidPlanUserIds } = require('./_shared');
 
-// Trial length, class goal and join window all come from .env (see
-// helper/trialState.js). Segments are based on how many classes she has
-// attended (any class counts, no booking), not the old Day 1/2/3 ladder.
-const { getTrialDays, getTrialClassGoal, getJoinWindowMinutes } = require('../trialState');
-const { countTrialClassesAttended } = require('../trialClasses');
+const TRIAL_WINDOW_DAYS = 3;
 
 // ─── State segments ───────────────────────────────────────────────────────────
-// Evaluated in order, first match wins. j._attended / j._goal are filled
-// in by the loop below. Type names are kept from the old ladder so
-// notification preferences and cooldown history still line up.
+// Evaluated in order — first match wins.
+// anchor()       — the timestamp we measure staleness from.
+// match()        — is the journey stuck in this state?
+// minStaleDays   — don't nudge until anchor + N days (let the user breathe).
+// maxDays        — stop nudging altogether after anchor + N days.
+// cooldownDays   — don't repeat within N days.
+// respectExpiry  — if true, skip the nudge when the 3-day window has closed.
 
 const STATE_SEGMENTS = [
   {
     type:          'trialJourneyStart',
-    match:         (j) => !!j.startedAt && j._attended === 0,
+    match:         (j) => !!j.startedAt && !j.day1BookedAt,
     anchor:        (j) => j.startedAt,
     minStaleDays:  1,
-    maxDays:       () => getTrialDays(),
+    maxDays:       3,   // Bug A fix: was 14. Trial expires after 3 days — no point
+                        // sending "Day 1 takes one tap" when bookDay would fail.
     cooldownDays:  1,
     respectExpiry: true,
-    title:         () => 'Your first class is waiting 🏃‍♀️',
-    body:          () => `Join any live class today, in the first ${getJoinWindowMinutes()} minutes. No booking needed.`,
+    title:         'Your trial is waiting for you 🏃‍♀️',
+    body:          "You started your Fit Her trial but haven't booked your first class yet. Day 1 takes just one tap.",
     screen:        'trial',
   },
   {
     type:          'trialJourneyDay2',
-    match:         (j) => j._attended > 0 && j._attended < j._goal - 1,
-    anchor:        (j) => j.startedAt,
+    match:         (j) => !!j.day1AttendedAt && !j.day2BookedAt,
+    anchor:        (j) => j.day1AttendedAt,
     minStaleDays:  1,
-    maxDays:       () => getTrialDays(),
+    maxDays:       2,   // Bug B fix: was 10. Anchored on day1AttendedAt, not startedAt.
+                        // The trial window may close as early as 1 day after day1.
+                        // respectExpiry provides the hard safety net.
     cooldownDays:  1,
     respectExpiry: true,
-    title:         (j) => `${j._attended} of ${j._goal} classes done ✅`,
-    body:          () => 'You showed up, and that takes discipline. Keep going, join any class today.',
+    title:         'Day 1 done ✅ Ready for Day 2?',
+    body:          'You showed up for Day 1 — that takes discipline. Keep going, Day 2 is where the momentum builds.',
     screen:        'trial',
   },
   {
     type:          'trialJourneyDay3',
-    match:         (j) => j._goal > 1 && j._attended === j._goal - 1,
-    anchor:        (j) => j.startedAt,
+    match:         (j) => !!j.day2AttendedAt && !j.day3BookedAt,
+    anchor:        (j) => j.day2AttendedAt,
     minStaleDays:  1,
-    maxDays:       () => getTrialDays(),
+    maxDays:       2,   // Bug B fix: was 10. Same reasoning as trialJourneyDay2.
     cooldownDays:  1,
     respectExpiry: true,
-    title:         () => 'One class left 🔥',
-    body:          () => "You're one class away from your trial goal. Finish strong today.",
+    title:         'One class left in your trial 🔥',
+    body:          'Two days done — finish strong. Book Day 3 and complete your Fit Her trial.',
     screen:        'trial',
   },
   {
     type:          'trialJourneyConvert',
-    match:         (j) => j._attended >= j._goal && !j.convertedAt,
-    anchor:        (j) => j.startedAt,
+    match:         (j) => !!j.day3AttendedAt && !j.convertedAt,
+    anchor:        (j) => j.day3AttendedAt,
     minStaleDays:  1,
-    maxDays:       () => getTrialDays() + 14,
+    maxDays:       14,
     cooldownDays:  2,
-    respectExpiry: false, // convert endpoint has a 30-day grace window
-    title:         () => 'You completed your trial goal 🌟',
-    body:          (j) => `All ${j._goal} classes done. Keep the momentum going and join Fit Her.`,
+    respectExpiry: false, // convert endpoint has a 30-day grace window; CTA is
+                          // still valid after the 3-day trial window closes.
+    title:         'You completed your trial 🌟',
+    body:          'All 3 days done. Your full plan is ready — keep the momentum going and join Fit Her.',
     screen:        'plans',
   },
 ];
@@ -118,7 +122,7 @@ const STATE_SEGMENTS = [
 
 function isTrialWindowClosed(startedAt) {
   if (!startedAt) return false;
-  const end = new Date(new Date(startedAt).getTime() + getTrialDays() * 24 * 60 * 60 * 1000);
+  const end = new Date(new Date(startedAt).getTime() + TRIAL_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   return new Date() > end;
 }
 
@@ -149,7 +153,6 @@ async function sendTrialJourneyNudges() {
         'day2BookedAt', 'day2AttendedAt',
         'day3BookedAt', 'day3AttendedAt',
         'convertedAt',
-        'classGoal',
       ],
     });
 
@@ -168,10 +171,7 @@ async function sendTrialJourneyNudges() {
       // Lifecycle channel owns paid-plan users — skip them here.
       if (paidPlanUserIds.has(user.id)) { results.skippedPaid++; continue; }
 
-      journey._attended = await countTrialClassesAttended(user.id, journey);
-      journey._goal = journey.classGoal || getTrialClassGoal();
-
-      // Find the first segment this journey is in.
+      // Find the first segment this journey is stuck in.
       const seg = STATE_SEGMENTS.find((s) => s.match(journey));
       if (!seg) continue; // booked-but-not-attended intermediate state
 
@@ -188,7 +188,7 @@ async function sendTrialJourneyNudges() {
       const daysSince = moment().diff(moment(anchor), 'days');
 
       // Too fresh or too old — skip.
-      if (daysSince < seg.minStaleDays || daysSince > seg.maxDays()) {
+      if (daysSince < seg.minStaleDays || daysSince > seg.maxDays) {
         results.skippedWindow++;
         continue;
       }
@@ -201,7 +201,7 @@ async function sendTrialJourneyNudges() {
       const phase = await getPhase(user.id);
       await sendNotification(
         [user.deviceToken],
-        { title: seg.title(journey), body: buildBody(seg.body(journey), phase) },
+        { title: seg.title, body: buildBody(seg.body, phase) },
         { type: seg.type, screen: seg.screen },
       );
       results.sent++;
