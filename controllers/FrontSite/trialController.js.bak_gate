@@ -11,7 +11,6 @@ const {
 const { countTrialClassesAttended, listTrialClasses } = require("../../helper/trialClasses");
 const { getTrialSummary } = require("../../helper/trialOffer");
 const { ensureTrialUserPlan } = require("../../services/trialPlanService");
-const { trialStartBlock } = require("../../helper/trialEligibility");
 
 const TOKEN_STATUSES = {
   ISSUED: "issued",
@@ -199,16 +198,6 @@ exports.startTrial = async (req, res) => {
       lock: transaction.LOCK.UPDATE,
     });
 
-    // The trial only starts after she finishes the trial setup in the
-    // app. A trial that already started is left alone.
-    if (!journey || !journey.startedAt) {
-      const block = await trialStartBlock(userId);
-      if (block) {
-        await transaction.rollback();
-        return res.json(ApiResponse("0", block.message, { needsOnboarding: true, reason: block.reason }));
-      }
-    }
-
     let tokenRow = null;
     if (incomingToken.trim()) {
       const tokenResult = await getValidTokenOrError(incomingToken);
@@ -326,7 +315,7 @@ exports.getMyTrial = async (req, res) => {
 
   const journey = await getJourneyForUser(userId);
   if (!journey) {
-    return res.json(ApiResponse("1", "No active trial", { journey: null, trialDays: getTrialDays() }));
+    return res.json(ApiResponse("1", "No active trial", { journey: null }));
   }
 
   await persistDerivedState(journey);

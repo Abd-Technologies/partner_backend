@@ -10,8 +10,5 @@ const ctrl = require("../../controllers/FrontSite/preConsultationController");
 // routes/Admin/preConsultation.js.
 router.get("/", validateToken, asyncMiddleware(ctrl.getOwnProfile));
 router.patch("/", validateToken, asyncMiddleware(ctrl.updateOwnProfile));
-// Signup step 5 answer + "recently had a baby" details / access check.
-router.get("/life-stage", validateToken, asyncMiddleware(ctrl.getLifeStage));
-router.post("/life-stage", validateToken, asyncMiddleware(ctrl.saveLifeStage));
 
 module.exports = router;

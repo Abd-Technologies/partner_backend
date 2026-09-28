@@ -80,27 +80,6 @@ exports.getOwnProfile = async (req, res) => {
 //     // optional: send true on the final step's PATCH to mark complete
 //     isComplete: true
 //   }
-// MariaDB hands JSON columns back as strings. Spreading that string
-// ({...'{"a":true}'}) turned every character into its own key, and each
-// save doubled the size until MySQL refused the packet. Always parse,
-// and drop any junk character keys left from that bug.
-function cleanSteps(raw) {
-  let v = raw;
-  for (let i = 0; i < 3 && typeof v === "string"; i++) {
-    try {
-      v = JSON.parse(v);
-    } catch (_) {
-      return {};
-    }
-  }
-  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-  const out = {};
-  for (const [k, val] of Object.entries(v)) {
-    if (!/^\d+$/.test(k) && val === true) out[k] = true;
-  }
-  return out;
-}
-
 exports.updateOwnProfile = async (req, res) => {
   try {
     const userId = req.user && req.user.id;
@@ -125,7 +104,8 @@ exports.updateOwnProfile = async (req, res) => {
     // spread instead of mutating in place.
     const stepKey = req.body && req.body.step;
     if (typeof stepKey === "string" && stepKey.length > 0) {
-      updates.stepsCompleted = { ...cleanSteps(profile.stepsCompleted), [stepKey]: true };
+      const prevSteps = profile.stepsCompleted || {};
+      updates.stepsCompleted = { ...prevSteps, [stepKey]: true };
     }
 
     if (req.body && req.body.isComplete === true) {
@@ -167,39 +147,5 @@ exports.updateOwnProfile = async (req, res) => {
   } catch (err) {
     console.error("[preConsultation] updateOwnProfile:", err);
     return res.json(ApiResponse("0", "Failed to update profile", {}));
-  }
-};
-
-// ── Life stage (signup step 5) ──────────────────────────────────────────
-// GET  /users/pre-consultation/life-stage
-// POST /users/pre-consultation/life-stage
-//   { status?, babyBirthDate?: 'YYYY-MM-DD', deliveryType?: 'normal'|'c_section',
-//     doctorCleared?: true }
-// Both return { status, access, availableFrom, babyBirthDate, deliveryType, waitDays }.
-// access: full | pregnant | needs_details | waiting | needs_clearance
-const lifeStage = require("../../helper/lifeStage");
-
-exports.getLifeStage = async (req, res) => {
-  try {
-    const userId = req.user && req.user.id;
-    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
-    const data = await lifeStage.getLifeStage(userId);
-    return res.json(ApiResponse("1", "Life stage", data));
-  } catch (err) {
-    console.error("[preConsultation] getLifeStage:", err);
-    return res.json(ApiResponse("0", "Could not load", {}));
-  }
-};
-
-exports.saveLifeStage = async (req, res) => {
-  try {
-    const userId = req.user && req.user.id;
-    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
-    const data = await lifeStage.saveLifeStage(userId, req.body || {});
-    return res.json(ApiResponse("1", "Saved", data));
-  } catch (err) {
-    if (err.userMessage) return res.json(ApiResponse("0", err.userMessage, {}));
-    console.error("[preConsultation] saveLifeStage:", err);
-    return res.json(ApiResponse("0", "Could not save. Please try again.", {}));
   }
 };

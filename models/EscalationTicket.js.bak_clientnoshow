@@ -26,7 +26,6 @@ module.exports = (sequelize, DataTypes) => {
           'PLAN_DELAYED',
           'CONSULT_NO_SHOW',
           'CONSULT_UNCONFIRMED',
-          'CONSULT_CLIENT_NO_SHOW',
           'INACTIVITY',
           'MEDICAL',
           'REVIEW_FLAG',

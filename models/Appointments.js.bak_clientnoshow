@@ -107,14 +107,6 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.DATE,
             allowNull: true,
         },
-        // The CLIENT didn't join (the dietitian did). Set by the Meet
-        // attendance sweep or the dietitian's "Client didn't join" button.
-        // The appointment is canceled so it doesn't use up her
-        // consultation, and she's asked to book a new time.
-        clientNoShowAt: {
-            type: DataTypes.DATE,
-            allowNull: true,
-        },
 
     });
 

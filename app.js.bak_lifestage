@@ -95,7 +95,6 @@ const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans"
 const { sendPlanDeliveryReminders } = require("./helper/planDeliveryReminders");
 const { sendTrialClassReminders } = require("./helper/trialClasses");
 const { sendTrialOfferReminders } = require("./helper/trialOffer");
-const { sendPostpartumReadyReminders, sendDueDateCheckIns } = require("./helper/lifeStage");
 const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
 const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
 const popupEligibility = require("./helper/popupEligibility");
@@ -163,21 +162,6 @@ cron.schedule(
       await sendTrialOfferReminders();
     } catch (error) {
       console.error("Error in trial-offer-reminders job:", error);
-    }
-  },
-  { timezone: CRON_TZ }
-);
-
-// New mothers: one "you're ready to join" push the day her waiting
-// time after birth ends. Daily at 10:00 PKT.
-cron.schedule(
-  "0 10 * * *",
-  async () => {
-    try {
-      await sendPostpartumReadyReminders();
-      await sendDueDateCheckIns();
-    } catch (error) {
-      console.error("Error in postpartum-ready job:", error);
     }
   },
   { timezone: CRON_TZ }

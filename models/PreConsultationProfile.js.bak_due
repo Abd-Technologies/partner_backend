@@ -173,16 +173,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
-      // "I'm pregnant": expected due date, so we can check in after the
-      // baby arrives and she's past the safe waiting time.
-      dueDate: {
-        type: DataTypes.DATEONLY,
-        allowNull: true,
-      },
-      dueCheckNotifiedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-      },
     },
     {
       tableName: 'PreConsultationProfiles',
