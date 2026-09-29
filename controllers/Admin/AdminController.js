@@ -406,6 +406,7 @@ async function login(req, res) {
         id: user.id,
         firstName: user.firstName,
         lastName: user.lastName,
+        phone: user.phone || '',
         adminId: adminData ? adminData?.id : 0,
         email: user.email,
         status: user.status,
@@ -415,6 +416,8 @@ async function login(req, res) {
         age: user.age,
         height: user.height,
         weight: user.weight,
+        mainGoal: user.mainGoal || '',
+        healthConditions: user.healthConditions || '',
         useNewPaidHome: user.useNewPaidHome ?? false,
         useNewUnpaidHome: user.useNewUnpaidHome ?? false,
         // Phase F.3 — surfaced so Flutter can cache the user's IANA
@@ -434,7 +437,6 @@ async function login(req, res) {
     return res.json(response);
   }
 }
-
 
 
 async function socialLogin(req, res) {
@@ -460,6 +462,7 @@ async function socialLogin(req, res) {
         id: user.id,
         firstName: user.firstName,
         lastName: user.lastName,
+        phone: user.phone || '',
         adminId: adminData ? adminData.id : 0,
         email: user.email,
         status: user.status,
@@ -469,6 +472,8 @@ async function socialLogin(req, res) {
         age: user.age,
         height: user.height,
         weight: user.weight,
+        mainGoal: user.mainGoal || '',
+        healthConditions: user.healthConditions || '',
         useNewPaidHome: user.useNewPaidHome ?? false,
         useNewUnpaidHome: user.useNewUnpaidHome ?? false,
         // Phase F.3 — see login() above for rationale.
