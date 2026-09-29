@@ -85,8 +85,17 @@ async function login(req, res) {
         id: user.id,
         firstName: user.firstName,
         lastName: user.lastName,
+        phone: user.phone || '',
         email: user.email,
         accessToken: accessToken,
+        userType: user.userType,
+        status: user.status,
+        bmiResult: user.bmiResult,
+        age: user.age,
+        height: user.height,
+        weight: user.weight,
+        mainGoal: user.mainGoal || '',
+        healthConditions: user.healthConditions || '',
       };
       const response = ApiResponse("1", "Login Successfully!", data);
       return res.json(response);
