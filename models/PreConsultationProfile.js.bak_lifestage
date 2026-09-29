@@ -152,37 +152,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(16),
         allowNull: true,
       },
-      // "I recently had a baby" (signup step 5 follow-up). Classes stay
-      // locked until the safe waiting time after birth has passed and she
-      // confirms her doctor cleared her. See helper/lifeStage.js.
-      babyBirthDate: {
-        type: DataTypes.DATEONLY,
-        allowNull: true,
-      },
-      // 'normal' | 'c_section'
-      deliveryType: {
-        type: DataTypes.STRING(16),
-        allowNull: true,
-      },
-      exerciseClearedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-      },
-      // One "you're ready to join" push when the waiting time ends.
-      postpartumReadyNotifiedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-      },
-      // "I'm pregnant": expected due date, so we can check in after the
-      // baby arrives and she's past the safe waiting time.
-      dueDate: {
-        type: DataTypes.DATEONLY,
-        allowNull: true,
-      },
-      dueCheckNotifiedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-      },
     },
     {
       tableName: 'PreConsultationProfiles',

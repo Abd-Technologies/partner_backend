@@ -15,7 +15,6 @@ const moment = require('moment-timezone');
 const {
   ClassPresence,
   Slot,
-  Time,
   User,
   TrialJourney,
   PreConsultationProfile,
@@ -80,24 +79,13 @@ async function countTrialClassesAttended(userId, journey) {
 
 // ── Class picker data ────────────────────────────────────────────────
 
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-function shiftWeekday(day, shift) {
-  const i = WEEKDAYS.indexOf(day);
-  if (i < 0) return day;
-  return WEEKDAYS[(i + (shift || 0) + 7) % 7];
-}
-
 async function listTrialClasses(userId) {
   const user = await User.findByPk(userId, { attributes: ['id', 'timeZone'] });
   const tz = (user && user.timeZone) || PKT;
   const todayPkt = moment.tz(PKT).startOf('day');
 
   const slots = await Slot.findAll({
-    include: [
-      { model: User, attributes: ['id', 'firstName', 'lastName', 'image'] },
-      // Weekday this slot runs on ("Monday"...), for the weekly timetable.
-      { model: Time, attributes: ['day'], required: false },
-    ],
+    include: [{ model: User, attributes: ['id', 'firstName', 'lastName', 'image'] }],
   });
 
   // Popularity: distinct women who joined each class in the last 7 days.
@@ -165,18 +153,6 @@ async function listTrialClasses(userId) {
   const level = String(ws.fitnessLevel || '').toLowerCase();
   const goal = String((profile && profile.goals) || '').toLowerCase();
   const gentleGoal = /pcos|postpartum|pregnancy/.test(goal);
-  // Workout styles she loves (trial step "What do you love to do?").
-  const LOVE_PATTERNS = {
-    high_intensity: /high|hiit|intens/,
-    strength: /strength|tone|toning|weight/,
-    zumba: /zumba|dance|aerobic/,
-    yoga: /yoga|stretch|pilates/,
-    low_intensity: /low|gentle|walk|beginner|mobility/,
-  };
-  const loves = Array.isArray(ws.favoriteWorkouts)
-    ? ws.favoriteWorkouts.map(String).filter((v) => LOVE_PATTERNS[v])
-    : [];
-  const lovedStyle = (text) => loves.some((v) => LOVE_PATTERNS[v].test(text));
   const picked = Array.isArray(ws.preferredSlotIds)
     ? ws.preferredSlotIds.map(Number)
     : [];
@@ -213,15 +189,11 @@ async function listTrialClasses(userId) {
         name: `${s.User.firstName || ''} ${s.User.lastName || ''}`.trim(),
         image: s.User.image || null,
       },
-      // Weekday in Pakistan (from the timetable) and in her time zone.
-      day: (s.Time && s.Time.day) || null,
-      dayLocal: shiftWeekday((s.Time && s.Time.day) || null, dayShift),
       joinedLastWeek: popBySlot.get(Number(s.id)) || 0,
       recentInitials: initialsBySlot.get(Number(s.id)) || [],
       picked: picked.includes(Number(s.id)),
       _levelMatch: level && slotLevel.includes(level),
       _gentle: /low|yoga|stretch|beginner/.test(`${slotLevel} ${type.toLowerCase()}`),
-      _loved: lovedStyle(`${slotLevel} ${type.toLowerCase()}`),
     });
   }
 
@@ -229,14 +201,14 @@ async function listTrialClasses(userId) {
   // gentler style for PCOS / postpartum / pregnancy goals), most popular
   // first. Falls back to the 2 most popular classes.
   const score = (c) =>
-    (c._loved ? 3 : 0) + (c._levelMatch ? 2 : 0) + (gentleGoal && c._gentle ? 1 : 0);
+    (c._levelMatch ? 2 : 0) + (gentleGoal && c._gentle ? 1 : 0);
   const ranked = [...classes].sort(
     (a, b) => score(b) - score(a) || b.joinedLastWeek - a.joinedLastWeek
   );
   const recommendedIds = new Set(ranked.slice(0, 2).map((c) => c.slotId));
 
   const out = classes
-    .map(({ _levelMatch, _gentle, _loved, ...c }) => ({
+    .map(({ _levelMatch, _gentle, ...c }) => ({
       ...c,
       recommended: recommendedIds.has(c.slotId),
     }))
@@ -281,8 +253,7 @@ async function claimReminder(userId, dayKey, kind) {
     if (once !== 'OK') return false;
     const n = await r.incr(`trialremind:${userId}:${dayKey}:count`);
     await r.expire(`trialremind:${userId}:${dayKey}:count`, 129600);
-    // Up to 2 picked times a day, each gets a 'soon' and a 'live' nudge.
-    return n <= 4;
+    return n <= 2;
   } catch (e) {
     return true;
   }
@@ -324,14 +295,10 @@ async function sendTrialClassReminders() {
       });
       if (joinedToday) continue;
 
-      const todayName = todayPkt.format('dddd');
-      const slots = (await Slot.findAll({
+      const slots = await Slot.findAll({
         where: { id: { [Op.in]: picked } },
-        include: [
-          { model: User, attributes: ['firstName'] },
-          { model: Time, attributes: ['day'], required: false },
-        ],
-      })).filter((s) => !s.Time || !s.Time.day || s.Time.day === todayName);
+        include: [{ model: User, attributes: ['firstName'] }],
+      });
       // Her next picked class that she can still join today.
       const upcoming = slots
         .map((s) => ({ s, at: slotMomentOn(s.start, todayPkt) }))
@@ -362,7 +329,7 @@ async function sendTrialClassReminders() {
         };
       }
       if (!kind) continue;
-      if (!(await claimReminder(j.userId, dayKey, `${kind}:${upcoming.at.format('HHmm')}`))) continue;
+      if (!(await claimReminder(j.userId, dayKey, kind))) continue;
 
       await sendNotification([user.deviceToken], msg, {
         type: 'trialClassReminder',

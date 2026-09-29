@@ -31,7 +31,7 @@
 const { Op } = require('sequelize');
 const { Appointment, SlotDiet } = require('../models');
 const { checkAttendanceForAppointment } = require('../services/meetAttendance/meetAttendanceService');
-const { resolveDietitianNoShow, resolveClientNoShow } = require('./noShowResolution');
+const { resolveDietitianNoShow } = require('./noShowResolution');
 const { createEscalation } = require('./escalation');
 
 const BATCH_SIZE = 25;
@@ -110,31 +110,6 @@ async function checkMeetAttendance() {
           });
         } catch (e) {
           console.error('[checkMeetAttendance] escalation create failed:', e);
-        }
-      }
-
-      // The dietitian was there but the client never joined. Before this,
-      // the result was only saved: the booking stayed "confirmed" (or got
-      // auto-"completed") and counted as her used consultation, so she
-      // could never rebook. Cancel it without using her consultation,
-      // never blame the dietitian, and ask her to rebook.
-      if (
-        outcome.dietitianAttended === true &&
-        outcome.clientAttended === false &&
-        ['confirmed', 'In Progress', 'completed'].includes(appt.status) &&
-        !appt.clientNoShowAt
-      ) {
-        await resolveClientNoShow(appt);
-        try {
-          await createEscalation({
-            userId: appt.userId,
-            dietitianId: appt.dietitionId,
-            trigger: 'CONSULT_CLIENT_NO_SHOW',
-            severity: 'low',
-            payload: { appointmentId: appt.id, scheduledDate: appt.date, detectedVia: 'meetAttendance' },
-          });
-        } catch (e) {
-          console.error('[checkMeetAttendance] client no-show escalation failed:', e);
         }
       }
     } catch (err) {

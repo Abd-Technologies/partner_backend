@@ -102,41 +102,4 @@ async function resolveUnconfirmedExpiry(appointment, { actorUserId = null } = {}
   return appointment;
 }
 
-// The client didn't join but the dietitian did (Meet attendance, or the
-// dietitian tapped "Client didn't join"). Cancels the appointment so it
-// does NOT use up her initial / follow-up consultation (the booking gate
-// only counts confirmed / In Progress / completed rows), tags it with
-// clientNoShowAt so it's never counted against the dietitian, and asks
-// her to book a new time.
-async function resolveClientNoShow(appointment, { actorUserId = null } = {}) {
-  const alreadyResolved =
-    appointment.status === "canceled" && !!appointment.clientNoShowAt;
-  if (alreadyResolved) return appointment;
-
-  appointment.status = "canceled";
-  appointment.clientNoShowAt = new Date();
-  appointment.completed_by = actorUserId;
-  appointment.status_changed_at = new Date();
-  await appointment.save();
-
-  try {
-    const user = await User.findByPk(appointment.userId);
-    if (user && user.deviceToken) {
-      await sendNotification(
-        [user.deviceToken],
-        {
-          title: "We missed you today 💚",
-          body:
-            "Your dietitian was waiting but you couldn't join. No problem, " +
-            "book a new time and we'll build your plan right after.",
-        },
-        { type: "appointmentClientNoShow" }
-      );
-    }
-  } catch (e) {
-    console.error("[noShowResolution] client no-show notify failed:", e);
-  }
-  return appointment;
-}
-
-module.exports = { resolveDietitianNoShow, resolveUnconfirmedExpiry, resolveClientNoShow };
+module.exports = { resolveDietitianNoShow, resolveUnconfirmedExpiry };

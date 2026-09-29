@@ -163,17 +163,9 @@ exports.addComment = async (req, res) => {
       timestamp: new Date().toISOString(),
     };
 
-    // MariaDB returns JSON columns as strings: parse first, or every new
-    // comment would silently wipe the earlier ones.
-    let existing = profile.dietitianComments;
-    if (typeof existing === "string") {
-      try {
-        existing = JSON.parse(existing);
-      } catch (_) {
-        existing = [];
-      }
-    }
-    if (!Array.isArray(existing)) existing = [];
+    const existing = Array.isArray(profile.dietitianComments)
+      ? profile.dietitianComments
+      : [];
     const updated = [...existing, newComment];
 
     await profile.update({

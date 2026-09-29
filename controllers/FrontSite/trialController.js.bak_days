@@ -326,7 +326,7 @@ exports.getMyTrial = async (req, res) => {
 
   const journey = await getJourneyForUser(userId);
   if (!journey) {
-    return res.json(ApiResponse("1", "No active trial", { journey: null, trialDays: getTrialDays() }));
+    return res.json(ApiResponse("1", "No active trial", { journey: null }));
   }
 
   await persistDerivedState(journey);

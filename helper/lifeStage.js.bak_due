@@ -1,0 +1,195 @@
+/**
+ * Life stage access rules (signup step 5: "Which of these fits you right now?").
+ *
+ *   pregnant   -> no access yet, "coming soon" screen.
+ *   postpartum -> needs baby's birth date + delivery type. Locked until
+ *                 the safe waiting time has passed, then she ticks "my
+ *                 doctor has said I can exercise" and gets full access
+ *                 (free trial, classes, diet) like every other user.
+ *   anything else -> full access.
+ *
+ * Waiting times come from .env so they can change without an app release:
+ *   POSTPARTUM_WAIT_DAYS_NORMAL    (default 42, about 6 weeks)
+ *   POSTPARTUM_WAIT_DAYS_CSECTION  (default 90, about 3 months)
+ */
+const moment = require('moment-timezone');
+const { Op } = require('sequelize');
+const { PreConsultationProfile, User } = require('../models');
+const sendNotification = require('./notification');
+
+const PKT = 'Asia/Karachi';
+
+function envDays(name, fallback) {
+  const n = parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n >= 0 && n <= 730 ? n : fallback;
+}
+
+function waitDays(deliveryType) {
+  return deliveryType === 'c_section'
+    ? envDays('POSTPARTUM_WAIT_DAYS_CSECTION', 90)
+    : envDays('POSTPARTUM_WAIT_DAYS_NORMAL', 42);
+}
+
+/** Date (YYYY-MM-DD) she can join from, or null if we don't know yet. */
+function availableFrom(profile) {
+  if (!profile || !profile.babyBirthDate || !profile.deliveryType) return null;
+  return moment
+    .tz(String(profile.babyBirthDate).slice(0, 10), 'YYYY-MM-DD', PKT)
+    .add(waitDays(profile.deliveryType), 'days')
+    .format('YYYY-MM-DD');
+}
+
+/**
+ * access:
+ *   'full'            normal user, let her in
+ *   'pregnant'        coming soon screen
+ *   'needs_details'   postpartum, ask birth date + delivery type
+ *   'waiting'         postpartum, locked until `availableFrom`
+ *   'needs_clearance' postpartum, waiting time over, ask for the doctor tick
+ */
+function evaluate(profile) {
+  const status = (profile && profile.pregnancyMenstrualStatus) || null;
+  const base = {
+    status,
+    babyBirthDate: profile && profile.babyBirthDate ? String(profile.babyBirthDate).slice(0, 10) : null,
+    deliveryType: (profile && profile.deliveryType) || null,
+    availableFrom: null,
+    waitDays: null,
+  };
+  if (status === 'pregnant') return { ...base, access: 'pregnant' };
+  if (status !== 'postpartum') return { ...base, access: 'full' };
+
+  if (!base.babyBirthDate || !base.deliveryType) {
+    return { ...base, access: 'needs_details' };
+  }
+  const from = availableFrom(profile);
+  const today = moment.tz(PKT).format('YYYY-MM-DD');
+  const out = { ...base, availableFrom: from, waitDays: waitDays(base.deliveryType) };
+  if (from > today) return { ...out, access: 'waiting' };
+  if (!profile.exerciseClearedAt) return { ...out, access: 'needs_clearance' };
+  return { ...out, access: 'full' };
+}
+
+async function getLifeStage(userId) {
+  const profile = await PreConsultationProfile.findOne({ where: { userId } });
+  return evaluate(profile);
+}
+
+const ALLOWED_STATUS = new Set([
+  'regular_cycle',
+  'irregular_cycle',
+  'trying_to_conceive',
+  'pregnant',
+  'postpartum',
+  'menopause',
+  'prefer_not_to_say',
+]);
+
+/**
+ * Save her answer (and postpartum details) and return the new access state.
+ * body: { status?, babyBirthDate?, deliveryType?, doctorCleared? }
+ */
+async function saveLifeStage(userId, body = {}) {
+  let profile = await PreConsultationProfile.findOne({ where: { userId } });
+  if (!profile) {
+    profile = await PreConsultationProfile.create({
+      userId,
+      stepsCompleted: {},
+      dietitianComments: [],
+      isComplete: false,
+    });
+  }
+  const updates = {};
+
+  if (body.status !== undefined) {
+    if (!ALLOWED_STATUS.has(body.status)) {
+      const err = new Error('Unknown option');
+      err.userMessage = 'Please pick one of the options.';
+      throw err;
+    }
+    updates.pregnancyMenstrualStatus = body.status;
+    if (body.status !== 'postpartum') {
+      updates.babyBirthDate = null;
+      updates.deliveryType = null;
+      updates.exerciseClearedAt = null;
+    }
+  }
+
+  if (body.babyBirthDate !== undefined) {
+    const d = moment.tz(String(body.babyBirthDate).slice(0, 10), 'YYYY-MM-DD', true, PKT);
+    const today = moment.tz(PKT).endOf('day');
+    if (!d.isValid() || d.isAfter(today) || d.isBefore(today.clone().subtract(2, 'years'))) {
+      const err = new Error('Bad birth date');
+      err.userMessage = 'Please pick your baby\'s birth date.';
+      throw err;
+    }
+    updates.babyBirthDate = d.format('YYYY-MM-DD');
+  }
+
+  if (body.deliveryType !== undefined) {
+    if (!['normal', 'c_section'].includes(body.deliveryType)) {
+      const err = new Error('Bad delivery type');
+      err.userMessage = 'Please choose how your baby was delivered.';
+      throw err;
+    }
+    updates.deliveryType = body.deliveryType;
+  }
+
+  // Doctor clearance only counts once the waiting time is over.
+  if (body.doctorCleared === true) {
+    const check = evaluate({ ...profile.get({ plain: true }), ...updates });
+    if (check.access === 'needs_clearance' || check.access === 'full') {
+      updates.exerciseClearedAt = new Date();
+    }
+  }
+
+  updates.lastUserUpdate = new Date();
+  await profile.update(updates);
+  return evaluate(profile);
+}
+
+/** Daily: one push to new mothers whose waiting time ended today (or earlier). */
+async function sendPostpartumReadyReminders() {
+  const rows = await PreConsultationProfile.findAll({
+    where: {
+      pregnancyMenstrualStatus: 'postpartum',
+      babyBirthDate: { [Op.ne]: null },
+      deliveryType: { [Op.ne]: null },
+      exerciseClearedAt: null,
+      postpartumReadyNotifiedAt: null,
+    },
+  });
+  const today = moment.tz(PKT).format('YYYY-MM-DD');
+  let sent = 0;
+  for (const p of rows) {
+    try {
+      const from = availableFrom(p);
+      if (!from || from > today) continue;
+      p.postpartumReadyNotifiedAt = new Date();
+      await p.save();
+      const user = await User.findByPk(p.userId, { attributes: ['deviceToken'] });
+      if (!user || !user.deviceToken) continue;
+      await sendNotification(
+        [user.deviceToken],
+        {
+          title: "You're ready to join FitHer 💚",
+          body: 'Your waiting time is over. Open the app to start your free trial.',
+        },
+        { type: 'postpartumReady' }
+      );
+      sent++;
+    } catch (e) {
+      console.error('[lifeStage] ready push', p.userId, e.message);
+    }
+  }
+  return sent;
+}
+
+module.exports = {
+  evaluate,
+  getLifeStage,
+  saveLifeStage,
+  availableFrom,
+  waitDays,
+  sendPostpartumReadyReminders,
+};

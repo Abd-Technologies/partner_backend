@@ -2,7 +2,7 @@ const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
 const { createEscalation } = require("../../helper/escalation");
 const sendNotification = require("../../helper/notification");
-const { resolveDietitianNoShow, resolveClientNoShow } = require("../../helper/noShowResolution");
+const { resolveDietitianNoShow } = require("../../helper/noShowResolution");
 const {
   NO_SHOW_GRACE_MINUTES,
   NO_SHOW_STALE_HOURS,
@@ -445,62 +445,5 @@ exports.cancelMyAppointment = async (req, res) => {
   } catch (err) {
     console.error("[consultationBooking] cancelMyAppointment:", err);
     return res.json(ApiResponse("0", "Failed to cancel appointment", {}));
-  }
-};
-
-
-// POST /appointment/:id/client-no-show
-// The DIETITIAN reports that the client never joined. Manual backup for
-// the automatic Meet attendance check (which only runs after the call
-// ends, and only once the dietitian's Google account is linked).
-// Allowed from NO_SHOW_GRACE_MINUTES after the start time. Cancels the
-// booking without using up her consultation and asks her to rebook.
-exports.reportClientNoShow = async (req, res) => {
-  try {
-    const actorId = req.user && req.user.id;
-    if (!actorId) return res.json(ApiResponse("0", "Unauthorized", {}));
-
-    const apptId = parseInt(req.params.id, 10);
-    if (!Number.isInteger(apptId) || apptId <= 0) {
-      return res.json(ApiResponse("0", "Invalid appointment id", {}));
-    }
-    const appt = await Appointment.findByPk(apptId);
-    if (!appt) return res.json(ApiResponse("0", "Appointment not found", {}));
-
-    const isOwnDietitian = Number(appt.dietitionId) === Number(actorId);
-    const isAdmin = req.user.userType === "Admin";
-    if (!isOwnDietitian && !isAdmin) {
-      return res.json(ApiResponse("0", "Not your appointment", {}));
-    }
-    if (appt.clientNoShowAt) {
-      return res.json(ApiResponse("1", "Already marked", { appointment: appt.toJSON() }));
-    }
-    if (!["confirmed", "In Progress", "completed"].includes(appt.status)) {
-      return res.json(ApiResponse("0", "This consultation can't be marked as missed", {}));
-    }
-    const minutesSinceStart = (Date.now() - new Date(appt.date).getTime()) / 60000;
-    if (minutesSinceStart < NO_SHOW_GRACE_MINUTES) {
-      const wait = Math.ceil(NO_SHOW_GRACE_MINUTES - minutesSinceStart);
-      return res.json(
-        ApiResponse("0", `Please give her ${wait} more minute${wait === 1 ? "" : "s"} to join.`, {})
-      );
-    }
-
-    await resolveClientNoShow(appt, { actorUserId: actorId });
-    try {
-      await createEscalation({
-        userId: appt.userId,
-        dietitianId: appt.dietitionId,
-        trigger: "CONSULT_CLIENT_NO_SHOW",
-        severity: "low",
-        payload: { appointmentId: appt.id, scheduledDate: appt.date, detectedVia: "dietitian" },
-      });
-    } catch (e) {
-      console.error("[consultationBooking] client no-show escalation failed:", e);
-    }
-    return res.json(ApiResponse("1", "Marked as missed. She's been asked to rebook.", { appointment: appt.toJSON() }));
-  } catch (err) {
-    console.error("[consultationBooking] reportClientNoShow:", err);
-    return res.json(ApiResponse("0", "Could not update. Please try again.", {}));
   }
 };

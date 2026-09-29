@@ -44,8 +44,6 @@ const { validateAdmin } = require("../../middlewares/ValidateAdmin");
 // User reports the dietitian didn't show up. Auth-gated; controller
 // enforces ownership. Opens a CONSULT_NO_SHOW escalation. Phase 1B addition.
  router.post("/:id/no-show", validateToken, consultationBookingController.reportNoShow);
-// Dietitian: "Client didn't join" (manual backup for the Meet attendance check).
-router.post("/:id/client-no-show", validateToken, consultationBookingController.reportClientNoShow);
 
 // User-initiated cancel (ownership-checked, only from pending/confirmed).
 // Distinct from the dietitian-facing PUT /:id below.

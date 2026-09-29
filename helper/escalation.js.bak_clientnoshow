@@ -34,10 +34,6 @@ const COPY = {
     title: "Booking expired unconfirmed",
     body: "A client's booking passed its time without being confirmed. It's been auto-canceled and the client can rebook free.",
   },
-  CONSULT_CLIENT_NO_SHOW: {
-    title: "Client missed her consultation",
-    body: "A client didn't join her consultation. It's been canceled and she's been asked to rebook.",
-  },
   INACTIVITY: {
     title: "User went inactive",
     body: "A workout user has missed 3+ days of sessions.",
