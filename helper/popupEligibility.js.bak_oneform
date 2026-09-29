@@ -17,7 +17,6 @@ const {
 const { createEscalation } = require("./escalation");
 const { resolveDietitianNoShow, resolveUnconfirmedExpiry } = require("./noShowResolution");
 
-const { requirementsFor } = require("./preConsultRequirements");
 const TZ = "Asia/Karachi";
 
 // Authoritative "what kind of plan is this" checks — prefer
@@ -170,21 +169,33 @@ async function evalBookInitialConsultation(user, plans) {
   );
 }
 
-// One pre-consultation form for every paid client (diet, workout or
-// both). It shows until she has answered everything her plan needs,
-// ticked the health consent and confirmed. That also catches live
-// clients who signed up before the newer signup questions existed.
-// Which steps are missing comes from helper/preConsultRequirements.js,
-// the same source the app reads.
 async function evalPreConsultationForm(user, plans) {
-  const diet = plans.some(isDietOrCombinedPlan);
-  const workout = plans.some(isWorkoutOrCombinedPlan);
-  if (!diet && !workout) return;
-  const planType = diet && workout ? "combined" : diet ? "diet" : "workout";
+  const dietOrCombined = plans.find(isDietOrCombinedPlan);
+  if (!dietOrCombined) return;
 
-  const req = await requirementsFor(user.id, planType);
-  if (!req.shouldShow) {
-    // Done: retire any row left eligible from before.
+  const initial = await Appointment.findOne({
+    where: {
+      userId: user.id,
+      [Op.or]: [{ kind: "initial" }, { kind: null }],
+      status: { [Op.in]: ["pending", "confirmed", "In Progress"] },
+    },
+  });
+  if (!initial) return;
+
+  const profile = await PreConsultationProfile.findOne({
+    where: { userId: user.id },
+  });
+  // Answers from the free trial are kept, but a paying client must
+  // confirm them once (the popup opens as a "review and confirm" view).
+  const fromTrial = String((profile && profile.intakeSource) || "").startsWith("trial");
+  if (profile && profile.isComplete && !fromTrial) {
+    // Retire any row this popup already left eligible from before the
+    // form was completed. setEligible only ever CREATES/REFRESHES a row
+    // — nothing else marks it done — so without this, a user who fills
+    // the form after the popup already fired keeps seeing it forever:
+    // listForUser only cares about completedAt, and it was never set.
+    // Same fix shape as evalBookInitialReminder's retire-on-booked block
+    // below.
     await PendingPopupState.update(
       { completedAt: new Date() },
       {
@@ -201,8 +212,8 @@ async function evalPreConsultationForm(user, plans) {
   await setEligible(
     user.id,
     "POPUP_PRE_CONSULTATION_FORM",
-    nowPkt().startOf("day").toDate(),
-    { planType }
+    nowPkt().toDate(),
+    { appointmentId: initial.id }
   );
 }
 

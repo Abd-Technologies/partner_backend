@@ -553,7 +553,7 @@ function buildHubInsights(cycleData, limit = 3) {
     patternsFound: out.length,
     isStatic: true,
     honestyBanner: out.length > 0
-      ? "Luna is still learning about you. For now these are tips for your phase. Your own patterns show up after 14 days of check-ins."
+      ? "FitHer AI is learning. Showing static phase tips for now — personalised patterns arrive after 14 days of check-ins."
       : null,
   };
 }

@@ -1,0 +1,229 @@
+/**
+ * Keeps live classes from getting stuck (workout classes audit, gaps 1 and 2).
+ *
+ * 1. autoStartClasses()
+ *    The trainer saved today's link ("Class is starting soon") but never
+ *    tapped Start Session. Members can only join once the class is
+ *    "In Progress", so at start time we flip it for her and tell members
+ *    it's live.
+ *
+ * 2. detectTrainerNoShows()
+ *    CLASS_NO_SHOW_MINUTES (default 10) after start the class still isn't
+ *    live: no link today, or never started. We mark it "Cancelled" (the app
+ *    shows that the same day), tell members kindly with their next class,
+ *    and alert the admins with an escalation ticket.
+ *    If the trainer starts late anyway, Start Session still works and the
+ *    class goes live as normal.
+ *
+ * Both run every minute from app.js. Slot times are PKT wall clock.
+ */
+const { Op } = require("sequelize");
+const moment = require("moment-timezone");
+const { Slot, Time, User } = require("../models");
+const { CANONICAL_TZ, parseEndAsUtc } = require("./timeFormats");
+const { getDeviceTokensForSlot, notificationQueue } = require("./crownjobfunction");
+const { createEscalation } = require("./escalation");
+
+let getIO = null;
+try {
+  ({ getIO } = require("../socket"));
+} catch (e) {
+  getIO = null;
+}
+
+const STARTING_SOON = "Class is starting soon";
+const DONE_STATES = ["In Progress", "Completed", "Cancelled"];
+
+function noShowMinutes() {
+  const n = parseInt(process.env.CLASS_NO_SHOW_MINUTES || "10", 10);
+  return Number.isFinite(n) && n > 0 ? n : 10;
+}
+
+function todayName(nowPkt) {
+  return nowPkt.format("dddd");
+}
+
+/** Start and end of this slot today as UTC moments, or null. */
+function windowToday(slot, nowPkt) {
+  const start = parseEndAsUtc(slot.start, nowPkt);
+  const end = parseEndAsUtc(slot.end, nowPkt);
+  if (!start || !end) return null;
+  if (!end.isAfter(start)) end.add(1, "day");
+  return { start, end };
+}
+
+function localTime(slot, nowPkt) {
+  const w = windowToday(slot, nowPkt);
+  return w ? w.start.clone().tz(CANONICAL_TZ).format("h:mm A") : slot.start;
+}
+
+async function trainerFor(slot) {
+  if (!slot.trainerId) return null;
+  return User.findOne({
+    where: { id: slot.trainerId },
+    attributes: ["id", "firstName", "lastName", "email"],
+  });
+}
+
+function emitSlotUpdate(slot, trainer) {
+  const data = {
+    upcomingSlot: JSON.stringify(slot),
+    trainer: JSON.stringify(trainer || {}),
+  };
+  try {
+    if (getIO) getIO().emit("slotUpdate", data);
+  } catch (e) {
+    console.error("[classLiveGuard] socket emit failed:", e.message);
+  }
+  return data;
+}
+
+async function push(tokens, title, body, data) {
+  if (!tokens || tokens.length === 0) return;
+  try {
+    await notificationQueue.add({ title, body, data, deviceTokens: tokens });
+  } catch (e) {
+    console.error("[classLiveGuard] push failed:", e.message);
+  }
+}
+
+async function todaysSlots(nowPkt) {
+  return Slot.findAll({
+    include: [
+      {
+        model: Time,
+        attributes: ["id", "day", "status"],
+        where: { day: todayName(nowPkt) },
+        required: true,
+      },
+    ],
+  });
+}
+
+/** Gap 1: link saved today, start time reached, not started -> start it. */
+async function autoStartClasses() {
+  const nowPkt = moment.tz(CANONICAL_TZ);
+  const nowUtc = moment.utc();
+  const slots = await todaysSlots(nowPkt);
+  const started = [];
+  for (const slot of slots) {
+    if (slot.Time && slot.Time.status === false) continue;
+    if ((slot.status || "").trim() !== STARTING_SOON) continue;
+    if (!slot.trainerLink || !String(slot.trainerLink).trim()) continue;
+    const w = windowToday(slot, nowPkt);
+    if (!w) continue;
+    if (nowUtc.isBefore(w.start) || !nowUtc.isBefore(w.end)) continue;
+
+    slot.status = "In Progress";
+    slot.status_changed_at = new Date();
+    await slot.save();
+
+    const trainer = await trainerFor(slot);
+    const data = emitSlotUpdate(slot, trainer);
+    const who = trainer && trainer.firstName ? ` with ${trainer.firstName}` : "";
+    const tokens = await getDeviceTokensForSlot(slot);
+    await push(
+      tokens,
+      "Your class is live 🔔",
+      `${(slot.type || "Class").trim()}${who} has started. Join now.`,
+      data
+    );
+    started.push(slot.id);
+  }
+  return started;
+}
+
+/** Next time this class type (or any class) runs after today, for the message. */
+async function nextClassLabel(slot, nowPkt) {
+  const names = [];
+  for (let i = 1; i <= 7; i++) names.push(nowPkt.clone().add(i, "days").format("dddd"));
+  const later = await Slot.findAll({
+    include: [{ model: Time, attributes: ["day", "status"], where: { day: { [Op.in]: names } }, required: true }],
+    attributes: ["id", "start", "type"],
+  });
+  for (let i = 0; i < names.length; i++) {
+    const onDay = later.filter((s) => s.Time.day === names[i] && s.Time.status !== false);
+    const same = onDay.find((s) => (s.type || "").trim() === (slot.type || "").trim());
+    const pick = same || onDay[0];
+    if (pick) {
+      const when = i === 0 ? "tomorrow" : names[i];
+      return `${when} at ${pick.start}`;
+    }
+  }
+  return null;
+}
+
+/** Gap 2: CLASS_NO_SHOW_MINUTES after start and still not live -> no show. */
+async function detectTrainerNoShows() {
+  const nowPkt = moment.tz(CANONICAL_TZ);
+  const nowUtc = moment.utc();
+  const graceMin = noShowMinutes();
+  const slots = await todaysSlots(nowPkt);
+  const missed = [];
+  for (const slot of slots) {
+    if (slot.Time && slot.Time.status === false) continue;
+    if (DONE_STATES.includes((slot.status || "").trim())) continue;
+    const w = windowToday(slot, nowPkt);
+    if (!w) continue;
+    const cutoff = w.start.clone().add(graceMin, "minutes");
+    if (nowUtc.isBefore(cutoff) || !nowUtc.isBefore(w.end)) continue;
+
+    const hadLinkToday = (slot.status || "").trim() === STARTING_SOON;
+    slot.status = "Cancelled";
+    slot.status_changed_at = new Date();
+    await slot.save();
+
+    const trainer = await trainerFor(slot);
+    const data = emitSlotUpdate(slot, trainer);
+    const time = localTime(slot, nowPkt);
+    const type = (slot.type || "class").trim();
+
+    // Members: a kind message and where to go next.
+    const next = await nextClassLabel(slot, nowPkt);
+    const tokens = await getDeviceTokensForSlot(slot);
+    await push(
+      tokens,
+      `Today's ${time} class couldn't go ahead`,
+      next
+        ? `Sorry, your trainer couldn't make it. Your next ${type} is ${next}.`
+        : "Sorry, your trainer couldn't make it. We'll see you at the next class.",
+      { ...data, type: "classNoShow" }
+    );
+
+    // Admins: escalation ticket (admin push is sent by createEscalation).
+    try {
+      let ownerId = slot.trainerId;
+      if (!ownerId) {
+        const admin = await User.findOne({ where: { userType: "Admin" }, attributes: ["id"] });
+        ownerId = admin ? admin.id : null;
+      }
+      if (!ownerId) throw new Error("no trainer or admin to attach the ticket to");
+      await createEscalation({
+        userId: ownerId,
+        trigger: "SYSTEM_ISSUE",
+        severity: "high",
+        payload: {
+          kind: "CLASS_TRAINER_NO_SHOW",
+          slotId: slot.id,
+          trainerId: slot.trainerId || null,
+          trainerName: trainer ? `${trainer.firstName || ""} ${trainer.lastName || ""}`.trim() : null,
+          classType: type,
+          classTime: time,
+          date: nowPkt.format("YYYY-MM-DD"),
+          linkAddedToday: hadLinkToday,
+          adminTitle: "Class didn't start",
+          adminBody: `${trainer ? trainer.firstName + "'s" : "Unassigned"} ${type} at ${time} wasn't started. Members were told.`,
+          note: slot.trainerId
+            ? `${type} at ${time} wasn't started ${graceMin} min after start time.`
+            : `${type} at ${time} has no trainer assigned.`,
+        },
+      });
+    } catch (e) {
+      console.error("[classLiveGuard] escalation failed:", e.message);
+    }
+    missed.push(slot.id);
+  }
+  return missed;
+}
+
+module.exports = { autoStartClasses, detectTrainerNoShows, noShowMinutes };

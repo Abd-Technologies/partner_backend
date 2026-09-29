@@ -17,11 +17,4 @@ router.get(
   asyncMiddleware(waterController.getToday)
 );
 
-// Undo her last water tap today (home card "Undo").
-router.delete(
-  "/water_log/last",
-  validateToken,
-  asyncMiddleware(waterController.undoLastWater)
-);
-
 module.exports = router;

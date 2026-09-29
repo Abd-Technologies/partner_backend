@@ -97,14 +97,14 @@ exports.getAllPosts = async (req, res) => {
     const queryOpts = {
       where: whereCondition,
       include: [
-        { model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] },
+        { model: User, attributes: ['id', 'firstName', 'lastName', 'email'] },
         {
           model: Reply,
           as: 'messages',
           separate: true,
           order: [['createdAt', 'ASC']],
           include: [
-            { model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] },
+            { model: User, attributes: ['id', 'firstName', 'lastName', 'email'] },
           ],
         },
         { model: Like, as: 'likes', attributes: ['userId'] },
@@ -180,7 +180,7 @@ exports.createPost = async (req, res) => {
     const newPost = await Post.findOne({
       where: { id: createdPost.id },
       include: [
-        { model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] },
+        { model: User, attributes: { exclude: ['password'] } },
       ],
     });
 
@@ -232,7 +232,7 @@ exports.createReply = async (req, res) => {
 
     const replyWithUser = await Reply.findByPk(reply.id, {
       include: [
-        { model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] },
+        { model: User, attributes: ['id', 'firstName', 'lastName', 'email'] },
       ],
     });
 
@@ -278,15 +278,11 @@ exports.toggleLike = async (req, res) => {
 
       if (!created) {
         await like.destroy();
-        const unliked = { postId, like: false, userId };
-      io.to(`post_${postId}`).emit('toggleLike', unliked);
-      io.to('community').emit('toggleLike', unliked);
+        io.to(`post_${postId}`).emit('toggleLike', { postId, like: false });
         return res.json(ApiResponse('1', 'Like removed', {}));
       }
 
-      const liked = { postId, like: true, userId };
-      io.to(`post_${postId}`).emit('toggleLike', liked);
-      io.to('community').emit('toggleLike', liked);
+      io.to(`post_${postId}`).emit('toggleLike', { postId, like: true });
       return res.json(ApiResponse('1', 'Post liked', {}));
     } catch (err) {
       // Lost the race — another request created the row between our find and
@@ -299,64 +295,6 @@ exports.toggleLike = async (req, res) => {
   } catch (error) {
     console.error('[posts] toggleLike error:', error);
     return res.status(500).json(ApiResponse('0', 'Failed to toggle like', {}));
-  }
-};
-
-// Edit a post: owner only. Change the text, swap the photo (field
-// "image") or remove it (removeImage=true). A member who adds a new photo
-// goes back to review, same rule as a new photo post.
-exports.editPost = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const post = await Post.findByPk(id);
-    if (!post) return res.status(404).json(ApiResponse('0', 'Post not found', {}));
-    if (post.userId !== req.user.id) {
-      return res.status(403).json(ApiResponse('0', 'You can only edit your own post', {}));
-    }
-    const author = await User.findByPk(req.user.id);
-
-    const text = typeof req.body.text === 'string' ? req.body.text.trim() : null;
-    const removeImage = toBool(req.body.removeImage, false);
-    const updates = {};
-    if (text !== null) updates.text = text || null;
-    if (req.file) updates.imageUrl = buildImageUrl(req);
-    else if (removeImage) updates.imageUrl = null;
-
-    const nextText = updates.text !== undefined ? updates.text : post.text;
-    const nextImage = updates.imageUrl !== undefined ? updates.imageUrl : post.imageUrl;
-    if (!nextText && !nextImage) {
-      return res.status(400).json(ApiResponse('0', 'Post must include text or an image', {}));
-    }
-    if (req.file && post.isPost && !isStaff(author)) updates.approved = false;
-
-    await post.update(updates);
-    const fresh = await Post.findByPk(post.id, {
-      include: [
-        { model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] },
-        {
-          model: Reply,
-          as: 'messages',
-          separate: true,
-          order: [['createdAt', 'ASC']],
-          include: [{ model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] }],
-        },
-        { model: Like, as: 'likes', attributes: ['userId'] },
-      ],
-    });
-    const json = fresh.toJSON();
-    json.likeCount = json.likes ? json.likes.length : 0;
-
-    const io = getIO();
-    if (fresh.approved) io.to('community').emit('postUpdated', json);
-    else io.to('community').emit('postDeleted', { id: fresh.id });
-
-    const msg = fresh.approved
-      ? 'Post updated'
-      : 'Post updated. It will show again once our team checks the new photo.';
-    return res.json(ApiResponse('1', msg, { post: json }));
-  } catch (error) {
-    console.error('[posts] editPost error:', error);
-    return res.status(500).json(ApiResponse('0', 'Failed to update post', {}));
   }
 };
 
@@ -403,7 +341,7 @@ exports.approvePost = async (req, res) => {
     const post = await Post.findOne({
       where: { id },
       include: [
-        { model: User, attributes: ['id', 'firstName', 'lastName', 'email', 'userType', 'image'] },
+        { model: User, attributes: { exclude: ['password'] } },
       ],
     });
 

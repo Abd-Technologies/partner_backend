@@ -52,7 +52,6 @@ const escalationRoutes = require('./routes/FrontSite/escalation')
 const appIssueRoutes = require('./routes/FrontSite/appIssue')
 const internalRoutes = require('./routes/internal')
 const escalationAdminRoutes = require('./routes/Admin/escalation')
-const supportTicketAdminRoutes = require('./routes/Admin/supportTickets')
 const metricsAdminRoutes = require('./routes/Admin/metrics')
 const trialRoutes = require('./routes/FrontSite/trial')
 const dietPlanAdminRoutes = require('./routes/Admin/dietPlan')
@@ -90,6 +89,7 @@ const cron = require("node-cron");
 const sendNotification = require("./helper/notification");
 const moment = require("moment");
 const { autoEndExpiredSessions, GRACE_MINUTES } = require("./helper/autoEndSessions");
+const { autoStartClasses, detectTrainerNoShows, noShowMinutes } = require("./helper/classLiveGuard");
 const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("./helper/autoEndExpiredAppointments");
 const { checkMeetAttendance } = require("./helper/checkMeetAttendance");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
@@ -216,6 +216,24 @@ cron.schedule(
       }
     } catch (error) {
       console.error("Error in auto-end-sessions job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Workout classes audit gaps 1 and 2: start a class whose link was saved
+// today once start time arrives, and catch trainer no shows
+// (CLASS_NO_SHOW_MINUTES after start). See helper/classLiveGuard.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const started = await autoStartClasses();
+      if (started.length) console.log(`[class-live] auto started: ${started.join(", ")}`);
+      const missed = await detectTrainerNoShows();
+      if (missed.length) console.log(`[class-live] trainer no show (${noShowMinutes()}m): ${missed.join(", ")}`);
+    } catch (error) {
+      console.error("Error in class live guard job:", error);
     }
   },
   { timezone: CRON_TZ }
@@ -554,7 +572,6 @@ app.use('/users/escalations', escalationRoutes);
 app.use('/users/app-issue', appIssueRoutes);
 app.use('/internal', internalRoutes);
 app.use('/admin/escalations', escalationAdminRoutes);
-app.use('/admin/support-tickets', supportTicketAdminRoutes);
 app.use('/admin/metrics', metricsAdminRoutes);
 app.use('/trial', trialRoutes);
 app.use('/admin/diet-plan', dietPlanAdminRoutes);
