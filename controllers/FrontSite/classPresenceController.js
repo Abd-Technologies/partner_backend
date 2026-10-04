@@ -62,6 +62,9 @@ exports.join = async (req, res) => {
         joinedAt: now,
         lastSeenAt: now,
       });
+      console.log(
+        `[class-analytics] USER_JOINED_CLASS: userId=${userId} slotId=${slotId} joinedAt="${now.toISOString()}" scheduledStart="${slot.start}" source="${body.source || 'zoom_native'}"`
+      );
     }
 
     return res.json(
@@ -127,6 +130,10 @@ exports.leave = async (req, res) => {
     }
 
     await presence.save();
+
+    console.log(
+      `[class-analytics] USER_LEFT_CLASS: userId=${userId} slotId=${slotId} durationMinutes=${Math.round(durationSeconds / 60)} durationSeconds=${durationSeconds} leftAt="${now.toISOString()}" trialAttendanceMarked=${trialResult.marked}`
+    );
 
     return res.json(
       ApiResponse("1", "Class presence ended", {
