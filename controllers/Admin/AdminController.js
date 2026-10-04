@@ -1,5 +1,4 @@
 require("dotenv").config({ path: 'backend.thefither.com/.env' });
-const { RtcTokenBuilder, RtcRole } = require("agora-token");
 const { getIO } = require("../../socket");
 console.log("📦 getIO function imported");
 // correct path based on your structure
@@ -55,24 +54,6 @@ const { normalizeSlotTime } = require("../../helper/normalizeSlotTime");
 // site (that duplication is what broke updateLink/updateTrainerJoin/
 // update_slot_status in the first place).
 const { getDeviceTokensForSlot } = require("../../helper/crownjobfunction");
-
-//agora generate token
-
-const APP_ID = "4babf557757745deb4176da00b193310";
-const APP_CERTIFICATE = "94b22af90adb429e8a88e32f7e475e78";
-const UID = 0; // 0 means the token will work for any user
-const ROLE = RtcRole.PUBLISHER; // Can be PUBLISHER or SUBSCRIBER
-const EXPIRATION_TIME_IN_SECONDS = 3600; // Token valid for 1 hour
-
-const currentTimestamp = Math.floor(Date.now() / 1000);
-const privilegeExpiredTs = currentTimestamp + EXPIRATION_TIME_IN_SECONDS;
-
-
-
-
-
-
-
 
 const bcrypt = require("bcryptjs");
 const { sign } = require("jsonwebtoken");
@@ -904,10 +885,24 @@ async function update_slot_status(req, res) {
     // and the change time so the audit log can distinguish manual ends
     // from auto-end cron flips. Auto-end intentionally writes NULL into
     // completed_by — that's the "trainer forgot" signal.
+    const now = new Date();
     slot.status = status;
     if (req.user && req.user.id) slot.completed_by = req.user.id;
-    slot.status_changed_at = new Date();
+    slot.status_changed_at = now;
     await slot.save();
+
+    // Log operational timing metrics (trainer punctuality & class duration)
+    try {
+      if (status === "In Progress") {
+        console.log(
+          `[class-analytics] TRAINER_STARTED_CLASS: slotId=${slot.id} trainerId=${slot.trainerId} scheduledStart="${slot.start}" actualStart="${now.toISOString()}" actor=${req.user ? req.user.id : "unknown"}`
+        );
+      } else if (status === "Completed") {
+        console.log(
+          `[class-analytics] TRAINER_ENDED_CLASS: slotId=${slot.id} trainerId=${slot.trainerId} scheduledEnd="${slot.end}" actualEnd="${now.toISOString()}" endedBy=${slot.completed_by ? `trainer_${slot.completed_by}` : "auto_end_cron"}`
+        );
+      }
+    } catch (_) {}
 
     // Fetch trainer details
     const trainer = await User.findOne({
@@ -2741,20 +2736,8 @@ async function updateLink(req, res) {
       return res.json(ApiResponse("0", "Slot not found", {}));
     }
 
-    //  const token = RtcTokenBuilder.buildTokenWithUid(
-    //    APP_ID,
-    //    APP_CERTIFICATE,
-    //   link,
-    //    UID,
-    //   ROLE,
-    //    privilegeExpiredTs
-    //  );
-
-    // console.log("tokenennene" + token);
-
     slot.trainerLink = link;
-    slot.status = "Class is starting soon"
-    //  slot.token = token;
+    slot.status = "Class is starting soon";
 
     await slot.save();
 
