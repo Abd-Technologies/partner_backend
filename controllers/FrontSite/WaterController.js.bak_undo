@@ -2,7 +2,6 @@ const ApiResponse = require("../../helper/ApiResponse");
 const { WaterLog, WeeklyCheckin, UserCycleData } = require("../../models");
 const { calculateWaterTargetMl } = require("../../helper/WaterTargetCalculator");
 const CyclePhase = require("../../helper/CyclePhaseCalculator");
-const { userToday } = require("../../helper/userDay");
 
 function todayDateOnly() {
   const now = new Date();
@@ -17,8 +16,7 @@ function todayDateOnly() {
 // default with target derived from the fallback weight/phase inside the
 // calculator. Keeps the dashboard Promise.allSettled tolerant.
 async function computeHydrationSummary(userId) {
-  // Her own day: resets at her midnight.
-  const dateStr = await userToday(userId);
+  const dateStr = todayDateOnly();
 
   // Today's water total.
   let consumedMl = 0;
@@ -86,32 +84,13 @@ async function logWater(req, res) {
   try {
     await WaterLog.create({
       userId,
-      date: await userToday(userId),
+      date: todayDateOnly(),
       amountMl,
     });
     const summary = await computeHydrationSummary(userId);
     return res.json(ApiResponse("1", "Logged", summary));
   } catch (err) {
     console.error("WaterController.logWater:", err);
-    return res.json(ApiResponse("0", "Internal server error", {}));
-  }
-}
-
-// DELETE /users/water_log/last — undo her most recent water tap today.
-async function undoLastWater(req, res) {
-  const userId = req.user && req.user.id;
-  if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
-  try {
-    const last = await WaterLog.findOne({
-      where: { userId, date: await userToday(userId) },
-      order: [["id", "DESC"]],
-    });
-    if (!last) return res.json(ApiResponse("0", "Nothing to undo", {}));
-    await last.destroy();
-    const summary = await computeHydrationSummary(userId);
-    return res.json(ApiResponse("1", "Removed", summary));
-  } catch (err) {
-    console.error("WaterController.undoLastWater:", err);
     return res.json(ApiResponse("0", "Internal server error", {}));
   }
 }
@@ -132,7 +111,6 @@ async function getToday(req, res) {
 
 module.exports = {
   logWater,
-  undoLastWater,
   getToday,
   computeHydrationSummary,
 };

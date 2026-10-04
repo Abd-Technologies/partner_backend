@@ -52,7 +52,6 @@ const escalationRoutes = require('./routes/FrontSite/escalation')
 const appIssueRoutes = require('./routes/FrontSite/appIssue')
 const internalRoutes = require('./routes/internal')
 const escalationAdminRoutes = require('./routes/Admin/escalation')
-const supportTicketAdminRoutes = require('./routes/Admin/supportTickets')
 const metricsAdminRoutes = require('./routes/Admin/metrics')
 const trialRoutes = require('./routes/FrontSite/trial')
 const dietPlanAdminRoutes = require('./routes/Admin/dietPlan')
@@ -554,7 +553,6 @@ app.use('/users/escalations', escalationRoutes);
 app.use('/users/app-issue', appIssueRoutes);
 app.use('/internal', internalRoutes);
 app.use('/admin/escalations', escalationAdminRoutes);
-app.use('/admin/support-tickets', supportTicketAdminRoutes);
 app.use('/admin/metrics', metricsAdminRoutes);
 app.use('/trial', trialRoutes);
 app.use('/admin/diet-plan', dietPlanAdminRoutes);

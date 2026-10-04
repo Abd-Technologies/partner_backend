@@ -1,6 +1,5 @@
 const ApiResponse = require("../../helper/ApiResponse");
-const { PreConsultationProfile, User } = require("../../models");
-const { requirementsFor } = require("../../helper/preConsultRequirements");
+const { PreConsultationProfile } = require("../../models");
 
 // Fields the user is allowed to set/update on their own profile. Anything
 // else in the request body is silently ignored (whitelist, not blacklist —
@@ -162,42 +161,12 @@ exports.updateOwnProfile = async (req, res) => {
 
     await profile.update(updates);
 
-    // Signup answers asked again in the pre-consultation form for users
-    // who signed up before those questions existed. They live on the
-    // User row, so the whole app keeps reading them from one place.
-    const userUpdates = {};
-    if (req.body && typeof req.body.userMainGoal === "string" && req.body.userMainGoal.trim()) {
-      userUpdates.mainGoal = req.body.userMainGoal.trim().slice(0, 64);
-    }
-    if (req.body && typeof req.body.userHealthConditions === "string") {
-      userUpdates.healthConditions = req.body.userHealthConditions.trim().slice(0, 255) || "none";
-    }
-    if (Object.keys(userUpdates).length) {
-      await User.update(userUpdates, { where: { id: userId } });
-    }
-
     return res.json(
       ApiResponse("1", "Profile updated", { profile: toWire(profile) })
     );
   } catch (err) {
     console.error("[preConsultation] updateOwnProfile:", err);
     return res.json(ApiResponse("0", "Failed to update profile", {}));
-  }
-};
-
-// GET /users/pre-consultation/requirements?planType=diet|workout|combined
-// Which steps of the pre-consultation form she still has to answer.
-exports.getRequirements = async (req, res) => {
-  try {
-    const userId = req.user && req.user.id;
-    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
-    const t = String(req.query.planType || "diet");
-    const planType = ["diet", "workout", "combined"].includes(t) ? t : "diet";
-    const data = await requirementsFor(userId, planType);
-    return res.json(ApiResponse("1", "Requirements", data));
-  } catch (err) {
-    console.error("[preConsultation] getRequirements:", err);
-    return res.json(ApiResponse("0", "Could not load", {}));
   }
 };
 

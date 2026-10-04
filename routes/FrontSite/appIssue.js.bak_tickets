@@ -31,11 +31,4 @@ const upload = multer({
 // POST /users/app-issue — report a technical / app-service issue (admin-handled)
 router.post("/", validateToken, upload.single("image"), asyncMiddleware(ctrl.reportIssue));
 
-// Her tickets ("Your reports") and the thread with support.
-router.get("/mine", validateToken, asyncMiddleware(ctrl.myTickets));
-router.get("/unread-count", validateToken, asyncMiddleware(ctrl.unreadCount));
-router.get("/:id", validateToken, asyncMiddleware(ctrl.getTicket));
-router.post("/:id/reply", validateToken, upload.single("image"), asyncMiddleware(ctrl.replyTicket));
-router.post("/:id/feedback", validateToken, asyncMiddleware(ctrl.feedback));
-
 module.exports = router;

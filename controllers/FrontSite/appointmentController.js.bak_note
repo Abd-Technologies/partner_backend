@@ -102,9 +102,7 @@ exports.getAppointmentById = async (req, res) => {
 
 // Create a new appointment
 exports.createAppointment = async (req, res) => {
-  const { date, userId, dietitionId, timeSlotId, userPlanId, kind, message } = req.body;
-  // Optional note from the client for the dietitian (fits the 255 char column).
-  const userNote = typeof message === "string" && message.trim() ? message.trim().slice(0, 250) : null;
+  const { date, userId, dietitionId, timeSlotId, userPlanId, kind } = req.body;
   if (!date || !userId || !dietitionId || !timeSlotId || !userPlanId) {
     const response = ApiResponse("0", "Invalid input data", {});
     return res.status(200).json(response);
@@ -343,7 +341,6 @@ const txResult = await sequelize.transaction(async (t) => {
     ownActiveAppointment.planId = userPlanId;
     ownActiveAppointment.dietitionId = dietitionId;
     if (persistedKind) ownActiveAppointment.kind = persistedKind;
-    if (userNote) ownActiveAppointment.message = userNote;
     // The old time is no longer valid even if it was already
     // confirmed — moving it re-opens it for the dietitian to confirm
     // the NEW time, same as a fresh request would need.
@@ -363,7 +360,6 @@ const txResult = await sequelize.transaction(async (t) => {
         planId: userPlanId,
         reschedule: isReschedule,
         kind: persistedKind,
-        message: userNote,
       },
       { transaction: t }
     );

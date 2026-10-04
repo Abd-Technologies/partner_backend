@@ -71,9 +71,6 @@ router.post('/reply', validateToken, postsController.createReply);
 // Like or unlike a post
 router.post('/like', validateToken, postsController.toggleLike);
 
-// Edit own post: text, new photo (field "image") or removeImage=true
-router.post('/edit/:id', validateToken, uploadImage, postsController.editPost);
-
 // Delete a post (owner or admin)
 router.delete('/:id', validateToken, postsController.deletePost);
 

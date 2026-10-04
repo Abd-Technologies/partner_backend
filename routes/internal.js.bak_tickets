@@ -8,8 +8,4 @@ const ctrl = require("../controllers/FrontSite/appNotifyController");
 // POST /internal/app-notify — push a message to a user's device (e.g. issue resolved)
 router.post("/app-notify", ctrl.appNotify);
 
-// POST /internal/support-ticket-update — CRM replies to / resolves a support ticket
-const supportCrm = require("../controllers/FrontSite/supportCrmController");
-router.post("/support-ticket-update", supportCrm.supportTicketUpdate);
-
 module.exports = router;

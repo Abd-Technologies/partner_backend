@@ -1,5 +1,4 @@
 const { Op } = require("sequelize");
-const { userToday } = require("../../helper/userDay");
 const moment = require("moment-timezone");
 const ApiResponse = require("../../helper/ApiResponse");
 const {
@@ -466,8 +465,7 @@ async function buildLiveAndComingUp(userTz) {
 }
 
 async function buildTodayCheckin(userId) {
-  // Her own day, so the feeling resets at her midnight.
-  const dateStr = await userToday(userId);
+  const dateStr = localDateOnly();
   const row = await DailyCheckin.findOne({ where: { userId, date: dateStr } });
   if (!row) return null;
   return {
@@ -479,8 +477,8 @@ async function buildTodayCheckin(userId) {
 }
 
 async function buildSleep(userId) {
-  // hoursToday, in her own day
-  const dateStr = await userToday(userId);
+  // hoursToday
+  const dateStr = localDateOnly();
   let hoursToday = null;
   try {
     const row = await DailyCheckin.findOne({

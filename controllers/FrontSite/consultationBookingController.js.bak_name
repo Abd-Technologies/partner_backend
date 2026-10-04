@@ -132,14 +132,9 @@ exports.getDietitianAvailability = async (req, res) => {
       }
     }
 
-    // Send the assigned dietitian's name so every booking screen can show it.
-    const dietUser = await User.findByPk(dietitianId, { attributes: ["firstName", "lastName"] });
-    const dietitianName = dietUser ? `${dietUser.firstName || ""} ${dietUser.lastName || ""}`.trim() || null : null;
-
     return res.json(
       ApiResponse("1", "Availability fetched", {
         dietitianId,
-        dietitianName,
         from,
         to,
         slots: out,
