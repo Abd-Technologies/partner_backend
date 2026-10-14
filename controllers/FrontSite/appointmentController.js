@@ -3,6 +3,8 @@ const { Appointment, User, SlotDiet, AppointmentReview, ProgressSubmission, sequ
 const ApiResponse = require("../../helper/ApiResponse");
 const sendNotification = require("../../helper/notification");
 const { findFrozenActivePlan } = require("../../helper/freezeGate");
+const bookingPolicy = require("../../helper/bookingPolicy");
+const { findClassClash } = require("../../helper/classClash");
 const { Op } = require("sequelize");
 
 
@@ -46,7 +48,32 @@ exports.getAllAppointments = async (req, res) => {
       ],
       order: [["date", "ASC"]],
     });
-    const response = ApiResponse("1", "Appointments fetched successfully", { appointments });
+
+    // Which consultation is this for the client — her 1st, 2nd, 3rd...?
+    // = completed consultations she had before this one, + 1. One query
+    // for all clients in the list, then counted in memory.
+    const clientIds = [...new Set(appointments.map((a) => a.userId))];
+    const completedRows = clientIds.length
+      ? await Appointment.findAll({
+          where: { userId: { [Op.in]: clientIds }, status: "completed" },
+          attributes: ["id", "userId", "date"],
+          raw: true,
+        })
+      : [];
+    const withNumbers = appointments.map((a) => {
+      const json = a.toJSON();
+      const thisTime = new Date(a.date).getTime();
+      const before = completedRows.filter(
+        (c) =>
+          c.userId === a.userId &&
+          c.id !== a.id &&
+          new Date(c.date).getTime() < thisTime
+      ).length;
+      json.consultNumber = before + 1;
+      return json;
+    });
+
+    const response = ApiResponse("1", "Appointments fetched successfully", { appointments: withNumbers });
     return res.status(200).json(response);
   } catch (error) {
     const response = ApiResponse("0", `Error fetching appointments: ${error.message}`, {});
@@ -129,6 +156,48 @@ exports.createAppointment = async (req, res) => {
     );
   }
 
+  // Health form first (Oct 2026): the first consultation can't be booked
+  // until her health form is done — the dietitian needs her answers.
+  // Same rule as the form popup (helper/preConsultRequirements.js).
+  // Follow-ups are not blocked.
+  if (persistedKind !== "followup") {
+    try {
+      const { requirementsFor, planTypeForUser } = require("../../helper/preConsultRequirements");
+      // Same questions as her form popup: her package decides (one truth).
+      const formPlanType = (await planTypeForUser(userId)) || "diet";
+      const req2 = await requirementsFor(userId, formPlanType);
+      if (req2.shouldShow) {
+        // Apps that never reported a version are OLD versions, which may
+        // not open the form from here: tell her to update first, so she
+        // isn't stuck with a message and no way forward.
+        const who = await User.findByPk(userId, { attributes: ["appVersion"] });
+        const oldApp = !who || !who.appVersion;
+        return res.json(
+          ApiResponse(
+            "0",
+            oldApp
+              ? "Please update Fit Her to the latest version, then fill your short health form to book your consultation."
+              : "Please fill your health form first. It helps your dietitian prepare for your consultation.",
+            { code: "FORM_REQUIRED", planType: formPlanType }
+          )
+        );
+      }
+    } catch (e) {
+      console.error("[createAppointment] form check failed:", e.message);
+    }
+  }
+
+  // Change policy: after a second missed session her self-booking is
+  // locked until staff reset it (helper/bookingPolicy.js).
+  if (userPlanId) {
+    const lockPlan = await bookingPolicy.planForAppointment({ planId: userPlanId });
+    if (bookingPolicy.bookingLocked(lockPlan)) {
+      return res.json(
+        ApiResponse("0", bookingPolicy.MSG.locked, { code: "BOOKING_LOCKED" })
+      );
+    }
+  }
+
   try {
 // Checkpoint gate (Phase 1C) — enforces docs/fit_her_consultation_flow.md
 // Section 14: "2 consultations per month" (one initial + one Day-15
@@ -149,12 +218,22 @@ exports.createAppointment = async (req, res) => {
 // user's own pending row in place rather than creating a second one.
 // Counting 'pending' here would incorrectly block that same reschedule.
 if (persistedKind) {
+  // Bookings auto-confirm now, so her own UPCOMING confirmed booking is
+  // not a "used" consultation: rebooking it is a reschedule (updated in
+  // place below). Only a past/started/completed one counts. Without this,
+  // rescheduling was refused and she had to cancel first.
+  const usedConsultation = {
+    [Op.or]: [
+      { status: { [Op.in]: ["completed", "In Progress"] } },
+      { status: "confirmed", date: { [Op.lte]: new Date() } },
+    ],
+  };
   const priorInitial = await Appointment.findOne({
     where: {
       userId,
       planId: userPlanId,
       kind: "initial",
-      status: { [Op.in]: ["confirmed", "completed", "In Progress"] },
+      ...usedConsultation,
     },
   });
 
@@ -180,7 +259,7 @@ if (persistedKind) {
         userId,
         planId: userPlanId,
         kind: "followup",
-        status: { [Op.in]: ["confirmed", "completed", "In Progress"] },
+        ...usedConsultation,
       },
     });
     if (priorFollowup) {
@@ -328,10 +407,27 @@ const txResult = await sequelize.transaction(async (t) => {
     lock: t.LOCK.UPDATE,
   });
 
+  // Auto-confirm: the dietitian already said she's free by opening this
+  // slot, so a booking no longer waits for her to tap "confirm". The
+  // slot's Meet link is snapshotted onto the appointment right away —
+  // the same snapshot updateAppointment used to take at confirm time.
+  const bookedSlot = await SlotDiet.findByPk(timeSlotId, { transaction: t });
+  const slotMeetLink =
+    bookedSlot && bookedSlot.dietitionLink ? bookedSlot.dietitionLink : null;
+
   let appointment;
   let wasUpdated = false;
   let dietitianChanged = false;
   let previousDietitionId = null;
+
+  // Change policy: moving an existing booking is only allowed until 24h
+  // before it starts. Inside that window she can only cancel.
+  if (
+    ownActiveAppointment &&
+    (await bookingPolicy.isInsideLateWindow(ownActiveAppointment, t))
+  ) {
+    return { lateReschedule: true };
+  }
 
   if (ownActiveAppointment) {
     wasUpdated = true;
@@ -341,13 +437,16 @@ const txResult = await sequelize.transaction(async (t) => {
     ownActiveAppointment.date = date;
     ownActiveAppointment.timeSlotId = timeSlotId;
     ownActiveAppointment.planId = userPlanId;
+    // New time: the "in 15 minutes" reminder should go out again.
+    ownActiveAppointment.reminderSentAt = null;
     ownActiveAppointment.dietitionId = dietitionId;
     if (persistedKind) ownActiveAppointment.kind = persistedKind;
     if (userNote) ownActiveAppointment.message = userNote;
-    // The old time is no longer valid even if it was already
-    // confirmed — moving it re-opens it for the dietitian to confirm
-    // the NEW time, same as a fresh request would need.
-    ownActiveAppointment.status = "pending";
+    // Moving to a new open slot is confirmed straight away, same as a
+    // fresh booking (it used to drop back to "pending" for the dietitian
+    // to re-confirm). Fresh Meet-link snapshot for the new slot.
+    ownActiveAppointment.status = "confirmed";
+    ownActiveAppointment.meetLink = slotMeetLink;
     ownActiveAppointment.reschedule = true;
     ownActiveAppointment.status_changed_at = new Date();
     await ownActiveAppointment.save({ transaction: t });
@@ -359,7 +458,9 @@ const txResult = await sequelize.transaction(async (t) => {
         userId,
         dietitionId,
         timeSlotId,
-        status: "pending",
+        status: "confirmed", // auto-confirmed — see bookedSlot above
+        status_changed_at: new Date(),
+        meetLink: slotMeetLink,
         planId: userPlanId,
         reschedule: isReschedule,
         kind: persistedKind,
@@ -369,15 +470,51 @@ const txResult = await sequelize.transaction(async (t) => {
     );
   }
 
-  return { appointment, wasUpdated, dietitianChanged, previousDietitionId };
+  return {
+    appointment,
+    wasUpdated,
+    dietitianChanged,
+    previousDietitionId,
+    slotStart: bookedSlot ? bookedSlot.start : null,
+    slotEnd: bookedSlot ? bookedSlot.end : null,
+    hasMeetLink: !!slotMeetLink,
+  };
 });
 
 if (txResult.conflict) {
   const response = ApiResponse("0", "Time slot already booked", {});
   return res.status(200).json(response);
 }
+if (txResult.lateReschedule) {
+  return res.status(200).json(
+    ApiResponse("0", bookingPolicy.MSG.noReschedule, { code: "LATE_RESCHEDULE" })
+  );
+}
 
-const { appointment, wasUpdated, dietitianChanged, previousDietitionId } = txResult;
+const {
+  appointment,
+  wasUpdated,
+  dietitianChanged,
+  previousDietitionId,
+  slotStart,
+  slotEnd,
+  hasMeetLink,
+} = txResult;
+
+// "Thu 9 Oct, 6:00 PM" — built from the date string + the slot's
+// wall-clock start, never from a Date object (see the timezone note on
+// dayStr above).
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const [yy, mm, dd] = dayStr.split("-").map(Number);
+const dayLabel =
+  yy && mm && dd
+    ? `${WEEKDAYS[new Date(Date.UTC(yy, mm - 1, dd)).getUTCDay()]} ${dd} ${MONTHS[mm - 1]}`
+    : dayStr;
+const when = slotStart ? `${dayLabel}, ${slotStart}` : dayLabel;
+const linkNote = hasMeetLink
+  ? ""
+  : " This slot has no Meet link yet, please add one before the session.";
 
 const user = await User.findByPk(userId);
 const dietitian = await User.findByPk(dietitionId);
@@ -394,8 +531,8 @@ const notify = async (deviceToken, title, body, type) => {
 
 if (wasUpdated) {
   const notifications = [
-    notify(user?.deviceToken, "Booking Updated", `Your consultation with ${dietitian?.firstName} ${dietitian?.lastName} has been moved. Please wait for confirmation.`, "bookingUpdated"),
-    notify(dietitian?.deviceToken, "Booking Updated", `${user?.firstName} ${user?.lastName} moved their appointment. Please review the new time.`, "bookingUpdated"),
+    notify(user?.deviceToken, "Booking Updated", `Your consultation with ${dietitian?.firstName} ${dietitian?.lastName} is now on ${when}. You're all set!`, "bookingUpdated"),
+    notify(dietitian?.deviceToken, "Booking Updated", `${user?.firstName} ${user?.lastName} moved their consultation to ${when}.${linkNote}`, "bookingUpdated"),
   ];
   // Rare (see comment above), but if the booking actually jumped to a
   // DIFFERENT dietitian, the old one's queue will silently lose this
@@ -410,15 +547,19 @@ if (wasUpdated) {
   await Promise.all(notifications);
 } else {
   await Promise.all([
-    notify(user?.deviceToken, "Booking Pending", `Your booking has been sent to ${dietitian?.firstName} ${dietitian?.lastName}. Please wait for confirmation`, "bookingPending"),
-    notify(dietitian?.deviceToken, "Booking Added", `Your booking has been added with ${user?.firstName} ${user?.lastName}`, "bookingAdded"),
+    notify(user?.deviceToken, "Appointment Confirmed", `Your consultation with ${dietitian?.firstName} ${dietitian?.lastName} is confirmed for ${when}. See you there!`, "appointmentConfirmed"),
+    notify(dietitian?.deviceToken, "New Consultation Booked", `${user?.firstName} ${user?.lastName} booked a consultation for ${when}.${linkNote}`, "bookingAdded"),
   ]);
 }
+
+// Small "a live class runs at the same time" note for the booked screen
+// (null when nothing overlaps or she has no workout package).
+const classClash = await findClassClash(userId, dayStr, slotStart, slotEnd);
 
 const response = ApiResponse(
   "1",
   wasUpdated ? "Appointment updated successfully" : "Appointment created successfully",
-  { appointment, wasUpdated }
+  { appointment, wasUpdated, classClash }
 );
 return res.status(200).json(response);
   } catch (error) {
@@ -456,6 +597,7 @@ exports.updateAppointment = async (req, res) => {
     }
 
     const statusChanged = status != null && status !== appointment.status;
+    const prevStatus = appointment.status;
 
     if (status != null) {
       appointment.status = status;
@@ -494,6 +636,31 @@ exports.updateAppointment = async (req, res) => {
 
     await appointment.save();
 
+    // Dietitian (or admin) cancelled a live booking: whatever the timing,
+    // the client gets the same free days as a dietitian no-show, once per
+    // booking. Never counts against her change pass.
+    let bonusDays = 0;
+    if (
+      statusChanged &&
+      status === "canceled" &&
+      ["pending", "confirmed", "In Progress"].includes(prevStatus) &&
+      !(appointment.noShowBonusDays > 0)
+    ) {
+      try {
+        const plan = await bookingPolicy.planForAppointment(appointment);
+        if (plan && plan.expireDate) {
+          bonusDays = bookingPolicy.DIETITIAN_NO_SHOW_BONUS_DAYS;
+          await plan.update({
+            expireDate: new Date(new Date(plan.expireDate).getTime() + bonusDays * 86400000),
+          });
+          await appointment.update({ noShowBonusDays: bonusDays });
+        }
+      } catch (e) {
+        bonusDays = 0;
+        console.error("[updateAppointment] cancel compensation failed:", e.message);
+      }
+    }
+
     const user = await User.findByPk(appointment.userId);
 
     // Send notification if status was changed
@@ -502,8 +669,11 @@ exports.updateAppointment = async (req, res) => {
         await sendNotification(
           [user.deviceToken],
           {
-            title: "Appointment Canceled",
-            body: "Your appointment has been canceled by your dietitian. You can reschedule it at your convenience."
+            title: "Your session was canceled",
+            body:
+              "Your dietitian had to cancel your session" +
+              (bonusDays > 0 ? `, so we've added ${bonusDays} free days to your package. ` : ". ") +
+              "Open the Diet tab to pick a new time. It's free."
           },
           { type: "appointmentCanceled" }
         );
@@ -595,6 +765,40 @@ exports.startAppointment = async (req, res) => {
           "0",
           `Cannot start an appointment in status "${appointment.status}". Confirm it first.`,
           {}
+        )
+      );
+    }
+
+    // Too early: starting turns the client's Join button green, so it
+    // only opens 10 minutes before the scheduled time.
+    const openAt = await bookingPolicy.earliestStart(appointment);
+    // Too late: the session's time is over. Starting it now would flip
+    // the client's button green for a call that's no longer happening
+    // (and the auto-end job would close it as "completed" a minute later).
+    const slotForEnd = appointment.timeSlotId
+      ? await SlotDiet.findByPk(appointment.timeSlotId, { attributes: ["id", "end"] })
+      : null;
+    const endsAt = bookingPolicy.sessionEnd(appointment, slotForEnd);
+    if (endsAt && Date.now() > endsAt.getTime()) {
+      return res.status(200).json(
+        ApiResponse(
+          "0",
+          `This session's time has passed (it ended at ` +
+            `${bookingPolicy.formatPkTime(endsAt)}), so it can't be started now. ` +
+            `If the client didn't join, use "Client didn't join".`,
+          { code: "TOO_LATE" }
+        )
+      );
+    }
+
+    if (openAt && Date.now() < openAt.getTime()) {
+      return res.status(200).json(
+        ApiResponse(
+          "0",
+          `It's too early to start this session. You can start it from ` +
+            `${bookingPolicy.formatPkTime(openAt)} ` +
+            `(${bookingPolicy.START_EARLY_MINUTES} minutes before).`,
+          { code: "TOO_EARLY", startableAt: openAt }
         )
       );
     }

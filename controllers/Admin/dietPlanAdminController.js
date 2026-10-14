@@ -14,6 +14,23 @@ const {
 
 const VALID_STATUSES = ['draft', 'active', 'completed', 'cancelled'];
 
+const {
+  getAssignedClientIds,
+  isUnscopedRole,
+} = require('../../helper/dietitianScope');
+
+// Scoping guard (same rule as preConsultationAdminController's
+// assertOwnsProfile): Admin sees everything; every other staff type may
+// only touch plans for clients assigned to her. validateAdmin alone only
+// checks "not a plain User" — it never checked WHICH staff member asked,
+// so any dietitian/trainer could generate, activate or read another
+// dietitian's client's plan by changing an id in the URL.
+async function canAccessClient(req, clientUserId) {
+  if (isUnscopedRole(req.user && req.user.userType)) return true;
+  const assignedIds = await getAssignedClientIds(req.user && req.user.id);
+  return assignedIds.has(Number(clientUserId));
+}
+
 const { User, PreConsultationProfile, DietPlan, DietPlanDay, DietPlanMeal } = db;
 
 // ── Calorie target estimate ───────────────────────────────────────────
@@ -27,7 +44,7 @@ const { computeTargetCalories, heightFeetToCm } = require('../../services/ai/uti
 
 /**
  * POST /admin/diet-plan/generate
- * Body: { userId, userPlanId, planDays = 7, mealsPerDay }
+ * Body: { userId, userPlanId, planDays = 14, mealsPerDay }
  * Auth: validateAdmin (req.user.userType !== 'User')
  *
  * Composes user input from User + PreConsultationProfile, calls the
@@ -51,7 +68,7 @@ async function generateDietPlanDraft(req, res) {
     const {
       userId,
       userPlanId,
-      planDays = 7,
+      planDays = 14,
       mealsPerDay,
     } = req.body || {};
 
@@ -59,6 +76,10 @@ async function generateDietPlanDraft(req, res) {
       return res.json(
         ApiResponse('0', 'userId and userPlanId are required', {})
       );
+    }
+
+    if (!(await canAccessClient(req, userId))) {
+      return res.json(ApiResponse('0', 'This client is not assigned to you', {}));
     }
 
     const user = await User.findByPk(userId);
@@ -157,6 +178,19 @@ async function activateDietPlanHandler(req, res) {
     if (!Number.isInteger(id)) {
       return res.json(ApiResponse('0', 'Invalid plan id', {}));
     }
+    // Only the dietitian who wrote the draft (or an Admin) may send it
+    // to the client — same rule cancel/edit already enforce via
+    // assertCanMutate in dietPlanService.
+    const target = await DietPlan.findByPk(id, {
+      attributes: ['id', 'userId', 'dietitianId'],
+    });
+    if (!target) {
+      return res.json(ApiResponse('0', 'Diet plan not found', {}));
+    }
+    const isAdmin = isUnscopedRole(req.user && req.user.userType);
+    if (!isAdmin && target.dietitianId !== req.user.id) {
+      return res.json(ApiResponse('0', 'Not authorized to activate this plan', {}));
+    }
     const dietPlan = await activateDietPlan(id, req.user.id);
     return res.json(ApiResponse('1', 'Plan activated', { dietPlan }));
   } catch (err) {
@@ -184,7 +218,9 @@ async function getDietPlanByIdAdmin(req, res) {
         [DietPlanDay, DietPlanMeal, 'time', 'ASC'],
       ],
     });
-    if (!dietPlan) {
+    // Same "not found" reply for someone else's client, so this doesn't
+    // confirm to a prober that the plan exists.
+    if (!dietPlan || !(await canAccessClient(req, dietPlan.userId))) {
       return res.json(ApiResponse('0', 'Plan not found', {}));
     }
     return res.json(ApiResponse('1', 'Plan', { dietPlan }));
@@ -213,6 +249,9 @@ async function listPlansForUserHandler(req, res) {
           {}
         )
       );
+    }
+    if (!(await canAccessClient(req, userId))) {
+      return res.json(ApiResponse('0', 'This client is not assigned to you', {}));
     }
     const plans = await listPlansForUser(userId, { status });
     return res.json(ApiResponse('1', 'Plans for user', { plans }));
@@ -292,6 +331,120 @@ async function cancelPlanHandler(req, res) {
   }
 }
 
+/**
+ * GET /admin/diet-plan/user/:userId/meal-activity?days=7
+ * Auth: validateAdmin + scoped to the dietitian's own clients.
+ *
+ * How actively she logged her meals over the last N days (default 7,
+ * max 31), one entry per day, oldest first:
+ *   { date, planned, followed, alternative, skipped, logged }
+ * `planned` = mealsPerDay of the plan she was on that day (0 if no plan
+ * covered that day). Dates are Pakistan-time calendar days, same as the
+ * client app's meal log.
+ */
+async function getClientMealActivity(req, res) {
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!Number.isInteger(userId)) {
+      return res.json(ApiResponse('0', 'Invalid userId', {}));
+    }
+    if (!(await canAccessClient(req, userId))) {
+      return res.json(ApiResponse('0', 'This client is not assigned to you', {}));
+    }
+    const moment = require('moment-timezone');
+    const { Op } = db.Sequelize;
+    const TZ = 'Asia/Karachi';
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 31);
+    const today = moment.tz(TZ).startOf('day');
+    const start = today.clone().subtract(days - 1, 'days');
+    const fromStr = start.format('YYYY-MM-DD');
+    const toStr = today.format('YYYY-MM-DD');
+
+    const [logs, plans] = await Promise.all([
+      db.MealLog.findAll({
+        where: { userId, date: { [Op.between]: [fromStr, toStr] } },
+        attributes: ['date', 'status'],
+        raw: true,
+      }),
+      DietPlan.findAll({
+        where: {
+          userId,
+          activatedAt: { [Op.ne]: null },
+          status: { [Op.ne]: 'cancelled' },
+        },
+        attributes: ['activatedAt', 'planDays', 'mealsPerDay'],
+        raw: true,
+      }),
+    ]);
+
+    const out = [];
+    for (let i = 0; i < days; i++) {
+      const d = start.clone().add(i, 'days');
+      const key = d.format('YYYY-MM-DD');
+      let planned = 0;
+      for (const p of plans) {
+        const first = moment.tz(p.activatedAt, TZ).startOf('day');
+        const last = first.clone().add((p.planDays || 0) - 1, 'days');
+        if (!d.isBefore(first) && !d.isAfter(last)) {
+          planned = Math.max(planned, p.mealsPerDay || 0);
+        }
+      }
+      const dayLogs = logs.filter((l) => String(l.date).slice(0, 10) === key);
+      const followed = dayLogs.filter((l) => l.status === 'followed').length;
+      const alternative = dayLogs.filter((l) => l.status === 'alternative').length;
+      const skipped = dayLogs.filter((l) => l.status === 'skipped').length;
+      out.push({
+        date: key,
+        planned,
+        followed,
+        alternative,
+        skipped,
+        logged: followed + alternative + skipped,
+      });
+    }
+
+    return res.json(
+      ApiResponse('1', 'Meal activity', { from: fromStr, to: toStr, days: out })
+    );
+  } catch (err) {
+    console.error('[getClientMealActivity] error:', err);
+    return res.status(500).json(ApiResponse('0', err.message, {}));
+  }
+}
+
+/**
+ * POST /admin/diet-plan/user-plan/:userPlanId/reset-booking-pass
+ * Auth: validateAdmin + scoped to the dietitian's own clients.
+ *
+ * Gives a client her free late change back and unlocks self-booking
+ * (consultation change policy, helper/bookingPolicy.js) — e.g. after
+ * staff have talked to her about a missed session.
+ */
+async function resetBookingPassHandler(req, res) {
+  try {
+    const id = parseInt(req.params.userPlanId, 10);
+    if (!Number.isInteger(id)) {
+      return res.json(ApiResponse('0', 'Invalid userPlanId', {}));
+    }
+    const plan = await db.UserPlan.findByPk(id);
+    if (!plan) return res.json(ApiResponse('0', 'Package not found', {}));
+    if (!(await canAccessClient(req, plan.userId))) {
+      return res.json(ApiResponse('0', 'This client is not assigned to you', {}));
+    }
+    plan.lateChangeUsedAt = null;
+    plan.bookingLockedAt = null;
+    await plan.save();
+    return res.json(
+      ApiResponse('1', 'Booking pass reset. She can book and make one late change again.', {
+        userPlanId: plan.id,
+      })
+    );
+  } catch (err) {
+    console.error('[resetBookingPassHandler] error:', err);
+    return res.status(500).json(ApiResponse('0', err.message, {}));
+  }
+}
+
 module.exports = {
   generateDietPlanDraft,
   activateDietPlanHandler,
@@ -300,4 +453,6 @@ module.exports = {
   listMyDraftsHandler,
   updateMealHandler,
   cancelPlanHandler,
+  getClientMealActivity,
+  resetBookingPassHandler,
 };

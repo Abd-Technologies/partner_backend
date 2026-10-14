@@ -49,6 +49,32 @@ function pickEditable(body) {
   return out;
 }
 
+// MariaDB (XAMPP) returns DataTypes.JSON columns as raw JSON *strings*
+// instead of objects (see the note in models/PendingPopupState.js). The
+// app then tried to read e.g. dietaryPreferences as a list, crashed while
+// parsing, and the dietitian's "Health form & notes" screen never opened.
+// Parse them here so the wire format is always real JSON.
+const PROFILE_JSON_FIELDS = [
+  "dietaryPreferences",
+  "lifestyle",
+  "workoutSection",
+  "dietitianComments",
+  "stepsCompleted",
+];
+function parseProfileJson(json) {
+  for (const key of PROFILE_JSON_FIELDS) {
+    const v = json[key];
+    if (typeof v === "string" && v.trim()) {
+      try {
+        json[key] = JSON.parse(v);
+      } catch (_) {
+        // leave as-is if it isn't valid JSON
+      }
+    }
+  }
+  return json;
+}
+
 // Resolves the requester's display name for comment attribution. Falls back
 // to "Staff" if the join fails so the API never breaks just because the
 // User row is missing a name.
@@ -86,7 +112,7 @@ exports.getProfile = async (req, res) => {
       return res.json(ApiResponse("0", "Profile not found", {}));
     }
     return res.json(
-      ApiResponse("1", "Profile fetched", { profile: profile.toJSON() })
+      ApiResponse("1", "Profile fetched", { profile: parseProfileJson(profile.toJSON()) })
     );
   } catch (err) {
     console.error("[preConsultation/admin] getProfile:", err);
@@ -122,7 +148,7 @@ exports.updateProfile = async (req, res) => {
     updates.lastDietitianEdit = new Date();
     await profile.update(updates);
     return res.json(
-      ApiResponse("1", "Profile updated", { profile: profile.toJSON() })
+      ApiResponse("1", "Profile updated", { profile: parseProfileJson(profile.toJSON()) })
     );
   } catch (err) {
     console.error("[preConsultation/admin] updateProfile:", err);

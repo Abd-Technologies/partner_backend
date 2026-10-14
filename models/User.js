@@ -90,6 +90,26 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(),
       allowNull: true,
     },
+    // Trainer's permanent Zoom meeting number (digits only), set once by
+    // admin. Every class she teaches uses it — see models/Slot.js.
+    zoomRoom: {
+      type: DataTypes.STRING(32),
+      allowNull: true,
+    },
+    // Last app version she opened (reported by the app on every start).
+    // NULL = an old app that doesn't report → she still needs to update.
+    appVersion: {
+      type: DataTypes.STRING(20),
+      allowNull: true,
+    },
+    appPlatform: {
+      type: DataTypes.STRING(10),
+      allowNull: true,
+    },
+    appVersionAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     age: {
       type: DataTypes.STRING(),
       allowNull: true,

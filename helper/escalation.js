@@ -27,8 +27,8 @@ const COPY = {
     body: "A user is waiting on a delayed diet plan. Tap to review.",
   },
   CONSULT_NO_SHOW: {
-    title: "Consultation no-show reported",
-    body: "A user reported you didn't join the consultation. Tap to respond.",
+    title: "Missed consultation",
+    body: "A client's consultation was missed on the dietitian side. It's been canceled and she got free days. Tap to see the details.",
   },
   CONSULT_UNCONFIRMED: {
     title: "Booking expired unconfirmed",

@@ -34,10 +34,36 @@ function pickEditable(body) {
   return out;
 }
 
+// MariaDB (XAMPP) returns DataTypes.JSON columns as raw JSON *strings*
+// instead of objects (see the note in models/PendingPopupState.js). The
+// app then tried to read e.g. dietaryPreferences as a list, crashed while
+// parsing, and the dietitian's "Health form & notes" screen never opened.
+// Parse them here so the wire format is always real JSON.
+const PROFILE_JSON_FIELDS = [
+  "dietaryPreferences",
+  "lifestyle",
+  "workoutSection",
+  "dietitianComments",
+  "stepsCompleted",
+];
+function parseProfileJson(json) {
+  for (const key of PROFILE_JSON_FIELDS) {
+    const v = json[key];
+    if (typeof v === "string" && v.trim()) {
+      try {
+        json[key] = JSON.parse(v);
+      } catch (_) {
+        // leave as-is if it isn't valid JSON
+      }
+    }
+  }
+  return json;
+}
+
 function toWire(row) {
   // Strip dietitianComments from user-facing payload — those are private
   // notes only readable by staff.
-  const json = row.toJSON ? row.toJSON() : { ...row };
+  const json = parseProfileJson(row.toJSON ? row.toJSON() : { ...row });
   delete json.dietitianComments;
   return json;
 }
@@ -191,8 +217,13 @@ exports.getRequirements = async (req, res) => {
   try {
     const userId = req.user && req.user.id;
     if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
+    // Her package decides the questions (one truth). The app's planType
+    // is only a fallback for women with no paid package (e.g. trial).
+    const { planTypeForUser } = require("../../helper/preConsultRequirements");
     const t = String(req.query.planType || "diet");
-    const planType = ["diet", "workout", "combined"].includes(t) ? t : "diet";
+    const planType =
+      (await planTypeForUser(userId)) ||
+      (["diet", "workout", "combined"].includes(t) ? t : "diet");
     const data = await requirementsFor(userId, planType);
     return res.json(ApiResponse("1", "Requirements", data));
   } catch (err) {

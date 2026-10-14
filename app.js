@@ -122,12 +122,12 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
-// Missed-session recovery. Runs hourly and sends at most one nudge per
-// user/local day after their final scheduled class has been over for 30
-// minutes and no attendance was recorded. Preference-gated by
+// Missed-session recovery. Every 10 min: one nudge per class day, 30 min
+// after HER last class ends (same evening), or 9 AM–noon next morning if
+// that fell in quiet hours. See helper/missedSessionRecovery.js. Preference-gated by
 // NotificationPreference.missedRecovery in helper/notification.js.
 cron.schedule(
-  "17 * * * *",
+  "*/10 * * * *",
   async () => {
     try {
       const sent = await sendMissedSessionRecovery();
@@ -148,7 +148,8 @@ cron.schedule(
   "*/5 * * * *",
   async () => {
     try {
-      await sendTrialClassReminders();
+      const n = await sendTrialClassReminders();
+      if (n) console.log(`[trial-class-reminder] sent ${n}`);
     } catch (error) {
       console.error("Error in trial-class-reminders job:", error);
     }
@@ -216,6 +217,96 @@ cron.schedule(
       }
     } catch (error) {
       console.error("Error in auto-end-sessions job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Trainer safety nets: "starts in 10 min, tap Start" + "your class is
+// waiting" at +3 (every minute), and a 07:00 PKT check for classes whose
+// trainer has no Zoom room. See helper/trainerClassReminders.js.
+const { sendTrainerStartReminders, morningRoomCheck } = require("./helper/trainerClassReminders");
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const n = await sendTrainerStartReminders();
+      if (n) console.log(`[trainer-reminder] sent ${n}`);
+    } catch (error) {
+      console.error("[trainer-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+cron.schedule(
+  "0 7 * * *",
+  async () => {
+    try {
+      await morningRoomCheck();
+    } catch (error) {
+      console.error("[room-check]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Auto-cancel a class the trainer hasn't started 10 min after its time,
+// with an apology push + in-app popup pointing to the next class.
+const { autoCancelLateClasses, retireOldClassCancelledPopups, LATE_START_MINUTES } = require("./helper/autoCancelLateClasses");
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const ids = await autoCancelLateClasses();
+      if (ids.length) console.log(`[auto-cancel-class] cancelled ${ids.length} class(es) not started ${LATE_START_MINUTES}m after start: ${ids.join(", ")}`);
+      await retireOldClassCancelledPopups();
+    } catch (error) {
+      console.error("Error in auto-cancel-class job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// "Finish your health form" push (day 1 / 3 / 7 while it's still open),
+// for paid clients who don't open the app. helper/preConsultFormReminders.js
+const { sendPreConsultFormReminders } = require("./helper/preConsultFormReminders");
+cron.schedule(
+  "13 11 * * *",
+  async () => {
+    try {
+      const n = await sendPreConsultFormReminders();
+      if (n) console.log(`[preconsult-reminder] sent ${n}`);
+    } catch (error) {
+      console.error("[preconsult-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Time zone from phone country code for users whose (old) app never sent
+// one. Daily 03:20 PKT + once on start. helper/timezoneFromPhone.js
+const { backfillTimezonesFromPhone } = require("./helper/timezoneFromPhone");
+const runTzBackfill = async () => {
+  try {
+    const n = await backfillTimezonesFromPhone();
+    if (n) console.log(`[tz-backfill] set time zone for ${n} user(s) from phone code`);
+  } catch (error) {
+    console.error("[tz-backfill]", error.message);
+  }
+};
+cron.schedule("20 3 * * *", runTzBackfill, { timezone: CRON_TZ });
+setTimeout(runTzBackfill, 30 * 1000);
+
+// "Consultation in 15 minutes" push to client + dietitian (once per session).
+const { sendConsultationReminders } = require("./helper/consultationReminders");
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const n = await sendConsultationReminders();
+      if (n > 0) console.log(`[consult-reminder] sent ${n} reminder(s)`);
+    } catch (error) {
+      console.error("Error in consultation-reminder job:", error);
     }
   },
   { timezone: CRON_TZ }
@@ -314,14 +405,11 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
-// Consultation-flow: per-minute consultant-no-show check. Looks for
-// confirmed appointments whose scheduled time + 10 min grace has passed
-// without the dietitian flipping status to "In Progress". Marks the user
-// eligible for POPUP_CONSULTANT_NO_SHOW so the dashboard surfaces the
-// "report no-show" prompt next time the user opens the app. The actual
-// CONSULT_NO_SHOW escalation only fires when the user taps "report" via
-// POST /appointment/:id/no-show — we don't auto-escalate here because a
-// dietitian could still join after grace.
+// Consultation-flow: per-minute consultant-no-show check.
+// (Oct 2026) No client prompt any more: confirmed sessions nobody
+// started are resolved by the server (Meet attendance sweep, or the
+// 24h fallback inside evaluateConsultantNoShows), which cancels the
+// session, adds the free days and notifies her.
 cron.schedule(
   "* * * * *",
   async () => {
@@ -566,7 +654,18 @@ app.use(error);
 app.use("/public", express.static("./public"));
 
 // Initializing Server along with creating all the tables that exist in the models folder
-db.sequelize.sync().then(() => {
+db.sequelize.sync().then(async () => {
+  // Safety net (Oct 2026): the class-room / app-version columns MUST exist
+  // before any class is served — otherwise every schedule query fails and
+  // nobody can join. This migration is idempotent (adds only what's
+  // missing), so it's safe on every start.
+  try {
+    const m = require("./migrations/20261010120000-add-class-rooms");
+    await m.up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Class-room columns checked");
+  } catch (e) {
+    console.error("❌ Class-room columns check FAILED — run: node scripts/checkDbColumns.js --apply", e.message);
+  }
   const serverPort = process.env.PORT || 3001;
   server.listen(serverPort,"0.0.0.0", () => {
     console.log(`🚀 Server + Socket running on http://localhost:${serverPort}`);

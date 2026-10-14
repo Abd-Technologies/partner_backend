@@ -5,3 +5,6 @@ node_modules/
 # services/meetAttendance/googleAuth.js for what they're for.
 config/google-meet/credentials.json
 config/google-meet/token.json
+
+# Firebase service-account key (secret, never commit)
+fither-e7a36-*.json

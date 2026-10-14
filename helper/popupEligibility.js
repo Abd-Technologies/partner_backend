@@ -11,9 +11,11 @@ const {
   PendingPopupState,
   PreConsultationProfile,
   ProgressSubmission,
+  User,
   UserPlan,
   Plan,
 } = require("../models");
+const sendNotification = require("./notification");
 const { createEscalation } = require("./escalation");
 const { resolveDietitianNoShow, resolveUnconfirmedExpiry } = require("./noShowResolution");
 
@@ -50,14 +52,18 @@ function isWorkoutOrCombinedPlan(p) {
 // Priority order — highest first. Section G.1 of the build plan.
 const PRIORITY = [
   "POPUP_MEDICAL_CONCERN",
+  // Set by helper/autoCancelLateClasses.js when a class never started.
+  "POPUP_CLASS_CANCELLED",
   "POPUP_CONSULTANT_NO_SHOW",
   "POPUP_PLAN_DELAYED",
   "POPUP_DAY30_PROGRESS",
   "POPUP_DAY15_PROGRESS",
   "POPUP_DAY7_REVIEW",
+  // Health form FIRST: the dietitian needs her answers before the
+  // consultation is booked (Oct 2026).
+  "POPUP_PRE_CONSULTATION_FORM",
   "POPUP_BOOK_FOLLOWUP_CONSULTATION",
   "POPUP_BOOK_INITIAL_CONSULTATION",
-  "POPUP_PRE_CONSULTATION_FORM",
   "POPUP_BOOK_INITIAL_REMINDER",
   "POPUP_EARLY_CHECKIN",
   "POPUP_INACTIVITY_REMINDER",
@@ -70,6 +76,8 @@ const DAILY_LOG_REMINDER_THRESHOLD_DAYS = 2;
 const INACTIVITY_THRESHOLD_DAYS = 3;
 const INACTIVITY_REFIRE_DAYS = 3;
 const RENEW_PLAN_REFIRE_DAYS = 7;
+// Renew + Day 30 check-in open in the package's last N days.
+const RENEW_WINDOW_DAYS = 5;
 // Plan must reach the client within 48 hours of the consultation ending.
 // Measured in real hours (not calendar days) so a 11pm consultation still
 // gets its full 48h.
@@ -94,11 +102,85 @@ function nowPkt() {
   return moment.tz(TZ);
 }
 
+// Whole days until a date (0 = today), or null.
+function daysLeft(date) {
+  if (!date) return null;
+  const end = moment.tz(date, TZ).startOf("day");
+  return end.diff(nowPkt().startOf("day"), "days");
+}
+
 function daysSince(date) {
   if (!date) return null;
   const m = moment.tz(date, TZ).startOf("day");
   const today = nowPkt().startOf("day");
   return today.diff(m, "days");
+}
+
+// Phone (push) notifications for the popups that matter most when she
+// ISN'T in the app. Until now these only existed as in-app popups, so a
+// client who didn't open the app never heard about her check-in, progress
+// update, follow-up or renewal. Each eligible row pushes at most once
+// (marked with metadata.pushedAt), and only in the daytime — a row that
+// becomes eligible at night is pushed on the first daytime run instead
+// (the hourly cron or her next dashboard load).
+//
+// Deliberately NOT here yet: POPUP_PLAN_DELAYED, POPUP_BOOK_INITIAL_*,
+// POPUP_DAILY_LOG_REMINDER, POPUP_INACTIVITY_REMINDER — those would fire
+// for every pre-release client on release day until the launch-date
+// cutoff is in place. Every popup below needs an AI plan delivered first,
+// so none of them can fire for old clients.
+const PUSH_ON_ELIGIBLE = {
+  // PAUSED (Oct 2026): no phone push for the day 3-4 early check-in, to
+  // keep the first week light. The in-app popup still shows. Uncomment
+  // to turn the push back on.
+  // POPUP_EARLY_CHECKIN: {
+  //   title: "Quick check-in",
+  //   body: "How are the first few days of your plan going? Tap to tell your dietitian.",
+  // },
+  POPUP_DAY7_REVIEW: {
+    title: "One week in!",
+    body: "Take a minute to tell your dietitian how your first week went.",
+  },
+  POPUP_DAY15_PROGRESS: {
+    title: "Day 15 progress check",
+    body: "Share your progress to unlock your follow-up call and your next plan.",
+  },
+  POPUP_BOOK_FOLLOWUP_CONSULTATION: {
+    title: "Time for your follow-up",
+    body: "Book your follow-up call so your dietitian can update your plan.",
+  },
+  POPUP_DAY30_PROGRESS: {
+    title: "You made it to Day 30!",
+    body: "Share your progress and see how far you've come.",
+  },
+  POPUP_RENEW_PLAN: {
+    title: "Keep your momentum going",
+    body: "Your plan is coming to an end. Renew to keep your progress on track.",
+  },
+};
+const PUSH_HOUR_FROM = 10; // PKT, inclusive
+const PUSH_HOUR_TO = 21; // PKT, exclusive
+
+async function maybePushPopup(row, variable) {
+  const copy = PUSH_ON_ELIGIBLE[variable];
+  if (!copy || !row || row.completedAt) return;
+  const meta = row.metadata || {};
+  if (meta.pushedAt) return;
+  const hour = nowPkt().hour();
+  if (hour < PUSH_HOUR_FROM || hour >= PUSH_HOUR_TO) return; // retry on a later run
+  try {
+    // Mark first, so a slow or failed send can never cause a repeat push.
+    await row.update({ metadata: { ...meta, pushedAt: new Date().toISOString() } });
+    const user = await User.findByPk(row.userId, { attributes: ["deviceToken"] });
+    if (user && user.deviceToken) {
+      await sendNotification([user.deviceToken], copy, {
+        type: "popupReminder",
+        popupVariable: variable,
+      });
+    }
+  } catch (e) {
+    console.error("[popupEligibility] push for", variable, "failed:", e.message);
+  }
 }
 
 // Upsert a PendingPopupState row to mark a popup eligible. Idempotent —
@@ -131,20 +213,46 @@ async function setEligible(userId, variable, eligibleAt, metadata) {
       !recent.eligibleAt ||
       moment(recent.eligibleAt).valueOf() !== moment(eligibleAt).valueOf()
     ) {
-      await recent.update({ eligibleAt, metadata });
+      // Carry the push marker forward so this same row never pushes twice.
+      const pushedAt = recent.metadata && recent.metadata.pushedAt;
+      await recent.update({
+        eligibleAt,
+        metadata: pushedAt ? { ...(metadata || {}), pushedAt } : metadata,
+      });
     }
+    await maybePushPopup(recent, variable);
     return recent;
   }
 
-  return PendingPopupState.create({
+  const created = await PendingPopupState.create({
     userId,
     popupVariable: variable,
     eligibleAt,
     metadata,
   });
+  await maybePushPopup(created, variable);
+  return created;
 }
 
 // ── Per-popup evaluators ───────────────────────────────────────────────
+
+// Change policy: once self-booking is locked (second missed session on
+// the package), stop inviting her to book. Staff rebook her instead.
+// Retires any open booking popups and returns true when locked.
+async function retireIfBookingLocked(userId, plan, variables) {
+  if (!plan || !plan.bookingLockedAt) return false;
+  await PendingPopupState.update(
+    { completedAt: new Date() },
+    {
+      where: {
+        userId,
+        popupVariable: { [Op.in]: variables },
+        completedAt: null,
+      },
+    }
+  );
+  return true;
+}
 
 async function evalBookInitialConsultation(user, plans) {
   // Diet/Combined plans only. Trigger: plan purchased AND no initial
@@ -152,15 +260,36 @@ async function evalBookInitialConsultation(user, plans) {
   // wired — backward compat). Stops once initial booking exists.
   const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
+  if (await retireIfBookingLocked(user.id, dietOrCombined, ["POPUP_BOOK_INITIAL_CONSULTATION"])) return;
 
+  // Per package: a renewed package needs its own initial consultation.
+  // Old rows saved before planId existed (planId null) still count, so
+  // pre-release clients are never asked to book again.
   const initial = await Appointment.findOne({
     where: {
       userId: user.id,
-      [Op.or]: [{ kind: "initial" }, { kind: null }],
+      [Op.and]: [
+        { [Op.or]: [{ kind: "initial" }, { kind: null }] },
+        { [Op.or]: [{ planId: dietOrCombined.id }, { planId: null }] },
+      ],
       status: { [Op.in]: ["pending", "confirmed", "In Progress", "completed"] },
     },
   });
-  if (initial) return;
+  if (initial) {
+    // Booked (from any screen) — retire the popup here on the server, so
+    // it never depends on the app remembering to report it.
+    await PendingPopupState.update(
+      { completedAt: new Date() },
+      {
+        where: {
+          userId: user.id,
+          popupVariable: "POPUP_BOOK_INITIAL_CONSULTATION",
+          completedAt: null,
+        },
+      }
+    );
+    return;
+  }
 
   await setEligible(
     user.id,
@@ -177,10 +306,11 @@ async function evalBookInitialConsultation(user, plans) {
 // Which steps are missing comes from helper/preConsultRequirements.js,
 // the same source the app reads.
 async function evalPreConsultationForm(user, plans) {
-  const diet = plans.some(isDietOrCombinedPlan);
-  const workout = plans.some(isWorkoutOrCombinedPlan);
-  if (!diet && !workout) return;
-  const planType = diet && workout ? "combined" : diet ? "diet" : "workout";
+  // Her package decides the questions — same function the booking gate
+  // and GET /requirements use (one truth).
+  const { planTypeForUser } = require("./preConsultRequirements");
+  const planType = await planTypeForUser(user.id);
+  if (!planType) return;
 
   const req = await requirementsFor(user.id, planType);
   if (!req.shouldShow) {
@@ -218,10 +348,12 @@ async function evalBookInitialReminder(user, plans) {
   // signal at 5, decoupled from whether the popup keeps showing.
   const dietOrCombined = plans.find(isDietOrCombinedPlan);
   if (!dietOrCombined) return;
+  if (await retireIfBookingLocked(user.id, dietOrCombined, ["POPUP_BOOK_INITIAL_REMINDER"])) return;
 
   const initial = await Appointment.findOne({
     where: {
       userId: user.id,
+      [Op.or]: [{ planId: dietOrCombined.id }, { planId: null }],
       status: { [Op.in]: ["pending", "confirmed", "In Progress", "completed"] },
     },
   });
@@ -360,7 +492,12 @@ async function evalDay7Review(user, plans) {
   // with this user" (DietPlan.status flipped to 'active', i.e.
   // activatedAt is set) for the UserPlan this review would be about.
   const hasSharedAiPlan = await DietPlan.findOne({
-    where: { userPlanId: plan.id, activatedAt: { [Op.ne]: null } },
+    // A plan that was shared and then cancelled doesn't count.
+    where: {
+      userPlanId: plan.id,
+      activatedAt: { [Op.ne]: null },
+      status: { [Op.ne]: "cancelled" },
+    },
   });
   if (!hasSharedAiPlan) return;
 
@@ -428,20 +565,40 @@ async function evalBookFollowup(user, plans) {
   // so that stays true even if the evaluator order above ever changes.
   const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
+  if (await retireIfBookingLocked(user.id, plan, ["POPUP_BOOK_FOLLOWUP_CONSULTATION"])) return;
 
   const day15 = await ProgressSubmission.findOne({
     where: { userPlanId: plan.id, cycle: 15 },
   });
   if (!day15) return;
 
+  // Per package: a follow-up from an earlier package doesn't count.
   const followup = await Appointment.findOne({
     where: {
       userId: user.id,
       kind: "followup",
+      [Op.or]: [{ planId: plan.id }, { planId: null }],
       status: { [Op.in]: ["pending", "confirmed", "In Progress", "completed"] },
     },
   });
-  if (followup) return;
+  if (followup) {
+    // Booked — retire the popup here on the server. Before this, the only
+    // retirement was the app reporting it from BookConsultationSheet, but
+    // the "plan ending soon" / "plan ended" banners book with a different
+    // popup name the server rejects, so a client who booked from there
+    // kept seeing "Book your follow-up" forever, in a loop.
+    await PendingPopupState.update(
+      { completedAt: new Date() },
+      {
+        where: {
+          userId: user.id,
+          popupVariable: "POPUP_BOOK_FOLLOWUP_CONSULTATION",
+          completedAt: null,
+        },
+      }
+    );
+    return;
+  }
 
   await setEligible(
     user.id,
@@ -456,7 +613,12 @@ async function evalDay30Progress(user, plans) {
   const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
   const since = daysSince(plan.firstPlanDeliveredAt);
-  if (since == null || since < DAY30_OFFSET) return;
+  // Day 30 counts from plan delivery (~2 days after purchase), so on a
+  // 30-day package it would land after expiry and never show. Also open
+  // it in the package's last RENEW_WINDOW_DAYS days.
+  const left = daysLeft(plan.expireDate);
+  const nearEnd = left != null && left <= RENEW_WINDOW_DAYS;
+  if ((since == null || since < DAY30_OFFSET) && !nearEnd) return;
 
   const existing = await ProgressSubmission.findOne({
     where: { userPlanId: plan.id, cycle: 30 },
@@ -477,10 +639,34 @@ async function evalRenewPlan(user, plans) {
   const plan = plans.find((p) => p.firstPlanDeliveredAt && !p.isTrial);
   if (!plan) return;
 
-  const day30 = await ProgressSubmission.findOne({
-    where: { userPlanId: plan.id, cycle: 30 },
-  });
-  if (!day30) return;
+  // Renew = the package is ending (last RENEW_WINDOW_DAYS days), whatever
+  // its length. It used to wait for the Day 30 check-in, which on a
+  // 30-day package came after expiry (never shown), and on longer
+  // packages said "your plan is ending" at day 30.
+  const left = daysLeft(plan.expireDate);
+  if (left == null || left > RENEW_WINDOW_DAYS) return;
+
+  // Already renewed: another paid package runs past this one.
+  const renewed = plans.some(
+    (p) =>
+      p.id !== plan.id &&
+      !p.isTrial &&
+      p.expireDate &&
+      new Date(p.expireDate).getTime() > new Date(plan.expireDate).getTime()
+  );
+  if (renewed) {
+    await PendingPopupState.update(
+      { completedAt: new Date() },
+      {
+        where: {
+          userId: user.id,
+          popupVariable: "POPUP_RENEW_PLAN",
+          completedAt: null,
+        },
+      }
+    );
+    return;
+  }
 
   // Throttle: don't re-fire if shown in the last 7 days. Renewals are
   // a calm decision; weekly nag matches the client cooldown. We push
@@ -616,17 +802,20 @@ async function evalPlanDelayed(user, plans) {
     where: {
       userId: user.id,
       activatedAt: { [Op.gte]: completedAt },
+      // Cancelled after sending = she has no plan, still owed.
+      status: { [Op.ne]: "cancelled" },
     },
   });
-  const pdf = aiPlan
-    ? null
-    : await PdfDietsForUserNew.findOne({
-        where: {
-          userPlanId: dietOrCombined.id,
-          createdAt: { [Op.gte]: completedAt },
-        },
-      });
-  if (aiPlan || pdf) {
+  // Legacy PDF diet plan — disabled; only the AI plan counts now.
+  // const pdf = aiPlan
+  //   ? null
+  //   : await PdfDietsForUserNew.findOne({
+  //       where: {
+  //         userPlanId: dietOrCombined.id,
+  //         createdAt: { [Op.gte]: completedAt },
+  //       },
+  //     });
+  if (aiPlan) {
     // Plan arrived, so any "your plan is delayed" popup still waiting
     // for this user is now wrong. Retire it so she never sees it.
     await PendingPopupState.update(
@@ -747,7 +936,14 @@ async function listForUser(userId, limit = 5) {
     }
   }
 
-  const list = Array.from(byVar.values());
+  let list = Array.from(byVar.values());
+  // While the health form is still open, don't ask her to book the first
+  // consultation yet — form first, then booking.
+  if (byVar.has("POPUP_PRE_CONSULTATION_FORM")) {
+    list = list.filter(
+      (r) => r.popupVariable !== "POPUP_BOOK_INITIAL_CONSULTATION" && r.popupVariable !== "POPUP_BOOK_INITIAL_REMINDER"
+    );
+  }
   list.sort((a, b) => {
     const ai = PRIORITY.indexOf(a.popupVariable);
     const bi = PRIORITY.indexOf(b.popupVariable);
@@ -804,25 +1000,24 @@ async function evaluateConsultantNoShows() {
   const cutoff = nowPkt().subtract(NO_SHOW_GRACE_MINUTES, "minutes").toDate();
   const staleFloor = nowPkt().subtract(NO_SHOW_STALE_HOURS, "hours").toDate();
 
-  // Newly eligible: past the grace period, but not stale yet.
-  const rows = await Appointment.findAll({
-    where: {
-      status: "confirmed",
-      date: { [Op.lte]: cutoff, [Op.gte]: staleFloor },
-      noShowReportedAt: null,
-    },
-  });
-  for (const a of rows) {
-    try {
-      await setEligible(
-        a.userId,
-        "POPUP_CONSULTANT_NO_SHOW",
-        nowPkt().toDate(),
-        { appointmentId: a.id, scheduledDate: a.date }
-      );
-    } catch (e) {
-      console.error("[popupEligibility] no-show set eligible:", e);
-    }
+  // Oct 2026: the client is no longer asked "did your dietitian join?".
+  // The server decides (Meet attendance sweep first, this 24h fallback
+  // second) and simply tells her the session was canceled, the free
+  // days added, and how to rebook. So we no longer make the
+  // POPUP_CONSULTANT_NO_SHOW prompt eligible, and retire any old rows.
+  void cutoff;
+  try {
+    await PendingPopupState.update(
+      { completedAt: new Date() },
+      {
+        where: {
+          popupVariable: "POPUP_CONSULTANT_NO_SHOW",
+          completedAt: null,
+        },
+      }
+    );
+  } catch (e) {
+    console.error("[popupEligibility] retire no-show prompts:", e);
   }
 
   // Now-stale: still confirmed + unreported, but past the staleness
@@ -930,6 +1125,7 @@ async function evaluateUnconfirmedBookings() {
 }
 
 module.exports = {
+  setEligible,
   evaluateForUser,
   evaluateAllActiveUsers,
   evaluateConsultantNoShows,

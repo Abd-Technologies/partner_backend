@@ -28,15 +28,17 @@ async function buildPlanPreparing(userId) {
 
   // Already delivered after this consultation (AI plan or legacy PDF)?
   const delivered = await DietPlan.findOne({
-    where: { userId, activatedAt: { [Op.gte]: doneAt } },
+    // A cancelled plan doesn't count — she's still waiting for one.
+    where: { userId, activatedAt: { [Op.gte]: doneAt }, status: { [Op.ne]: 'cancelled' } },
     attributes: ['id'],
   });
   if (delivered) return null;
-  const pdf = await PdfDietsForUserNew.findOne({
-    where: { userId, createdAt: { [Op.gte]: doneAt } },
-    attributes: ['id'],
-  });
-  if (pdf) return null;
+  // Legacy PDF diet plan — disabled; only the AI plan counts now.
+  // const pdf = await PdfDietsForUserNew.findOne({
+  //   where: { userId, createdAt: { [Op.gte]: doneAt } },
+  //   attributes: ['id'],
+  // });
+  // if (pdf) return null;
 
   const dueAt = new Date(doneAt.getTime() + PLAN_DUE_HOURS * 3600000);
   let dietitianName = null;
@@ -204,11 +206,76 @@ async function getMyBookingContext(req, res) {
       (appt ? appt.dietitionId : null) ||
       null;
 
+    // Change policy: after a second missed session self-booking is
+    // locked until staff help her (helper/bookingPolicy.js).
+    const ctxPlan = userPlanId
+      ? await UserPlan.findByPk(userPlanId, {
+          attributes: ['id', 'bookingLockedAt', 'isTrial', 'expireDate'],
+        })
+      : null;
+    const bookingLocked = !!(ctxPlan && ctxPlan.bookingLockedAt);
+
+    // What she should do next once a plan has ended (or is ending), so
+    // the app never offers a button the server would refuse:
+    //   explore_plans   no package at all, or a free trial (no dietitian)
+    //   renew           package expired, or her follow-up is already used
+    //   locked          self-booking locked (second missed session)
+    //   book_initial    paid package, initial consultation not done yet
+    //   day15_checkin   follow-up needs her Day-15 check-in first
+    //   book_followup   check-in done, follow-up not booked yet
+    //   followup_booked follow-up already booked
+    let nextStep = 'explore_plans';
+    if (ctxPlan && !ctxPlan.isTrial && dietitianId) {
+      const expired =
+        ctxPlan.expireDate && new Date(ctxPlan.expireDate).getTime() < Date.now();
+      if (expired) {
+        nextStep = 'renew';
+      } else if (bookingLocked) {
+        nextStep = 'locked';
+      } else {
+        const used = ['confirmed', 'In Progress', 'completed'];
+        const initial = await Appointment.findOne({
+          where: {
+            userId,
+            planId: ctxPlan.id,
+            [Op.or]: [{ kind: 'initial' }, { kind: null }],
+            status: { [Op.in]: used },
+          },
+          attributes: ['id'],
+        });
+        const followup = await Appointment.findOne({
+          where: {
+            userId,
+            planId: ctxPlan.id,
+            kind: 'followup',
+            status: { [Op.in]: ['pending', ...used] },
+          },
+          attributes: ['id', 'status'],
+          order: [['date', 'DESC']],
+        });
+        if (!initial) {
+          nextStep = 'book_initial';
+        } else if (followup && followup.status === 'completed') {
+          nextStep = 'renew';
+        } else if (followup) {
+          nextStep = 'followup_booked';
+        } else {
+          const day15 = await db.ProgressSubmission.findOne({
+            where: { userPlanId: ctxPlan.id, cycle: 15 },
+            attributes: ['id'],
+          });
+          nextStep = day15 ? 'book_followup' : 'day15_checkin';
+        }
+      }
+    }
+
     return res.json(
       ApiResponse('1', 'Booking context', {
         userId,
         userPlanId,
         dietitianId,
+        bookingLocked,
+        nextStep,
         hasActivePlan: !!activeDietPlan,
         // Filled only between "consultation done" and "plan delivered".
         planPreparing: activeDietPlan ? null : await buildPlanPreparing(userId),

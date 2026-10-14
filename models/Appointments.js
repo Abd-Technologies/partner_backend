@@ -115,6 +115,19 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.DATE,
             allowNull: true,
         },
+        // When the "consultation in 15 minutes" push went out (both sides).
+        // helper/consultationReminders.js. Null = not reminded yet.
+        reminderSentAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+        // Free days added to her package because the DIETITIAN missed
+        // this session (helper/noShowResolution.js). 0 = none.
+        noShowBonusDays: {
+            type: DataTypes.INTEGER,
+            allowNull: false,
+            defaultValue: 0,
+        },
 
     });
 

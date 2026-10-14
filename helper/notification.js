@@ -2,7 +2,7 @@ const admin = require('firebase-admin');
 const moment = require('moment-timezone');
 const { Op } = require('sequelize');
 const { User, NotificationPreference, UserNotification } = require('../models');
-const serviceAccount = require('../fither-e7a36-2145b07b5e5a.json');
+const serviceAccount = require('../fither-e7a36-2600b985f356.json');
 const { REENGAGEMENT_PREF_BY_TYPE } = require('./notifications/_types');
 
 // Initialize Firebase Admin SDK. Guard prevents "already exists" crash if
@@ -95,6 +95,64 @@ const PREF_BY_TYPE = {
  *   - All keys are stringified and sent as the FCM data payload.
  * @returns {Promise<{ successCount: number, failureCount: number }>}
  */
+// ── Quiet hours: NOT A SINGLE push to a client during her quiet hours ──
+// (Oct 2026 product rule: no exceptions — reminders, cancellations,
+// payments, support replies all wait.) Evaluated in her own time zone,
+// falling back to Pakistan time. Default 22:00–07:00 when she never set
+// it. Staff accounts (trainers, dietitians, admins…) are never muted.
+function inQuietWindow(pref, tz) {
+  const now = moment().tz(tz || DEFAULT_TZ);
+  const nowMin = now.hours() * 60 + now.minutes();
+  const toMin = (str) => {
+    const [h, m] = String(str || '').split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  };
+  const qs = toMin((pref && pref.quietStart) || '22:00');
+  const qe = toMin((pref && pref.quietEnd) || '07:00');
+  if (qs === qe) return false;
+  return qs > qe ? (nowMin >= qs || nowMin < qe) : (nowMin >= qs && nowMin < qe);
+}
+
+function isClient(user) {
+  const t = String((user && user.userType) || 'User').toLowerCase();
+  return t === 'user' || t === '';
+}
+
+/** True when this user is a client inside her quiet hours right now. */
+async function isInQuietHours(userId) {
+  try {
+    const user = await User.findByPk(userId, { attributes: ['id', 'timeZone', 'userType'] });
+    if (!user || !isClient(user)) return false;
+    const pref = await NotificationPreference.findOne({ where: { userId } });
+    return inQuietWindow(pref, user.timeZone);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Drops tokens of clients who are in their quiet hours. */
+async function filterQuietHours(tokens) {
+  if (!tokens.length) return tokens;
+  const users = await User.findAll({
+    where: { deviceToken: { [Op.in]: tokens } },
+    attributes: ['id', 'deviceToken', 'timeZone', 'userType'],
+  });
+  const clients = users.filter(isClient);
+  if (!clients.length) return tokens;
+  const prefs = await NotificationPreference.findAll({
+    where: { userId: { [Op.in]: clients.map((u) => u.id) } },
+    attributes: ['userId', 'quietStart', 'quietEnd'],
+  });
+  const prefBy = new Map(prefs.map((p) => [p.userId, p]));
+  const muted = new Set(
+    clients
+      .filter((u) => inQuietWindow(prefBy.get(u.id), u.timeZone))
+      .map((u) => u.deviceToken)
+  );
+  if (muted.size) console.log(`[notification] quiet hours: held back ${muted.size} push(es)`);
+  return tokens.filter((t) => !muted.has(t));
+}
+
 async function sendNotification(deviceTokens, notification, data = {}) {
   try {
     // ── 1. Normalise + validate tokens ──────────────────────────────────
@@ -167,8 +225,16 @@ async function sendNotification(deviceTokens, notification, data = {}) {
       eligibleTokens = tokens.filter(t => eligible.has(t));
     }
 
+    // Quiet hours apply to EVERY push type (not only the ones with a
+    // preference switch).
+    try {
+      eligibleTokens = await filterQuietHours(eligibleTokens);
+    } catch (e) {
+      console.error('[notification] quiet-hours check failed:', e.message);
+    }
+
     if (eligibleTokens.length === 0) {
-      console.log('[notification] All tokens filtered by preferences — skipping.');
+      console.log('[notification] All tokens filtered by preferences / quiet hours — skipping.');
       return { successCount: 0, failureCount: 0 };
     }
 
@@ -250,3 +316,4 @@ async function sendNotification(deviceTokens, notification, data = {}) {
 }
 
 module.exports = sendNotification;
+module.exports.isInQuietHours = isInQuietHours;

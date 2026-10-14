@@ -87,20 +87,22 @@ router.post(
   upload.single("image"),
   asyncMiddleware(adminController.add_testimonial)
 );
-router.post(
-  "/addDietPdf",
-  upload.single("image"),
-  asyncMiddleware(adminController.addDietPdf)
-);
+// LEGACY PDF DIET PLAN — disabled. The AI DietPlan flow is the only plan system now. Kept commented (not deleted) in case it's ever needed again.
+// router.post(
+//   "/addDietPdf",
+//   upload.single("image"),
+//   asyncMiddleware(adminController.addDietPdf)
+// );
 
 router.get(
   "/get_testimonials",
   asyncMiddleware(adminController.get_testimonials)
 );
-router.post(
-  "/getDietPdf",
-  asyncMiddleware(adminController.getDietPdf)
-);
+// LEGACY PDF DIET PLAN — disabled. The AI DietPlan flow is the only plan system now. Kept commented (not deleted) in case it's ever needed again.
+// router.post(
+//   "/getDietPdf",
+//   asyncMiddleware(adminController.getDietPdf)
+// );
 router.post(
   "/activate_plan",
   validateToken,
@@ -255,6 +257,10 @@ router.get(
 // compute (server - device) offset. Defends against device clocks that
 // are wrong or out of sync. No auth: it's just the wall clock.
 router.get("/server-time", asyncMiddleware(adminController.serverTime));
+// App update popup rules (admin sets latest / minimum version per platform).
+router.post("/app-version", validateToken, asyncMiddleware(require("../../controllers/appVersionController").setAppVersion));
+router.get("/app-version/audience", validateToken, asyncMiddleware(require("../../controllers/appVersionController").appUpdateAudience));
+router.post("/app-version/notify", validateToken, asyncMiddleware(require("../../controllers/appVersionController").notifyAppUpdate));
 router.post(
   "/updateLink",
   validateToken,
@@ -299,8 +305,12 @@ router.post(
   validateAdmin,
   asyncMiddleware(adminController.cancelUserPlan)
 );
-router.post("/addReview", asyncMiddleware(adminController.addReview));
-router.get("/getReviews", asyncMiddleware(adminController.getReviews));
+// Was open to anyone (Oct 2026 review audit): now login required, and the
+// review is saved for the logged-in user, not a userId from the body.
+router.post("/addReview", validateToken, asyncMiddleware(adminController.addReview));
+router.get("/getReviews", validateAdmin, asyncMiddleware(adminController.getReviews));
+// Class feedback for admin (fitHer Flows › Class feedback)
+router.get("/classFeedback", validateToken, require("../../controllers/FrontSite/classFeedbackController").adminList);
 router.get("/syncrhonize", asyncMiddleware(adminController.syncrhonize));
 router.post("/delete_user", validateAdmin, asyncMiddleware(adminController.delete_user));
 
@@ -402,10 +412,12 @@ router.post(
 
 router.get(
   "/userCount",
+  validateAdmin, // was open to anyone (Oct 2026 audit)
   asyncMiddleware(adminController.userCount)
 );
 router.post(
   "/completeDietPlan",
+  validateAdmin, // was open to anyone (Oct 2026 audit)
   asyncMiddleware(adminController.completeDietPlan)
 );
 router.post(
@@ -420,10 +432,12 @@ router.post(
 );
 router.post(
   "/update_slot_trainer",
+  validateAdmin, // was open to anyone (Oct 2026 audit)
   asyncMiddleware(adminController.update_slot_trainer)
 );
 router.post(
   "/addDietitionReview",
+  validateAdmin, // was open to anyone (Oct 2026 audit)
   asyncMiddleware(adminController.addDietitionReview)
 );
 router.post(
@@ -433,6 +447,7 @@ router.post(
 );
 router.get(
   "/getRating/:dietitianId",
+  validateAdmin, // was open to anyone (Oct 2026 audit)
   asyncMiddleware(adminController.getRating)
 );
 router.get(
@@ -460,13 +475,21 @@ router.get('/getFreeTrialUserById/:id/:slotId', validateToken, asyncMiddleware(a
 // route above only ever reads the legacy FreeTrailUsersSlots table, which
 // nothing has written to since trialController.js shipped.
 router.get('/getTrialJourneyUsersBySlot/:id/:slotId', validateToken, asyncMiddleware(adminController.getTrialJourneyUsersBySlot));
+// Class rooms: admin sets each trainer's Zoom room once; trainer screen
+// reads its class + sets an "Other link" for today. controllers/Admin/classLinkController.js
+const classLinkController = require("../../controllers/Admin/classLinkController");
+router.get('/trainerRooms', validateToken, asyncMiddleware(classLinkController.trainerRooms));
+router.post('/trainerRoom', validateToken, asyncMiddleware(classLinkController.setTrainerRoom));
+router.get('/trainerClass/:slotId', validateToken, asyncMiddleware(classLinkController.trainerClass));
+router.post('/trainerClass/backupLink', validateToken, asyncMiddleware(classLinkController.setBackupLink));
 router.post(
   '/updateSlotStatus',
   validateToken,
   asyncMiddleware(adminController.update_slot_status)
 );
-router.put('/updateDietPlanStatus/:id', asyncMiddleware(adminController.updateDietPlanStatus));
-router.get('/getDietPlanStatus', asyncMiddleware(adminController.getDietPlanStatus));
+// LEGACY PDF DIET PLAN — disabled. The AI DietPlan flow is the only plan system now. Kept commented (not deleted) in case it's ever needed again.
+// router.put('/updateDietPlanStatus/:id', asyncMiddleware(adminController.updateDietPlanStatus));
+// router.get('/getDietPlanStatus', asyncMiddleware(adminController.getDietPlanStatus));
 
 // ─── Trial admin overrides ───────────────────────────────────────────────────
 // POST /admin/trial/force-attendance

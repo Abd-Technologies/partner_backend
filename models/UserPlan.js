@@ -43,6 +43,20 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: true,
         },
 
+        // Consultation change policy — see helper/bookingPolicy.js and
+        // migration 20261003120000. lateChangeUsedAt: her one free late
+        // cancel / missed session for this package was used.
+        // bookingLockedAt: she missed again after that, so self-booking
+        // is blocked until staff reset it.
+        lateChangeUsedAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+        bookingLockedAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+
 
         price: {
             type: DataTypes.INTEGER,

@@ -9,6 +9,11 @@ const userController = require('../../controllers/FrontSite/userController');
 const paymentController = require('../../controllers/FrontSite/paymentController');
 const planFreezeController = require('../../controllers/FrontSite/planFreezeController');
 
+// App update popup rules (public, no login needed) — see fitHer Flows.
+const appVersionController = require('../../controllers/appVersionController');
+router.get('/app-version', asyncMiddleware(appVersionController.getAppVersion));
+router.post('/app-version/report', validateToken, asyncMiddleware(appVersionController.reportAppVersion));
+
 //AUTH APIS
 router.post('/registration',asyncMiddleware(userController.registration));
 router.post('/login',asyncMiddleware(userController.login));

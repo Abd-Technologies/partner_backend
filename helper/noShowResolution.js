@@ -4,7 +4,7 @@
 // button and no real resolution on screen.
 //
 // Called from two places:
-//   - consultationBookingController.reportNoShow — the client taps
+//   - (formerly) the client tapping
 //     "Report" themselves.
 //   - popupEligibility.evaluateConsultantNoShows — nobody reported it,
 //     but 24 hours passed anyway (see NO_SHOW_STALE_HOURS), so the
@@ -24,6 +24,7 @@
 // blocks a fresh booking or eats into her allowance.
 const sendNotification = require("./notification");
 const { User } = require("../models");
+const bookingPolicy = require("./bookingPolicy");
 
 async function resolveDietitianNoShow(appointment, { actorUserId = null } = {}) {
   const alreadyResolved =
@@ -37,6 +38,30 @@ async function resolveDietitianNoShow(appointment, { actorUserId = null } = {}) 
   appointment.status_changed_at = new Date();
   await appointment.save();
 
+  // Package compensation: the miss was ours, so add a fixed number of
+  // days to her package end date. Only on the first resolution, so a
+  // client report + the stale-no-show cron can't both add days.
+  let daysAdded = 0;
+  if (!alreadyResolved) {
+    try {
+      const plan = await bookingPolicy.planForAppointment(appointment);
+      if (plan && plan.expireDate) {
+        daysAdded = bookingPolicy.DIETITIAN_NO_SHOW_BONUS_DAYS;
+        const newExpire = new Date(
+          new Date(plan.expireDate).getTime() + daysAdded * 86400000
+        );
+        await plan.update({ expireDate: newExpire });
+        await appointment.update({ noShowBonusDays: daysAdded });
+        console.log(
+          `[noShowResolution] dietitian no-show on appt ${appointment.id}: +${daysAdded}d on UserPlan ${plan.id}`
+        );
+      }
+    } catch (e) {
+      daysAdded = 0;
+      console.error("[noShowResolution] compensation failed:", e);
+    }
+  }
+
   if (!alreadyResolved) {
     try {
       const user = await User.findByPk(appointment.userId);
@@ -44,11 +69,13 @@ async function resolveDietitianNoShow(appointment, { actorUserId = null } = {}) 
         await sendNotification(
           [user.deviceToken],
           {
-            title: "Session missed",
+            title: "Your session was canceled",
             body:
-              "Your dietitian wasn't able to join this session, so we've " +
-              "canceled it. Book a new time whenever works for you — no " +
-              "charge, no hassle.",
+              "Your dietitian couldn't join your session, so we've canceled it" +
+              (daysAdded > 0
+                ? ` and added ${daysAdded} free days to your package. `
+                : ". ") +
+              "Open the Diet tab to pick a new time. It's free.",
           },
           { type: "appointmentNoShowCanceled" }
         );
@@ -119,17 +146,68 @@ async function resolveClientNoShow(appointment, { actorUserId = null } = {}) {
   appointment.status_changed_at = new Date();
   await appointment.save();
 
+  // Change policy (helper/bookingPolicy.js): a missed session counts like
+  // a late cancel. The first one per package is free (uses her one late
+  // change); after that, self-booking is locked and staff are alerted so
+  // they can contact her and rebook.
+  let locked = false;
+  try {
+    const plan = await bookingPolicy.planForAppointment(appointment);
+    if (plan) {
+      if (!plan.lateChangeUsedAt) {
+        plan.lateChangeUsedAt = new Date();
+      } else {
+        plan.bookingLockedAt = new Date();
+        locked = true;
+      }
+      await plan.save();
+    }
+  } catch (e) {
+    console.error("[noShowResolution] booking policy update failed:", e);
+  }
+
+  if (locked) {
+    try {
+      // Lazy require: escalation.js pulls in models + notification; kept
+      // out of module load so this helper has no load-order surprises.
+      const { createEscalation } = require("./escalation");
+      await createEscalation({
+        userId: appointment.userId,
+        dietitianId: appointment.dietitionId || null,
+        trigger: "CONSULT_CLIENT_NO_SHOW",
+        severity: "high",
+        payload: {
+          appointmentId: appointment.id,
+          scheduledDate: appointment.date,
+          userPlanId: appointment.planId,
+          bookingLocked: true,
+          note: "Second missed session on this package. Self-booking is locked. Contact her, rebook, or reset her booking pass.",
+        },
+      });
+    } catch (e) {
+      console.error("[noShowResolution] lock escalation failed:", e);
+    }
+  }
+
   try {
     const user = await User.findByPk(appointment.userId);
     if (user && user.deviceToken) {
       await sendNotification(
         [user.deviceToken],
-        {
-          title: "We missed you today 💚",
-          body:
-            "Your dietitian was waiting but you couldn't join. No problem, " +
-            "book a new time and we'll build your plan right after.",
-        },
+        locked
+          ? {
+              title: "We missed you today",
+              body:
+                "You missed your session again, so our team will reach out " +
+                "to help you book a new time.",
+            }
+          : {
+              title: "We missed you today 💚",
+              body:
+                "No problem, this one's on us. Book a new time and we'll " +
+                "build your plan right after. Next time, please cancel at " +
+                "least 24 hours ahead.",
+            },
         { type: "appointmentClientNoShow" }
       );
     }

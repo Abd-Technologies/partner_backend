@@ -77,15 +77,14 @@ function isTrialExpired(startedAt) {
 }
 
 /**
- * How many live classes a trial user aims to join (TRIAL_CLASS_GOAL in
- * .env, default 3). Saved on her TrialJourney when her trial starts, so
- * changing it later only affects new trials. Capped at 2 per trial day.
+ * How many live classes a trial user aims to join: half her trial days,
+ * rounded up (3 days -> 2 classes, 5 -> 3, 7 -> 4, 14 -> 7). Follows
+ * TRIAL_DAYS automatically, so there's one setting to change. She can
+ * still join more classes than this; it's only the target shown to her.
+ * (TRIAL_CLASS_GOAL in .env is no longer used.)
  */
 function getTrialClassGoal() {
-  const n = parseInt(process.env.TRIAL_CLASS_GOAL, 10);
-  const max = getTrialDays() * 2;
-  if (!Number.isInteger(n) || n < 1) return Math.min(3, max);
-  return Math.min(n, max);
+  return Math.max(1, Math.ceil(getTrialDays() / 2));
 }
 
 /**

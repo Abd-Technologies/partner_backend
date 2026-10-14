@@ -28,6 +28,16 @@ router.get(
   validateAdmin,
   asyncMiddleware(ctrl.listPlansForUserHandler)
 );
+router.post(
+  '/user-plan/:userPlanId/reset-booking-pass',
+  validateAdmin,
+  asyncMiddleware(ctrl.resetBookingPassHandler)
+);
+router.get(
+  '/user/:userId/meal-activity',
+  validateAdmin,
+  asyncMiddleware(ctrl.getClientMealActivity)
+);
 router.patch(
   '/meal/:mealId',
   validateAdmin,
