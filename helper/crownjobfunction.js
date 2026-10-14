@@ -1,5 +1,6 @@
 const { Slot, Time, User, UserPlan, Plan, NotificationPreference, FreeTrailUsers, FreeTrailUsersSlots } = require('../models');
 const { Op } = require('sequelize');
+const { activeUserPlanWhere } = require('./activePackage');
 const Queue = require("bull");
 const moment = require('moment-timezone');
 const Redis = require("ioredis");
@@ -135,80 +136,69 @@ function pickClassReminder(slotsToday, nowTimestamp) {
  * 🔹 Send notifications to ALL users
  */
 async function sendUpcomingSlotNotificationsPerUser() {
+  // ONE reminder per class, 15 minutes before, to every class user for
+  // whom it is "her class" (see helper/classAudience.js): her picked
+  // times, or ALL classes if she never picked any.
+  //
+  // Rewritten Oct 2026: the old version did (slot.start - now) on
+  // "08:00 AM" strings, which is NaN, so no reminder was ever sent.
+  // Free-trial users are skipped here: helper/trialClasses.js sends them
+  // their own "starts soon" + "it's live" reminders.
   try {
-    const userPlans = await UserPlan.findAll({
+    const { getClassUsers, isHerClass } = require('./classAudience');
+    const { parseEndAsUtc } = require('./timeFormats');
+    const nowUtc = moment.utc();
+    const todayPkt = moment.tz('Asia/Karachi');
+    const dayName = todayPkt.format('dddd');
+
+    const slots = await Slot.findAll({
+      attributes: ['id', 'start', 'end', 'type', 'level', 'description', 'trainerId', 'status'],
+      where: { trainerId: { [Op.ne]: null } },
       include: [
-        { model: User, attributes: ['id', 'deviceToken', 'timeZone'] },
-        {
-          model: Plan,
-          attributes: ['CategoryId', 'title'],
-          where: { CategoryId: { [Op.or]: [2, 3] } },
-        },
+        { model: Time, attributes: ['day'], where: { day: dayName } },
+        { model: User, attributes: ['id', 'firstName', 'lastName', 'email'] },
       ],
     });
 
-    // Batch-fetch timeBlock preferences to avoid N+1 queries.
-    // Default 'all' if the user has no preference row yet.
-    const userIds = userPlans.map(up => up.User?.id).filter(Boolean);
-    const prefs = await NotificationPreference.findAll({
-      where: { userId: { [Op.in]: userIds } },
-      attributes: ['userId', 'timeBlock'],
-    });
-    const timeBlockByUserId = new Map(prefs.map(p => [p.userId, p.timeBlock || 'all']));
-
-    for (const userPlan of userPlans) {
-      const user = userPlan.User;
-      if (!user || !user.deviceToken || !user.timeZone) continue;
-
-      const userMoment = moment().tz(user.timeZone);
-      const currentDay = userMoment.format('dddd');
-      const nowTimestamp = userMoment.valueOf();
-
-      const timeRecord = await Time.findOne({ where: { day: currentDay }, attributes: ['id'] });
-      if (!timeRecord) continue;
-
-      const allSlotsToday = await getTodaySlotsForUser(user, timeRecord, userPlan.Plan.title === "Free Trial");
-
-      // Only notify for classes that fall in the user's preferred time window.
-      // A user who sets 'evening' won't be disturbed by 8 AM class reminders.
-      const timeBlock = timeBlockByUserId.get(user.id) || 'all';
-      const slotsToday = filterSlotsByTimeBlock(allSlotsToday, timeBlock, user.timeZone);
-
-      const reminder = pickClassReminder(slotsToday, nowTimestamp);
-
-      if (!reminder) continue;
-
-      if (await alreadyNotified(user.id, reminder.slot.id, reminder.reminderType, reminder.slot.end)) {
-        continue; // avoid duplicate
-      }
-
-      const trainer = await User.findOne({
-        attributes: ['id', 'firstName', 'lastName', 'email'],
-        where: { id: reminder.slot.trainerId },
-      });
-
-      const notification = {
-        title: reminder.title,
-        body: reminder.body,
-      };
-
-      const dataPayload = {
-        type: reminder.reminderType,
-        upcomingSlot: JSON.stringify(reminder.slot),
-        trainer: JSON.stringify(trainer ?? {}),
-      };
-
-      await notificationQueue.add({
-        title: notification.title,
-        body: notification.body,
-        data: dataPayload,
-        deviceTokens: [user.deviceToken],
-      });
-
-      console.log(`📩 Notification queued for user ${user.id}`);
+    const due = [];
+    for (const slot of slots) {
+      if (slot.status === 'Cancelled' || slot.status === 'Completed') continue;
+      const startUtc = parseEndAsUtc(slot.start, todayPkt);
+      if (!startUtc) continue;
+      const mins = startUtc.diff(nowUtc, 'minutes', true);
+      // Cron runs every 3 minutes: (12, 15] catches each class once.
+      if (mins <= 15 && mins > 12) due.push({ slot, startUtc });
     }
+    if (due.length === 0) return;
 
-    console.log("📩 Notifications processed for all users.");
+    const users = (await getClassUsers()).filter(u => !u.isTrial && u.deviceToken);
+
+    for (const { slot, startUtc } of due) {
+      const trainer = slot.User;
+      const withTrainer = trainer && trainer.firstName ? ` with ${trainer.firstName}` : '';
+      const type = (slot.type || slot.description || 'class').trim();
+      const endMs = (parseEndAsUtc(slot.end, todayPkt) || startUtc.clone().add(1, 'hour')).valueOf();
+      const plain = slot.get({ plain: true });
+      delete plain.Time;
+      delete plain.User;
+
+      for (const user of users) {
+        if (!isHerClass(user, slot)) continue;
+        if (await alreadyNotified(user.id, slot.id, 'classPrep', endMs)) continue;
+        const local = startUtc.clone().tz(user.timeZone || 'Asia/Karachi').format('h:mm A');
+        await notificationQueue.add({
+          title: 'Class Reminder',
+          body: `Your ${local} ${type}${withTrainer} starts in 15 minutes. Get ready! 💪`,
+          data: {
+            type: 'classPrep',
+            upcomingSlot: JSON.stringify(plain),
+            trainer: JSON.stringify(trainer ?? {}),
+          },
+          deviceTokens: [user.deviceToken],
+        });
+      }
+    }
+    console.log(`📩 Class reminders processed for ${due.length} class(es).`);
   } catch (error) {
     console.error("❌ Error sending upcoming slot notifications:", error);
   }
@@ -295,17 +285,12 @@ async function getDeviceTokensForSlot(slot) {
   if (!slot || !slot.id) return [];
 
   try {
-    const [paidUserPlans, freeTrialAssignments] = await Promise.all([
-      UserPlan.findAll({
-        include: [
-          { model: User, attributes: ['deviceToken'] },
-          {
-            model: Plan,
-            attributes: ['CategoryId'],
-            where: { CategoryId: { [Op.or]: [2, 3] } },
-          },
-        ],
-      }),
+    // One rule for every class push: class users for whom this is one of
+    // "her classes" (picked times, or all classes if she picked none).
+    // See helper/classAudience.js. Legacy FreeTrailUsersSlots kept too.
+    const { getClassAudience } = require('./classAudience');
+    const [audience, freeTrialAssignments] = await Promise.all([
+      getClassAudience(slot),
       FreeTrailUsersSlots.findAll({
         where: { slotId: slot.id },
         include: [{
@@ -316,9 +301,7 @@ async function getDeviceTokensForSlot(slot) {
       }),
     ]);
 
-    const paidTokens = paidUserPlans
-      .map(up => up.User?.deviceToken)
-      .filter(Boolean);
+    const paidTokens = audience.map(u => u.deviceToken).filter(Boolean);
 
     const freeTokens = freeTrialAssignments
       .map(a => a.freeUserSlots?.freeUserId?.deviceToken)

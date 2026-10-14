@@ -6,7 +6,7 @@ const { User } = require("../../models");
 // re-init just in case this loads first, so admin.messaging() is always ready.
 if (!admin.apps.length) {
   try {
-    const serviceAccount = require("../../fither-e7a36-2145b07b5e5a.json");
+    const serviceAccount = require("../../fither-e7a36-2600b985f356.json");
     admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   } catch (e) {
     console.error("[appNotify] firebase init skipped:", e.message);
@@ -19,8 +19,7 @@ if (!admin.apps.length) {
  * Server-to-server only (called by the CRM when an admin resolves an app
  * support issue). Authenticated by the shared APP_WEBHOOK_SECRET via the
  * `x-internal-secret` header — NOT a user token. Sends a direct FCM push to the
- * user's device (bypasses preference/quiet-hours gating, since a support reply
- * should always reach the user).
+ * user's device (bypasses preference gating; quiet hours DO apply).
  *
  * Body: { app_user_id, title?, body, data? }
  */
@@ -38,6 +37,10 @@ exports.appNotify = async (req, res) => {
     }
 
     const user = await User.findByPk(app_user_id);
+    // Quiet hours: no push at all during her quiet hours (Oct 2026 rule).
+    if (user && (await require("../../helper/notification").isInQuietHours(user.id))) {
+      return res.json(ApiResponse("1", "Held back: user is in quiet hours", { pushed: false }));
+    }
     if (!user || !user.deviceToken) {
       return res.json(ApiResponse("0", "No device token on file for this user", {}));
     }

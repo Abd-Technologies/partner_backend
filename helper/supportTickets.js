@@ -11,7 +11,7 @@ const { User, UserPlan, Plan, SupportTicketMessage } = require("../models");
 // case this file loads first.
 if (!admin.apps.length) {
   try {
-    const serviceAccount = require("../fither-e7a36-2145b07b5e5a.json");
+    const serviceAccount = require("../fither-e7a36-2600b985f356.json");
     admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   } catch (e) {
     console.error("[supportTickets] firebase init skipped:", e.message);
@@ -85,9 +85,11 @@ async function sendToCrm(eventType, payload) {
   }
 }
 
-// Direct push to the user (skips quiet hours: a support reply should arrive).
+// Direct push to the user. Quiet hours apply (Oct 2026: no push at all
+// during her quiet hours; the reply is still in the app).
 async function pushToUser(userId, title, body, data) {
   try {
+    if (await require("./notification").isInQuietHours(userId)) return;
     const user = await User.findByPk(userId, { attributes: ["id", "deviceToken"] });
     if (!user || !user.deviceToken) return;
     const stringData = {};

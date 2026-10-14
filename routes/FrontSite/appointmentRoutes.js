@@ -43,7 +43,10 @@ const { validateAdmin } = require("../../middlewares/ValidateAdmin");
 
 // User reports the dietitian didn't show up. Auth-gated; controller
 // enforces ownership. Opens a CONSULT_NO_SHOW escalation. Phase 1B addition.
- router.post("/:id/no-show", validateToken, consultationBookingController.reportNoShow);
+ // Retired (Oct 2026): the server decides dietitian no-shows itself
+ // (Meet attendance sweep, or the 24h fallback in popupEligibility), so
+ // the client is never asked to report one. Kept for reference.
+ // (route removed; see consultationBookingController.js)
 // Dietitian: "Client didn't join" (manual backup for the Meet attendance check).
 router.post("/:id/client-no-show", validateToken, consultationBookingController.reportClientNoShow);
 

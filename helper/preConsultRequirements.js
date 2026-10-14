@@ -16,7 +16,47 @@
  *
  * "required" is what makes the form show up for paid clients.
  */
-const { PreConsultationProfile, User, UserCycleData } = require("../models");
+const { Op } = require("sequelize");
+const { PreConsultationProfile, User, UserCycleData, UserPlan, Plan } = require("../models");
+
+/**
+ * ONE truth for "which questions": her live PAID packages decide it.
+ *   diet only → "diet" · workout only → "workout" · both / combined → "combined"
+ * Free-trial system plans don't count. null = no paid package.
+ * Used by the form popup, GET /requirements and the booking gate, so the
+ * app never chooses the question set itself.
+ */
+async function planTypeForUser(userId) {
+  const plans = await UserPlan.findAll({
+    where: { userId, status: true, expireDate: { [Op.gte]: new Date() } },
+    include: [{ model: Plan, attributes: ["id", "title", "CategoryId", "planType"] }],
+  });
+  let diet = false;
+  let workout = false;
+  for (const up of plans) {
+    if (up.isTrial) continue;
+    const p = up.Plan;
+    if (!p) continue;
+    const title = String(p.title || "").toLowerCase();
+    if (title.startsWith("system") || title === "free trial") continue;
+    let type = p.planType;
+    if (!type) {
+      const cat = Number(p.CategoryId);
+      if (cat === 1) type = "diet";
+      else if (cat === 2) type = "workout";
+      else if (cat === 3) type = "combined";
+      else if (title.includes("combined") || title.includes("both")) type = "combined";
+      else if (title.includes("diet")) type = "diet";
+      else if (title.includes("workout")) type = "workout";
+    }
+    if (type === "diet" || type === "combined") diet = true;
+    if (type === "workout" || type === "combined") workout = true;
+  }
+  if (diet && workout) return "combined";
+  if (diet) return "diet";
+  if (workout) return "workout";
+  return null;
+}
 
 const HAS_PERIODS = ["regular_cycle", "irregular_cycle", "trying_to_conceive"];
 
@@ -93,4 +133,4 @@ async function requirementsFor(userId, planType = "diet") {
   };
 }
 
-module.exports = { requirementsFor };
+module.exports = { requirementsFor, planTypeForUser };

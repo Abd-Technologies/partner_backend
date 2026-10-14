@@ -169,7 +169,7 @@ async function sendTrialJourneyNudges() {
       if (paidPlanUserIds.has(user.id)) { results.skippedPaid++; continue; }
 
       journey._attended = await countTrialClassesAttended(user.id, journey);
-      journey._goal = journey.classGoal || getTrialClassGoal();
+      journey._goal = getTrialClassGoal() /* always the current rule, even for trials that saved an older goal */;
 
       // Find the first segment this journey is in.
       const seg = STATE_SEGMENTS.find((s) => s.match(journey));

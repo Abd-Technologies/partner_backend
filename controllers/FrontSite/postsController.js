@@ -15,25 +15,14 @@ const STAFF_ROLES = new Set([
 
 const isStaff = (user) => !!user && STAFF_ROLES.has(user.userType);
 
-// "Paid" = an active, non-free-trial UserPlan that has not expired.
-// Free-trial users hold a UserPlan whose Plan.title === 'Free Trial' — we
-// exclude that with a required Plan include.
+// "Paid" = a live PAID package (diet, workout or combined). Free-trial
+// plans never count — neither the old "Free Trial" plan nor the new
+// trial's system plan ("System — Trial Auto Diet Plan", isTrial, kept 90
+// days), which used to let trial and trial-ended users post. Same rule as
+// the health form / booking (helper/preConsultRequirements.planTypeForUser).
 const hasActivePaidPlan = async (userId) => {
-  const plan = await UserPlan.findOne({
-    where: {
-      userId,
-      status: true,
-      expireDate: { [Op.gte]: new Date() },
-    },
-    include: [
-      {
-        model: Plan,
-        where: { title: { [Op.ne]: 'Free Trial' } },
-        required: true,
-      },
-    ],
-  });
-  return !!plan;
+  const { planTypeForUser } = require('../../helper/preConsultRequirements');
+  return (await planTypeForUser(userId)) !== null;
 };
 
 // Returns null if the user may post/comment, otherwise a denial message.
@@ -42,7 +31,7 @@ const denyIfNotCreator = async (user) => {
   const paid = await hasActivePaidPlan(user.id);
   return paid
     ? null
-    : 'Active paid plan required to post or comment. Free-trial users can like only.';
+    : 'Posting and commenting are for Fit Her members. Choose a plan to join the conversation. You can still like posts 💚';
 };
 
 const toBool = (val, fallback) => {

@@ -287,7 +287,13 @@ async function buildLiveAndComingUp(userTz) {
   });
 
   const nowUtc = moment.utc();
-  const todayUtc = nowUtc.clone().startOf("day");
+  // Class days (Time.day) and times are Pakistan time. Anchor "today" on
+  // the PAKISTAN date, not the UTC date: between 00:00 and 05:00 PKT the
+  // UTC date is still yesterday, so early-morning classes were matched
+  // against the wrong weekday and never reached the big home card.
+  // (A UTC-midnight moment carrying the PKT calendar date, so .day() and
+  // slotMomentOnUtcDate() both see the PKT date.)
+  const todayUtc = moment.utc(nowUtc.clone().tz(DEFAULT_TIMEZONE).format("YYYY-MM-DD"));
 
   const formatLocal = (parts, utcDay) =>
     slotMomentOnUtcDate(parts, utcDay).clone().tz(tz).format("hh:mm A");
@@ -336,7 +342,17 @@ async function buildLiveAndComingUp(userTz) {
   let live = null;
   let liveSlot = slots.find((s) => s.status === "In Progress");
   if (!liveSlot) {
-    liveSlot = slots.find((s) => isWithinTodaysWindow(s));
+    // Several classes can be "in window" at once (a running class, plus
+    // the next one whose 30-min lead has opened). Always show the one
+    // that started first, so the next class never replaces the current
+    // one before it has ended.
+    const startOf = (s) => {
+      const p = parseSlotTimeParts(s.start);
+      return p ? slotMomentOnUtcDate(p, todayUtc).valueOf() : Infinity;
+    };
+    liveSlot = slots
+      .filter((s) => isWithinTodaysWindow(s) && s.status !== "Completed" && s.status !== "Cancelled")
+      .sort((a, b) => startOf(a) - startOf(b))[0];
   }
   if (liveSlot) {
     const trainer = liveSlot.User;
@@ -382,6 +398,7 @@ async function buildLiveAndComingUp(userTz) {
       trainerName: trainerName.length ? trainerName : null,
       durationMinutes,
       caloriesEstimate: null,
+      level: liveSlot.level || null,
       participantCount,
       elapsedMinutes: null,
       startedAtUtc: null,
@@ -457,6 +474,7 @@ async function buildLiveAndComingUp(userTz) {
       // amber "Starts in Xm" countdown identically instead of plain text.
       status: slot.status,
       trainerLink: slot.trainerLink || null,
+      level: slot.level || null,
     });
   }
   upcoming.sort((a, b) => a._sortKey - b._sortKey);

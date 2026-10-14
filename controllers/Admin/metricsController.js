@@ -4,8 +4,9 @@ const {
   Appointment,
   ClassAttendance,
   DailyCheckin,
+  DietPlan,
   EscalationTicket,
-  PdfDietsForUserNew,
+  // PdfDietsForUserNew, // legacy PDF diet plan — disabled
   Plan,
   User,
   UserPlan,
@@ -112,7 +113,10 @@ async function consultationsCounts({ from }) {
 
 async function plansPendingDelivery() {
   // Active UserPlans where the initial Appointment is "completed" but
-  // no PdfDiet exists yet. Day-3 breaches are surfaced separately.
+  // no AI DietPlan has been activated for it yet. Day-3 breaches are
+  // surfaced separately. (Used to check the legacy PDF table — that
+  // system is disabled, so it would have counted every AI-delivered
+  // client as still pending.)
   try {
     const completed = await Appointment.findAll({
       where: { status: "completed" },
@@ -128,10 +132,15 @@ async function plansPendingDelivery() {
     for (const a of completed) {
       const planId = a.planId;
       if (!planId) continue;
-      const pdf = await PdfDietsForUserNew.findOne({
-        where: { userPlanId: planId },
+      // const pdf = await PdfDietsForUserNew.findOne({ // legacy PDF — disabled
+      //   where: { userPlanId: planId },
+      // });
+      // if (pdf) continue;
+      const delivered = await DietPlan.findOne({
+        where: { userPlanId: planId, activatedAt: { [Op.ne]: null }, status: { [Op.ne]: "cancelled" } },
+        attributes: ["id"],
       });
-      if (pdf) continue;
+      if (delivered) continue;
       pending++;
       const completedAt = a.status_changed_at || a.updatedAt;
       if (completedAt && now - new Date(completedAt).getTime() > threeDaysMs) {

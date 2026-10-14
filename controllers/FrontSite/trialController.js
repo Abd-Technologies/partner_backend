@@ -1,5 +1,6 @@
 const ApiResponse = require("../../helper/ApiResponse");
-const { TrialJourney, TrialToken, Slot, User, FreeTrailUsers, PreConsultationProfile, sequelize } = require("../../models");
+const { TrialJourney, TrialToken, Slot, User, FreeTrailUsers, PreConsultationProfile, UserPlan, Plan, sequelize } = require("../../models");
+const { Op } = require("sequelize");
 const {
   computeState,
   computeNextBookableDay,
@@ -88,7 +89,7 @@ function serializeJourney(journey) {
     trialDays: getTrialDays(),
     // Class goal saved when her trial started (older trials: current
     // setting) and the late-join window, both from .env.
-    classGoal: journey.classGoal || getTrialClassGoal(),
+    classGoal: getTrialClassGoal() /* always the current rule, even for trials that saved an older goal */,
     joinWindowMinutes: getJoinWindowMinutes(),
     // Minutes she must stay in a class for it to count.
     attendanceMinutes: Math.round(require("../../helper/trialAttendance").minTrialAttendanceSeconds() / 60),
@@ -327,6 +328,28 @@ exports.getMyTrial = async (req, res) => {
   const journey = await getJourneyForUser(userId);
   if (!journey) {
     return res.json(ApiResponse("1", "No active trial", { journey: null, trialDays: getTrialDays() }));
+  }
+
+  // Bought / was assigned a paid package: the trial is over, whatever its
+  // day count. Payment approval, admin assignment and magic links never
+  // marked the trial converted, so the trial banner, class goal and trial
+  // pushes kept going for paying clients.
+  if (!journey.convertedAt) {
+    try {
+      const paid = await UserPlan.findOne({
+        where: {
+          userId,
+          status: true,
+          isTrial: { [Op.not]: true },
+          expireDate: { [Op.gte]: new Date() },
+        },
+        include: [{ model: Plan, attributes: ["title"], where: { title: { [Op.ne]: "Free Trial" } } }],
+        attributes: ["id"],
+      });
+      if (paid) journey.convertedAt = new Date();
+    } catch (e) {
+      console.error("[getMyTrial] paid-plan check failed:", e.message);
+    }
   }
 
   await persistDerivedState(journey);

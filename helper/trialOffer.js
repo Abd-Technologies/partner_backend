@@ -150,7 +150,7 @@ async function getTrialSummary(userId, countryName) {
   if (!journey || !journey.startedAt) return null;
 
   const days = getTrialDays();
-  const goal = journey.classGoal || getTrialClassGoal();
+  const goal = getTrialClassGoal() /* always the current rule, even for trials that saved an older goal */;
   const attended = await countTrialClassesAttended(userId, journey);
   const w = trialWindow(journey);
   const mealsLogged = await MealLog.count({
@@ -185,7 +185,20 @@ async function getTrialSummary(userId, countryName) {
   let offerOut = null;
   if (offer) {
     const items = typeof offer.items === 'string' ? JSON.parse(offer.items) : offer.items;
+    const expired = new Date(offer.expiresAt) <= new Date();
+    // Offer over: show her REAL prices for her country (today's prices
+    // from the admin's country price list, no discount).
+    let regularItems = null;
+    if (expired && !offer.redeemedAt) {
+      try {
+        const built = await buildOfferItems(userId, offer.country || countryName);
+        if (built) regularItems = built.items.map((i) => ({ ...i, offerPrice: i.listPrice }));
+      } catch (e) {
+        console.error('[trialOffer] regular prices', userId, e.message);
+      }
+    }
     offerOut = {
+      regularItems,
       percent: offer.percent,
       currency: offer.currency,
       country: offer.country,

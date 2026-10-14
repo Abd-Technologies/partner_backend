@@ -1,6 +1,77 @@
 const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
-const { ClassPresence, Slot } = require("../../models");
+const moment = require("moment-timezone");
+const { ClassPresence, Slot, TrialJourney, UserPlan, Plan } = require("../../models");
+const { getTrialDays, getJoinWindowMinutes } = require("../../helper/trialState");
+const { activeUserPlanWhere } = require("../../helper/activePackage");
+const { parseEndAsUtc } = require("../../helper/timeFormats");
+
+// Free-trial users may only join in the first N minutes of a class
+// (TRIAL_JOIN_WINDOW_MINUTES, default 10). Paid workout clients are never
+// limited. Returns the minutes late when she's a trial user past the
+// window, otherwise null.
+async function trialLateMinutes(userId, slot) {
+  if (!TrialJourney) return null;
+  const journey = await TrialJourney.findOne({
+    where: {
+      userId,
+      convertedAt: null,
+      startedAt: { [Op.gte]: moment().subtract(getTrialDays(), "days").toDate() },
+    },
+    attributes: ["id"],
+  });
+  if (!journey) return null;
+  // Bought a workout / combined package: not a trial user any more.
+  const paid = await UserPlan.findOne({
+    where: { userId, ...activeUserPlanWhere(), isTrial: { [Op.not]: true } },
+    include: [{ model: Plan, attributes: [], where: { CategoryId: { [Op.in]: [2, 3] } } }],
+    attributes: ["id"],
+  });
+  if (paid) return null;
+  const todayPkt = moment.tz("Asia/Karachi");
+  const startUtc = parseEndAsUtc(slot.start, todayPkt);
+  if (!startUtc) return null;
+  const window = getJoinWindowMinutes();
+  const late = moment.utc().diff(startUtc, "minutes", true);
+  if (late <= window) return null;
+
+  // Rejoin rule: she joined THIS class today on time (within the window),
+  // so she can come back anytime until it ends (dropped internet, app
+  // crash, tapped Leave by mistake). The window only applies to the
+  // first join.
+  const joinedOnTime = await ClassPresence.findOne({
+    where: {
+      userId,
+      slotId: slot.id,
+      joinedAt: {
+        [Op.gte]: todayPkt.clone().startOf("day").toDate(),
+        [Op.lte]: startUtc.clone().add(window, "minutes").toDate(),
+      },
+    },
+    attributes: ["id"],
+  });
+  if (joinedOnTime) {
+    const endUtc = parseEndAsUtc(slot.end, todayPkt);
+    if (!endUtc || moment.utc().isBefore(endUtc)) return null;
+  }
+  return Math.floor(late);
+}
+
+// Total seconds she spent in this class today across all her joins
+// (rejoins add up: 8:08-8:15 + 8:20-8:40 = 27 min).
+async function secondsInClassToday(userId, slotId, currentId, currentSeconds) {
+  const todayStart = moment.tz("Asia/Karachi").startOf("day").toDate();
+  const rows = await ClassPresence.findAll({
+    where: { userId, slotId, joinedAt: { [Op.gte]: todayStart } },
+    attributes: ["id", "durationSeconds"],
+  });
+  let total = 0;
+  for (const r of rows) {
+    total += r.id === currentId ? currentSeconds : Number(r.durationSeconds) || 0;
+  }
+  if (!rows.some((r) => r.id === currentId)) total += currentSeconds;
+  return total;
+}
 const {
   markTrialAttendanceIfEligible,
   minTrialAttendanceSeconds,
@@ -51,9 +122,23 @@ exports.join = async (req, res) => {
     });
 
     if (presence) {
+      // Already in the class (e.g. reconnecting): always allowed.
       presence.lastSeenAt = now;
       await presence.save();
     } else {
+      const lateBy = await trialLateMinutes(userId, slot);
+      if (lateBy != null) {
+        console.log(
+          `[class-analytics] TRIAL_JOIN_BLOCKED_LATE: userId=${userId} slotId=${slotId} lateBy=${lateBy}m`
+        );
+        return res.json(
+          ApiResponse("0", `Trial classes are joined within the first ${getJoinWindowMinutes()} minutes.`, {
+            code: "TRIAL_LATE",
+            lateMinutes: lateBy,
+            joinWindowMinutes: getJoinWindowMinutes(),
+          })
+        );
+      }
       presence = await ClassPresence.create({
         userId,
         slotId,
@@ -118,10 +203,11 @@ exports.leave = async (req, res) => {
     presence.leftAt = presence.leftAt || now;
     presence.durationSeconds = durationSeconds;
 
+    const totalSeconds = await secondsInClassToday(userId, slotId, presence.id, durationSeconds);
     const trialResult = await markTrialAttendanceIfEligible({
       userId,
       slotId,
-      durationSeconds,
+      durationSeconds: totalSeconds,
       attendedAt: presence.leftAt,
     });
 

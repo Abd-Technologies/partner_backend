@@ -25,15 +25,17 @@ const WINDOWS = [
 
 async function isDelivered(userId, doneAt) {
   const ai = await DietPlan.findOne({
-    where: { userId, activatedAt: { [Op.gte]: doneAt } },
+    // A cancelled plan doesn't count as delivered.
+    where: { userId, activatedAt: { [Op.gte]: doneAt }, status: { [Op.ne]: "cancelled" } },
     attributes: ["id"],
   });
-  if (ai) return true;
-  const pdf = await PdfDietsForUserNew.findOne({
-    where: { userId, createdAt: { [Op.gte]: doneAt } },
-    attributes: ["id"],
-  });
-  return !!pdf;
+  return !!ai;
+  // Legacy PDF diet plan — disabled; only the AI plan counts now.
+  // const pdf = await PdfDietsForUserNew.findOne({
+  //   where: { userId, createdAt: { [Op.gte]: doneAt } },
+  //   attributes: ["id"],
+  // });
+  // return !!pdf;
 }
 
 async function adminTokens() {

@@ -1,6 +1,6 @@
 const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
-const { EscalationTicket, User, Day7Review } = require("../../models");
+const { EscalationTicket, User, Day7Review, Appointment } = require("../../models");
 const { notifyClientFlagResolved } = require("../../helper/escalation");
 const { isUnscopedRole } = require("../../helper/dietitianScope");
 
@@ -53,11 +53,58 @@ exports.listTickets = async (req, res) => {
       offset,
     });
 
+    // Meet attendance for tickets about a consultation, so staff can
+    // check a disputed no-show: did the dietitian / client actually
+    // join the Google Meet call, and under which names.
+    const tickets = rows.map((r) => r.toJSON());
+    const payloadOf = (t) => {
+      if (!t.payload) return {};
+      if (typeof t.payload === "string") {
+        try { return JSON.parse(t.payload) || {}; } catch (_) { return {}; }
+      }
+      return t.payload;
+    };
+    const apptIds = [
+      ...new Set(
+        tickets
+          .map((t) => parseInt(payloadOf(t).appointmentId, 10))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      ),
+    ];
+    if (apptIds.length) {
+      const appts = await Appointment.findAll({
+        where: { id: { [Op.in]: apptIds } },
+        attributes: [
+          "id", "status", "meetAttendanceCheckedAt", "meetDietitianAttended",
+          "meetClientAttended", "meetAttendanceRaw",
+        ],
+      });
+      const byId = new Map(appts.map((a) => [a.id, a]));
+      for (const t of tickets) {
+        const a = byId.get(parseInt(payloadOf(t).appointmentId, 10));
+        if (!a) continue;
+        let names = [];
+        try {
+          names = (JSON.parse(a.meetAttendanceRaw || "[]") || []).map((p) => ({
+            name: p.label,
+            joinedAt: p.joinedAt,
+            leftAt: p.leftAt,
+          }));
+        } catch (_) {}
+        t.attendance = {
+          checked: !!a.meetAttendanceCheckedAt,
+          dietitianJoined: a.meetDietitianAttended, // true / false / null = unknown
+          clientJoined: a.meetClientAttended,
+          participants: names,
+        };
+      }
+    }
+
     return res.json(
       ApiResponse("1", "Escalations fetched", {
         limit,
         offset,
-        tickets: rows.map((r) => r.toJSON()),
+        tickets,
       })
     );
   } catch (err) {

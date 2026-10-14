@@ -264,13 +264,18 @@ exports.getAllClients = async (req, res, next) => {
             userId: { [Op.in]: assignedIds },
             dietitianId: id,
             activatedAt: { [Op.ne]: null },
+            // Sent then cancelled = not delivered; keeps her in "Plans to deliver".
+            status: { [Op.ne]: "cancelled" },
           },
           attributes: ["id", "userId", "activatedAt"],
         }),
-        PdfDietsForUserNew.findAll({
-          where: { userId: { [Op.in]: assignedIds } },
-          attributes: ["id", "userId", "createdAt"],
-        }),
+        // Legacy PDF diet plan — disabled; only the AI plan counts now.
+        // Empty list keeps the destructuring slot below unchanged.
+        Promise.resolve([]),
+        // PdfDietsForUserNew.findAll({
+        //   where: { userId: { [Op.in]: assignedIds } },
+        //   attributes: ["id", "userId", "createdAt"],
+        // }),
         Day7Review.findAll({
           where: {
             userId: { [Op.in]: assignedIds },
@@ -341,7 +346,7 @@ exports.getAllClients = async (req, res, next) => {
       if (!(lastDeliveredAtByUser.get(userId) >= t)) lastDeliveredAtByUser.set(userId, t);
     };
     for (const p of dietPlans) noteDelivery(p.userId, p.activatedAt);
-    for (const p of pdfRows) noteDelivery(p.userId, p.createdAt);
+    // for (const p of pdfRows) noteDelivery(p.userId, p.createdAt); // legacy PDF — disabled
     const flaggedUserIds = new Set(flaggedReviews.map((r) => r.userId));
     const latestDraftByUser = new Map();
     for (const d of draftPlans) {

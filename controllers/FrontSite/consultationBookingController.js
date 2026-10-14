@@ -1,5 +1,6 @@
 const { Op } = require("sequelize");
 const ApiResponse = require("../../helper/ApiResponse");
+const db = require("../../models");
 const { createEscalation } = require("../../helper/escalation");
 const sendNotification = require("../../helper/notification");
 const { resolveDietitianNoShow, resolveClientNoShow } = require("../../helper/noShowResolution");
@@ -14,6 +15,7 @@ const {
   TimeDietition,
   User,
 } = require("../../models");
+const bookingPolicy = require("../../helper/bookingPolicy");
 
 // Sequelize's DATE column comes back as a native JS Date instance for this
 // dialect config — `String(date)` (used elsewhere in this file for the
@@ -38,7 +40,10 @@ function isAwaitingConsultant(appt) {
   if (!appt || appt.status !== "confirmed" || appt.noShowReportedAt) {
     return false;
   }
-  const minutesLate = (Date.now() - new Date(appt.date).getTime()) / 60000;
+  // appt.date is only the DAY; the start time comes from the slot.
+  const start = bookingPolicy.sessionStartSync(appt, appt.SlotDiet);
+  if (!start) return false;
+  const minutesLate = (Date.now() - start.getTime()) / 60000;
   return minutesLate >= NO_SHOW_GRACE_MINUTES && minutesLate < NO_SHOW_STALE_HOURS * 60;
 }
 
@@ -151,75 +156,9 @@ exports.getDietitianAvailability = async (req, res) => {
   }
 };
 
-// POST /appointment/:id/no-show
-// User reports the dietitian didn't show up. Stamps noShowReportedAt and
-// opens a CONSULT_NO_SHOW escalation. Both dietitian + admin notified
-// (Section 12 trigger 3).
-exports.reportNoShow = async (req, res) => {
-  try {
-    const userId = req.user && req.user.id;
-    if (!userId) return res.json(ApiResponse("0", "Unauthorized", {}));
-
-    const apptId = parseInt(req.params.id, 10);
-    if (!Number.isInteger(apptId) || apptId <= 0) {
-      return res.json(ApiResponse("0", "Invalid appointment id", {}));
-    }
-
-    const appt = await Appointment.findByPk(apptId);
-    if (!appt) return res.json(ApiResponse("0", "Appointment not found", {}));
-    if (appt.userId !== userId) {
-      return res.json(ApiResponse("0", "Not your appointment", {}));
-    }
-
-    if (appt.noShowReportedAt) {
-      return res.json(
-        ApiResponse("0", "No-show already reported for this appointment", {})
-      );
-    }
-
-    // Cancels the appointment (freeing it up for a fresh, free rebook)
-    // and notifies the client, instead of just stamping a timestamp and
-    // leaving the booking stuck at "confirmed" indefinitely.
-    await resolveDietitianNoShow(appt, { actorUserId: userId });
-
-    try {
-      await createEscalation({
-        userId,
-        dietitianId: appt.dietitionId,
-        trigger: "CONSULT_NO_SHOW",
-        severity: "high",
-        payload: {
-          appointmentId: appt.id,
-          scheduledDate: appt.date,
-          reason: (req.body && req.body.reason) || null,
-        },
-      });
-    } catch (e) {
-      console.error("[consultationBooking] escalation create failed:", e);
-    }
-
-    // Retire the consultant-no-show popup for this user.
-    try {
-      const variable = "POPUP_CONSULTANT_NO_SHOW";
-      const existing = await PendingPopupState.findOne({
-        where: { userId, popupVariable: variable, completedAt: null },
-        order: [["createdAt", "DESC"]],
-      });
-      if (existing) {
-        await existing.update({ completedAt: new Date() });
-      }
-    } catch (e) {
-      console.error("[consultationBooking] popup retire failed:", e);
-    }
-
-    return res.json(
-      ApiResponse("1", "No-show reported", { appointment: appt.toJSON() })
-    );
-  } catch (err) {
-    console.error("[consultationBooking] reportNoShow:", err);
-    return res.json(ApiResponse("0", "Failed to report no-show", {}));
-  }
-};
+// (Removed Oct 2026: POST /appointment/:id/no-show, the client's
+// "my dietitian didn't join" report. The server decides no-shows now —
+// see helper/noShowResolution.js and helper/checkMeetAttendance.js.)
 
 // GET /appointment/me/current
 // Auth: validateToken
@@ -300,6 +239,43 @@ exports.getMyCurrentAppointment = async (req, res) => {
       });
     }
 
+    // Priority 3a (fallback): the DIETITIAN cancelled it (free days were
+    // added). Shown for 48h with the same "pick a new time" card.
+    if (!appt) {
+      const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      appt = await Appointment.findOne({
+        where: {
+          userId,
+          status: "canceled",
+          noShowBonusDays: { [Op.gt]: 0 },
+          noShowReportedAt: null,
+          clientNoShowAt: null,
+          status_changed_at: { [Op.gte]: cutoff },
+        },
+        include: includeOpts,
+        order: [["status_changed_at", "DESC"]],
+      });
+    }
+
+    // Priority 3b (fallback): the CLIENT missed the session (dietitian
+    // tapped "Client didn't join", or Meet attendance showed only the
+    // dietitian). Shown for 48h so she sees "you missed this session"
+    // and what to do next, instead of the card silently disappearing.
+    if (!appt) {
+      const RECENT_CLIENT_NOSHOW_WINDOW_HOURS = 48;
+      const cutoff = new Date(Date.now() - RECENT_CLIENT_NOSHOW_WINDOW_HOURS * 60 * 60 * 1000);
+      appt = await Appointment.findOne({
+        where: {
+          userId,
+          status: "canceled",
+          clientNoShowAt: { [Op.ne]: null },
+          status_changed_at: { [Op.gte]: cutoff },
+        },
+        include: includeOpts,
+        order: [["status_changed_at", "DESC"]],
+      });
+    }
+
     // Priority 4 (fallback): the dietitian never even confirmed the
     // booking and it auto-expired (see resolveUnconfirmedExpiry). Same
     // short-window idea as Priority 3, but for "never confirmed" rather
@@ -330,6 +306,8 @@ exports.getMyCurrentAppointment = async (req, res) => {
     const dietitianName = dietitian
       ? `${dietitian.firstName || ""} ${dietitian.lastName || ""}`.trim()
       : null;
+    // Change-policy state for this package (helper/bookingPolicy.js).
+    const policyPlan = await bookingPolicy.planForAppointment(appt);
 
     return res.json(
       ApiResponse("1", "Appointment fetched", {
@@ -365,12 +343,37 @@ exports.getMyCurrentAppointment = async (req, res) => {
           // state on the client — never true for an ordinary
           // client/dietitian-initiated cancellation.
           noShow: appt.status === "canceled" && !!appt.noShowReportedAt,
+          // Free days added to her package for that missed session.
+          noShowBonusDays: appt.noShowBonusDays || 0,
+          // She (the client) missed this session; drives the "you missed
+          // your session" card. Never true for a dietitian no-show.
+          clientNoShow: appt.status === "canceled" && !!appt.clientNoShowAt,
+          // Her dietitian cancelled it (free days added).
+          dietitianCanceled:
+            appt.status === "canceled" &&
+            !appt.noShowReportedAt &&
+            !appt.clientNoShowAt &&
+            (appt.noShowBonusDays || 0) > 0,
+          // Session rating: drives the "How was your session?" card on a
+          // completed consultation. True once she has rated it.
+          reviewed:
+            appt.status === "completed"
+              ? !!(await db.AppointmentReview.findOne({
+                  where: { appointmentId: appt.id },
+                  attributes: ["id"],
+                }))
+              : false,
           // True only for the Priority-4 fallback above: a canceled
           // appointment specifically caused by the dietitian never
           // confirming it in time (as opposed to noShow, where she DID
           // confirm but never joined). Drives the "please reschedule"
           // card state on the client.
           expired: appt.status === "canceled" && !!appt.expiredAt,
+          // Change policy: reschedule only until 24h before; inside 24h
+          // she may cancel only while her one free late change is unused.
+          lateChangeAvailable: bookingPolicy.lateChangeAvailable(policyPlan),
+          bookingLocked: bookingPolicy.bookingLocked(policyPlan),
+          lateChangeHours: bookingPolicy.LATE_CHANGE_HOURS,
         },
       })
     );
@@ -417,10 +420,29 @@ exports.cancelMyAppointment = async (req, res) => {
       );
     }
 
+    // Change policy: cancelling inside 24h uses her one free late change
+    // for this package; once it's used she can't cancel late any more.
+    const late = await bookingPolicy.isInsideLateWindow(appt);
+    const policyPlan = late ? await bookingPolicy.planForAppointment(appt) : null;
+    if (late && !bookingPolicy.lateChangeAvailable(policyPlan)) {
+      return res.json(
+        ApiResponse("0", bookingPolicy.MSG.noLateChange, { code: "LATE_CHANGE_USED" })
+      );
+    }
+
     appt.status = "canceledByUser";
     appt.completed_by = userId;
     appt.status_changed_at = new Date();
     await appt.save();
+
+    if (late && policyPlan) {
+      try {
+        policyPlan.lateChangeUsedAt = new Date();
+        await policyPlan.save();
+      } catch (e) {
+        console.error("[consultationBooking] lateChangeUsedAt save failed:", e);
+      }
+    }
 
     try {
       const [dietitian, user] = await Promise.all([
@@ -483,7 +505,10 @@ exports.reportClientNoShow = async (req, res) => {
     if (!["confirmed", "In Progress", "completed"].includes(appt.status)) {
       return res.json(ApiResponse("0", "This consultation can't be marked as missed", {}));
     }
-    const minutesSinceStart = (Date.now() - new Date(appt.date).getTime()) / 60000;
+    const realStart = await bookingPolicy.sessionStart(appt);
+    const minutesSinceStart = realStart
+      ? (Date.now() - realStart.getTime()) / 60000
+      : (Date.now() - new Date(appt.date).getTime()) / 60000;
     if (minutesSinceStart < NO_SHOW_GRACE_MINUTES) {
       const wait = Math.ceil(NO_SHOW_GRACE_MINUTES - minutesSinceStart);
       return res.json(

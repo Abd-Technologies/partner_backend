@@ -164,8 +164,16 @@ async function submitTrialQuickIntake(req, res) {
     const TRIAL_PLAN_DAYS = getTrialDays();
     const result = await generateDietPlan(userInput, TRIAL_PLAN_DAYS, null);
     if (!result.success) {
+      // Log the real reason for us; the client sees a friendly message.
+      // "invalid_grant" here means the server's Google (Vertex AI) login
+      // has expired: run `gcloud auth application-default login` on the
+      // server (or use a service account in production).
+      console.error('[submitTrialQuickIntake] AI generation failed:', result.error);
+      const authProblem = /invalid_grant|invalid_rapt|reauth|credential/i.test(String(result.error || ''));
       return res.json(
-        ApiResponse('0', result.error || 'Could not generate your plan yet — please try again', {
+        ApiResponse('0', authProblem
+          ? "We couldn't create your plan right now. Our team has been notified, please try again in a little while."
+          : 'Could not generate your plan yet. Please try again.', {
           validation: result.validation || null,
         })
       );

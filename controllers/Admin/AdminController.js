@@ -881,6 +881,38 @@ async function update_slot_status(req, res) {
       return res.json(ApiResponse("0", "No slot available with the given ID.", {}));
     }
 
+    // A class the server auto-cancelled (not started 10 min after its
+    // time, see helper/autoCancelLateClasses.js) stays cancelled: clients
+    // were already told and sent to the next class.
+    if (
+      slot.status === "Cancelled" &&
+      slot.completed_by == null &&
+      status === "In Progress"
+    ) {
+      return res.json(
+        ApiResponse("0", "This class was auto-cancelled because it didn't start within 10 minutes. Clients have been notified.", {})
+      );
+    }
+
+    // Only the class's trainer or an admin can change it (clients could
+    // call this endpoint before — anyone logged in could start/cancel).
+    const actor = req.user && req.user.id
+      ? await User.findByPk(req.user.id, { attributes: ["id", "userType"] })
+      : null;
+    const isAdmin = actor && actor.userType === (process.env.ADMIN || "Admin");
+    if (!actor || (!isAdmin && Number(slot.trainerId) !== Number(actor.id))) {
+      return res.json(ApiResponse("0", "Only this class's trainer can change it.", {}));
+    }
+
+    // Start needs a room: the trainer's Zoom room (set once by admin) or
+    // today's "Other link".
+    if (status === "In Progress" && !slot.effectiveLink()) {
+      return res.json(
+        ApiResponse("0", "No Zoom room is set for you yet. Ask admin to add it, or use \"Other link\" for today.", { noRoom: true })
+      );
+    }
+    const prevStatus = slot.status;
+
     // Update slot status. Capture the actor (req.user.id from validateToken)
     // and the change time so the audit log can distinguish manual ends
     // from auto-end cron flips. Auto-end intentionally writes NULL into
@@ -910,47 +942,79 @@ async function update_slot_status(req, res) {
       where: { id: slot.trainerId },
     });
 
-    // Create notification message
-    let title = "";
-    let body = "";
-
-    if (status === "Cancelled") {
-      title = "Class Cancelled";
-      body = "Sorry, your upcoming class has been cancelled.";
-    } else if (status === "In Progress") {
-      title = "Sweat Now, Selfies Later";
-      body = "Join the session now.";
-    } else {
-      title = "Class Link Added";
-      body = "Join the session now.";
+    // Live update for every open app. The class link is inside only while
+    // the class is live (models/Slot.js), so the card flips to "Join now".
+    const plainSlot = slot.get({ plain: true });
+    const data = {
+      upcomingSlot: JSON.stringify(plainSlot),
+      trainer: JSON.stringify(trainer ?? { id: 0, firstName: "", lastName: "", email: "" }),
+    };
+    try {
+      getIO().emit("slotUpdate", data);
+    } catch (e) {
+      console.error("[update_slot_status] socket emit failed:", e.message);
     }
 
-    const data = {
-      upcomingSlot: JSON.stringify(slot),
-      trainer: JSON.stringify(trainer),
-    };
+    // Pushes (Oct 2026): only "it's live" and "cancelled". Confirm /
+    // Completed / anything else send nothing.
+    if (status === "In Progress" && prevStatus !== "In Progress") {
+      try {
+        const { getClassAudience } = require("../../helper/classAudience");
+        const audience = await getClassAudience(slot);
+        const type = (slot.type || slot.description || "Your class").trim();
+        const withTrainer = trainer && trainer.firstName ? ` with ${trainer.firstName}` : "";
+        const { getJoinWindowMinutes } = require("../../helper/trialState");
+        const win = getJoinWindowMinutes();
+        const paidTokens = audience.filter((u) => !u.isTrial).map((u) => u.deviceToken).filter(Boolean);
+        const trialTokens = audience.filter((u) => u.isTrial).map((u) => u.deviceToken).filter(Boolean);
+        // upcomingSlot + trainer: OLD app versions (no class watcher) use
+        // this payload to flip their card to "Join now" when the socket was
+        // disconnected. Hidden data, never shown in the notification text.
+        const pushData = {
+          type: "classStart",
+          slotId: String(slot.id),
+          upcomingSlot: data.upcomingSlot,
+          trainer: data.trainer,
+        };
+        if (paidTokens.length) {
+          await notificationQueue.add({
+            title: "Your class is live 🔔",
+            body: `${type}${withTrainer} has started. Join now 💪`,
+            data: pushData,
+            deviceTokens: Array.from(new Set(paidTokens)),
+          });
+        }
+        if (trialTokens.length) {
+          await notificationQueue.add({
+            title: "Your class is live 🔔",
+            body: `${type}${withTrainer} has started. You have ${win} minutes to join 💪`,
+            data: pushData,
+            deviceTokens: Array.from(new Set(trialTokens)),
+          });
+        }
+      } catch (e) {
+        console.error("[update_slot_status] live push failed:", e.message);
+      }
+    } else if (status === "Cancelled" && prevStatus !== "Cancelled") {
+      // Same warm message, next class and popup as the auto-cancel.
+      try {
+        const { announceCancelled } = require("../../helper/autoCancelLateClasses");
+        await announceCancelled(slot, { late: false });
+      } catch (e) {
+        console.error("[update_slot_status] cancel notice failed:", e.message);
+      }
+    }
 
-    // Emit socket event
-
-    const io = getIO();
-    console.log("⏳ Emitting slotUpdate...");
-    io.emit("slotUpdate", data);
-    console.log("✅ slotUpdate emitted successfully");
-
-    // title/body were built above but never sent anywhere — this function
-    // emitted the socket event and stopped, so closed-app users never
-    // heard about cancellations or status changes at all. TYPE_BY_TITLE
-    // already covers all three titles used above ("Class Cancelled",
-    // "Sweat Now, Selfies Later", "Class Link Added"), so no explicit
-    // data.type is needed here either.
-    const deviceTokens = await getDeviceTokensForSlot(slot);
-    await notificationQueue.add({
-      title,
-      body,
-      data,
-      deviceTokens,
-    });
-
+    if (status === "In Progress") {
+      const { classInfo } = require("./classLinkController");
+      const withTrainerRow = await Slot.findByPk(slot.id, {
+        include: [
+          { model: User, attributes: ["id", "firstName", "lastName", "zoomRoom"] },
+          { model: Time, attributes: ["day"] },
+        ],
+      });
+      return res.json(ApiResponse("1", "Class started", classInfo(withTrainerRow)));
+    }
     return res.json(ApiResponse("1", "Slot updated successfully!", {}));
   } catch (error) {
     console.error("❌ Error in update_slot_status:", error);
@@ -2705,76 +2769,14 @@ async function trainerHome(req, res) {
 
 
 
-// async function updateLink(req, res) {
-//   const { slotId, link, userId } = req.body;
-//   const slot = await Slot.findOne({ where: { id: slotId } });
-//   const user = await User.findOne({ where: { id: userId } });
-//   if (slot) {
-//     slot.trainerLink = link;
-//     await slot.save();
-
-//     let notification = {
-//       title: "Class link Added",
-//       body: "Join the session now",
-//     };
-
-//     sendNotification([user?.deviceToken], notification);
-//     const response = ApiResponse("1", "Link updated successfully", {});
-//     return res.json(response);
-//   } else {
-//     const response = ApiResponse("0", "Slot not found", {});
-//     return res.json(response);
-//   }
-// }
+// // Old trainer app versions call this with the pasted link. It is now the
+// trainer's "Other link" for TODAY only (see classLinkController), with no
+// push and no status change — the class room comes from the trainer's
+// profile.
 async function updateLink(req, res) {
-  try {
-    const { slotId, link, channel } = req.body;
-
-    const slot = await Slot.findOne({ where: { id: slotId } });
-
-    if (!slot) {
-      return res.json(ApiResponse("0", "Slot not found", {}));
-    }
-
-    slot.trainerLink = link;
-    slot.status = "Class is starting soon";
-
-    await slot.save();
-
-    const trainer = await User.findOne({
-      attributes: ["id", "firstName", "lastName", "email"],
-      where: {
-        id: slot?.trainerId
-      },
-    });
-
-
-    let data = {
-      "upcomingSlot": JSON.stringify(slot ?? {}),
-      "trainer": JSON.stringify(trainer ?? {}),
-    };
-
-    const io = getIO();
-    console.log("⏳ Emitting slotUpdate...");
-    io.emit("slotUpdate", data);
-    console.log("✅ slotUpdate emitted successfully");
-
-    // deviceTokens was previously omitted here, which meant the worker
-    // always found an empty recipient list and silently dropped the push.
-    // TYPE_BY_TITLE in helper/notification.js already maps "Class Link
-    // Added" → classLinkAdded, so no explicit data.type is needed.
-    const deviceTokens = await getDeviceTokensForSlot(slot);
-    await notificationQueue.add({
-      title: "Class Link Added",
-      body: "Class is starting soon",
-      data: data,
-      deviceTokens,
-    });
-
-    return res.json(ApiResponse("1", "Link updated. Notifications will be sent.", {}));
-  } catch (error) {
-    return res.json(ApiResponse("0", error.message, {}));
-  }
+  const { setBackupLink } = require("./classLinkController");
+  req.body = { slotId: req.body && req.body.slotId, link: req.body && req.body.link };
+  return setBackupLink(req, res);
 }
 
 async function updateTrainerJoin(req, res) {
@@ -3570,7 +3572,7 @@ async function addReview(req, res) {
   rating.comment = comment;
   rating.value = value;
   rating.PlanId = PlanId;
-  rating.userId = userId;
+  rating.userId = (req.user && req.user.id) || userId;
   rating.classReview = classReview;
   rating.trainerOrDiet = trainerOrDiet;
 
@@ -3589,8 +3591,8 @@ async function addReview(req, res) {
 }
 
 async function getReviews(req, res) {
-  let ratings = await Review({});
-  return res.json(ratings);
+  const ratings = await Review.findAll({ order: [["createdAt", "DESC"]], limit: 500 });
+  return res.json(ApiResponse("1", "ok", { reviews: ratings }));
 }
 
 async function syncrhonize(req, res) {

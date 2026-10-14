@@ -24,6 +24,7 @@ const { normalizeSlotTime } = require('./normalizeSlotTime');
 const { minTrialAttendanceSeconds } = require('./trialAttendance');
 const { getTrialDays, getJoinWindowMinutes } = require('./trialState');
 const sendNotification = require('./notification');
+const { isHerClass, normTime } = require('./classAudience');
 
 const PKT = 'Asia/Karachi';
 const SLOT_FORMAT = 'hh:mm A';
@@ -63,19 +64,25 @@ async function countTrialClassesAttended(userId, journey) {
   if (!journey || !journey.startedAt) return 0;
   const start = new Date(journey.startedAt);
   const end = new Date(start.getTime() + getTrialDays() * 86400000);
+  // Time in the same class on the same day adds up across rejoins
+  // (8:08-8:15 + 8:20-8:40 counts as one attended class).
   const rows = await ClassPresence.findAll({
     where: {
       userId,
       joinedAt: { [Op.between]: [start, end] },
-      durationSeconds: { [Op.gte]: minTrialAttendanceSeconds() },
     },
-    attributes: ['slotId', 'joinedAt'],
+    attributes: ['slotId', 'joinedAt', 'durationSeconds'],
     raw: true,
   });
-  const seen = new Set(
-    rows.map((r) => `${r.slotId}|${moment(r.joinedAt).tz(PKT).format('YYYY-MM-DD')}`)
-  );
-  return seen.size;
+  const totals = new Map();
+  for (const r of rows) {
+    const key = `${r.slotId}|${moment(r.joinedAt).tz(PKT).format('YYYY-MM-DD')}`;
+    totals.set(key, (totals.get(key) || 0) + (Number(r.durationSeconds) || 0));
+  }
+  const min = minTrialAttendanceSeconds();
+  let count = 0;
+  for (const secs of totals.values()) if (secs >= min) count++;
+  return count;
 }
 
 // ── Class picker data ────────────────────────────────────────────────
@@ -310,28 +317,31 @@ async function sendTrialClassReminders() {
       const user = await User.findByPk(j.userId, {
         attributes: ['id', 'deviceToken', 'timeZone', 'status'],
       });
-      if (!user || !user.deviceToken || user.status === true) continue;
+      // (Used to skip users with status=true, but running trial users can
+      // have it on too, so they never got their class reminders.)
+      if (!user || !user.deviceToken) continue;
 
       const profile = await PreConsultationProfile.findOne({ where: { userId: j.userId } });
       const ws = asJson(profile && profile.workoutSection, {}) || {};
       const picked = Array.isArray(ws.preferredSlotIds) ? ws.preferredSlotIds.map(Number) : [];
-      if (picked.length === 0) continue;
+      const times = Array.isArray(ws.preferredTimes) ? ws.preferredTimes.map(normTime).filter(Boolean) : [];
+      // No picks = she chose "All classes": every class is hers (isHerClass).
 
-      // Already joined a class today: no class reminders needed.
-      const joinedToday = await ClassPresence.findOne({
-        where: { userId: j.userId, joinedAt: { [Op.gte]: todayPkt.toDate() } },
-        attributes: ['id'],
-      });
-      if (joinedToday) continue;
+      // Reminders keep going for all her picked classes, even after she
+      // joined one today (product decision, Oct 2026).
 
+      // Today's classes that are hers: matched by id OR by her picked time,
+      // so picks still work after classes are re-created with new ids
+      // (e.g. scripts/copyMondaySlotsToWeek.js).
       const todayName = todayPkt.format('dddd');
+      const her = { picks: picked, times, timeZone: user.timeZone, once: require('./classAudience').onceToday(ws) };
       const slots = (await Slot.findAll({
-        where: { id: { [Op.in]: picked } },
+        where: { trainerId: { [Op.ne]: null } },
         include: [
           { model: User, attributes: ['firstName'] },
-          { model: Time, attributes: ['day'], required: false },
+          { model: Time, attributes: ['day'], where: { day: todayName } },
         ],
-      })).filter((s) => !s.Time || !s.Time.day || s.Time.day === todayName);
+      })).filter((s) => s.status !== 'Cancelled' && isHerClass(her, s));
       // Her next picked class that she can still join today.
       const upcoming = slots
         .map((s) => ({ s, at: slotMomentOn(s.start, todayPkt) }))
@@ -354,13 +364,11 @@ async function sendTrialClassReminders() {
           title: `Your ${local} class starts soon`,
           body: `${type}${withTrainer}. Join in the first ${windowMin} minutes for the full warm-up 💪`,
         };
-      } else if (mins <= 0 && mins > -5) {
-        kind = 'live';
-        msg = {
-          title: "It's live! 🔔",
-          body: `You have ${windowMin} minutes to join ${type}${withTrainer}.`,
-        };
       }
+      // (Oct 2026) No clock-based "It's live!" any more: it went out even
+      // when the trainer hadn't started (or she'd already joined). The real
+      // "Your class is live" push is sent when the trainer taps Start
+      // (AdminController.update_slot_status), to trial and paid alike.
       if (!kind) continue;
       if (!(await claimReminder(j.userId, dayKey, `${kind}:${upcoming.at.format('HHmm')}`))) continue;
 
