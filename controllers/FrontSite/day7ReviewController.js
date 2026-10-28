@@ -199,3 +199,6 @@ exports.submitReview = async (req, res) => {
     return res.json(ApiResponse("0", "Failed to submit review", {}));
   }
 };
+
+// Shared with the weekly check-in (weeklyCheckinController.js).
+exports.resolveDietitianId = resolveDietitianId;

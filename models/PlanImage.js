@@ -35,6 +35,18 @@ module.exports = (sequelize, DataTypes) => {
       ocrSender:          { type: DataTypes.STRING(120), allowNull: true },
       ocrReceiver:        { type: DataTypes.STRING(120), allowNull: true },
       ocrTransactionId:   { type: DataTypes.STRING(80),  allowNull: true },
+      // Payment check after an AI (auto) approval — helper/paymentVerify.js.
+      // pending → received | held (48 h, not confirmed) | not_received
+      verifyStatus:       { type: DataTypes.STRING(16),  allowNull: true },
+      verifyUserPlanId:   { type: DataTypes.INTEGER,     allowNull: true },
+      verifyExtended:     { type: DataTypes.BOOLEAN,     allowNull: true },
+      verifyDays:         { type: DataTypes.INTEGER,     allowNull: true },
+      verifyStartedAt:    { type: DataTypes.DATE,        allowNull: true },
+      verifyReminders:    { type: DataTypes.INTEGER,     allowNull: false, defaultValue: 0 },
+      heldAt:             { type: DataTypes.DATE,        allowNull: true },
+      verifiedAt:         { type: DataTypes.DATE,        allowNull: true },
+      verifiedBy:         { type: DataTypes.INTEGER,     allowNull: true },
+      userProof:          { type: DataTypes.STRING(255), allowNull: true },
     });
     
   
@@ -46,6 +58,12 @@ module.exports = (sequelize, DataTypes) => {
     //   });
     };
   
+
+    // Payment attempts (analytics add-on): every slip, from any path
+    // (app upload, sales rep CRM, magic link), starts as "pending".
+    PlanImage.addHook('afterCreate', (img) => {
+      try { require('../helper/purchaseLedger').slipCreated(img); } catch (_) {}
+    });
 
     return PlanImage;
   };

@@ -57,10 +57,22 @@ function computeNextBookableDay(journey) {
  * shows (banner, home switch). Clamped to 1..14 (the AI plan supports
  * up to 14 days). The live classes stay 3 bookable sessions.
  */
-function getTrialDays() {
+function envTrialDays() {
   const n = parseInt(process.env.TRIAL_DAYS, 10);
   if (!Number.isInteger(n)) return 3;
   return Math.min(Math.max(n, 1), 14);
+}
+
+// Oct 2026: the admin can set the trial length in the app/portal
+// (helper/trialDaysSetting.js). That value wins; .env stays the default.
+function getTrialDays() {
+  try {
+    const admin = require("./trialDaysSetting").adminTrialDays();
+    if (admin != null) return admin;
+  } catch (_) {
+    /* settings not available: fall back to .env */
+  }
+  return envTrialDays();
 }
 
 /**
@@ -102,6 +114,7 @@ module.exports = {
   computeNextBookableDay,
   isTrialExpired,
   getTrialDays,
+  envTrialDays,
   getTrialClassGoal,
   getJoinWindowMinutes,
 };

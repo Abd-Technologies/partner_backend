@@ -197,6 +197,15 @@ exports.updateOwnProfile = async (req, res) => {
     }
     if (req.body && typeof req.body.userHealthConditions === "string") {
       userUpdates.healthConditions = req.body.userHealthConditions.trim().slice(0, 255) || "none";
+    } else if (req.body && typeof req.body.medicalConditions === "string" && req.body.medicalConditions.trim()) {
+      // Oct 2026: the trial form asks "Any health conditions?" and sends
+      // medicalConditions. Copy it to User.healthConditions (what the
+      // health form checks) when that is still empty, so she isn't asked
+      // the same question twice.
+      const u = await User.findByPk(userId, { attributes: ["healthConditions"] });
+      if (u && !String(u.healthConditions || "").trim()) {
+        userUpdates.healthConditions = req.body.medicalConditions.trim().slice(0, 255);
+      }
     }
     if (Object.keys(userUpdates).length) {
       await User.update(userUpdates, { where: { id: userId } });

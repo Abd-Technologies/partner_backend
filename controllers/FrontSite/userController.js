@@ -1,7 +1,8 @@
 const { User, OtpData, UserProfile, Plan, BlackList, ShippingSchedule, Service, Time, UserPlan, Category, Contact, UserCycleData, DailyCheckin, WeeklyCheckin, NotificationPreference, UserNotification, PcosScreening, HealthScreening } = require("../../models");
 const ApiResponse = require("../../helper/ApiResponse");
 const bcrypt = require("bcryptjs");
-const { sign } = require("jsonwebtoken");
+const { issueToken, revoke, setNewToken } = require("../../helper/authToken");
+const otpStore = require("../../helper/otpStore");
 const sentOtpMail = require("../../helper/sentOtpMail");
 const Sequelize = require('sequelize');
 
@@ -35,10 +36,7 @@ async function registration(req, res) {
     user
       .save()
       .then(async (dat) => {
-        const accessToken = sign(
-          { email: user.email, id: user.id },
-          process.env.JWT_ACCESS_SECRET
-        );
+        const accessToken = issueToken(user);
         let data = {
           id: dat.id,
           firstName: dat.firstName,
@@ -77,10 +75,7 @@ async function login(req, res) {
 
     const validPassword = await bcrypt.compare(password, user.password);
     if (validPassword) {
-      const accessToken = sign(
-        { email: user.email, id: user.id },
-        process.env.JWT_ACCESS_SECRET
-      );
+      const accessToken = issueToken(user);
       let data = {
         id: user.id,
         firstName: user.firstName,
@@ -108,19 +103,32 @@ async function login(req, res) {
     return res.json(response);
   }
 }
+// Oct 2026 security pass: real logout. Needs her login token (accessToken
+// header): every token she has stops working (tokenVersion + 1) and her
+// push token is cleared. Without a valid token nothing changes on the
+// server (it used to clear ANY account's push token by deviceToken) but
+// the answer is still "1" so old apps can finish logging out locally.
 async function logout(req, res) {
   try {
-    const user = await User.findOne({ where: { deviceToken: req.body.deviceToken } });
-
-    if (user) {
-      user.deviceToken = null;
-      await user.save();
-      const response = ApiResponse("1", "Logout Successfully!", {});
-      return res.json(response); // ✅ FIXED: Add return here
-    } else {
-      const response = ApiResponse("1", "Logout Successfully!", {});
-      return res.json(response);
+    const accessToken = req.header("accessToken");
+    let userId = null;
+    if (accessToken) {
+      try {
+        userId = (await require("../../helper/authToken").verifyAccess(accessToken)).payload.id;
+      } catch (_) {
+        userId = null;
+      }
     }
+    // Member web app (client: "web"): logging out of the browser must not
+    // log the phone out or drop its push token. The browser just forgets
+    // its (7-day) token. { everywhere: true } = "log out of all devices".
+    const isWeb = req.body && req.body.client === "web";
+    const everywhere = !!(req.body && (req.body.everywhere === true || req.body.everywhere === "true"));
+    if (userId && (!isWeb || everywhere)) {
+      await User.update({ deviceToken: null }, { where: { id: userId } });
+      await revoke(userId);
+    }
+    return res.json(ApiResponse("1", "Logout Successfully!", {}));
   } catch (err) {
     console.error("Logout error:", err);
     return res.status(500).json(ApiResponse("0", "Something went wrong", { error: err.message }));
@@ -138,7 +146,15 @@ async function change_password(req, res) {
         user.password = await bcrypt.hash(new_password, salt);
         user
           .save()
-          .then((dat) => {
+          .then(async (dat) => {
+            // New password: other devices are logged out; this one gets a
+            // fresh token in the x-new-token header (the app saves it).
+            try {
+              const fresh = await revoke(user.id);
+              if (fresh) setNewToken(res, issueToken(fresh, { client: require("../../helper/authToken").clientOf(req.user) }));
+            } catch (e) {
+              console.error("change_password revoke:", e.message);
+            }
             const response = ApiResponse(
               "1",
               "Password updated successfully!",
@@ -163,13 +179,20 @@ async function change_password(req, res) {
     return res.json(response);
   }
 }
+// Password reset (Oct 2026 security pass, helper/otpStore.js):
+//   • same answer whether or not the email has an account
+//   • a code works 10 minutes; 5 wrong tries cancel it
+//   • max 3 codes per 15 minutes per email
+// Codes stay 4 digits for now (old app screens).
 async function forget_password(req, res) {
   try {
-    const rawEmail = req.body.email || "";
-    const email = rawEmail.trim().toLowerCase();
+    const email = otpStore.normEmail(req.body.email);
 
     if (!email) {
       return res.json(ApiResponse("0", "Email is required", {}));
+    }
+    if (!otpStore.requestAllowed(email)) {
+      return res.status(429).json(ApiResponse("0", otpStore.TOO_MANY_REQUESTS, {}));
     }
 
     // Attributes allowlist: schema-drift defence — `useNewProgressHub` is
@@ -181,74 +204,33 @@ async function forget_password(req, res) {
     });
 
     if (check) {
-      let checkotp = await OtpData.findOne({ where: { email: check.email } });
-      const OTP = generateOTP();
-
-      if (checkotp) {
-        checkotp.otp = OTP;
-        checkotp.requestAt = new Date();
-        checkotp.status = true;
-        await checkotp.save();
-      } else {
-        checkotp = new OtpData();
-        checkotp.requestAt = new Date();
-        checkotp.email = check.email;
-        checkotp.otp = OTP;
-        checkotp.status = true;
-        await checkotp.save();
-      }
-
+      const OTP = await otpStore.issue(email);
       // Send OTP via mail
       sentOtpMail("OTP For FitHer", `Your OTP for password reset is ${OTP}`, check.email);
-
-      const data = {
-        email: check.email,
-      };
-      return res.json(ApiResponse("1", "OTP sent successfully!", data));
-    } else {
-      return res.json(ApiResponse("0", "Sorry! User does not exist", {}));
     }
+    return res.json(ApiResponse("1", otpStore.GENERIC_SENT, { email: email }));
   } catch (error) {
     console.error("forget_password error:", error);
-    return res.json(ApiResponse("0", error.message || "Something went wrong", {}));
+    return res.json(ApiResponse("0", "Something went wrong. Please try again.", {}));
   }
 }
 
 async function verify_otp(req, res) {
   try {
-    const rawEmail = req.body.email || "";
-    const email = rawEmail.trim().toLowerCase();
+    const email = otpStore.normEmail(req.body.email);
     const otp = (req.body.otp || "").toString().trim();
 
     if (!email || !otp) {
       return res.json(ApiResponse("0", "Email and OTP are required.", {}));
     }
 
-    const otpRecord = await OtpData.findOne({ where: { email: email } });
-    if (!otpRecord) {
-      return res.json(ApiResponse("0", "No password reset was requested for this email.", {}));
-    }
-
-    // Verify OTP was recently generated (within 10 minutes)
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-    if (!otpRecord.requestAt || otpRecord.requestAt < tenMinutesAgo) {
-      return res.json(ApiResponse("0", "OTP has expired. Please request a new one.", {}));
-    }
-
-    // Verify OTP status is valid (not yet consumed)
-    if (!otpRecord.status) {
-      return res.json(ApiResponse("0", "OTP has already been used. Please request a new one.", {}));
-    }
-
-    // Verify OTP matches
-    if (String(otpRecord.otp).trim() !== otp) {
-      return res.json(ApiResponse("0", "Invalid OTP. Please check the code sent to your email.", {}));
-    }
+    const r = await otpStore.check(email, otp);
+    if (!r.ok) return res.json(ApiResponse("0", r.message, {}));
 
     return res.json(ApiResponse("1", "OTP verified successfully!", { email: email }));
   } catch (error) {
     console.error("verify_otp error:", error);
-    return res.json(ApiResponse("0", error.message || "Something went wrong", {}));
+    return res.json(ApiResponse("0", "Something went wrong. Please try again.", {}));
   }
 }
 
@@ -258,8 +240,7 @@ async function resend_otp(req, res) {
 
 async function change_password_after_otp(req, res) {
   try {
-    const rawEmail = req.body.email || "";
-    const email = rawEmail.trim().toLowerCase();
+    const email = otpStore.normEmail(req.body.email);
     const password = req.body.password;
     const otp = (req.body.otp || "").toString().trim();
 
@@ -267,27 +248,10 @@ async function change_password_after_otp(req, res) {
       return res.json(ApiResponse("0", "Email and new password are required.", {}));
     }
 
-    // 1. Verify an OTP record exists for this email
-    const otpRecord = await OtpData.findOne({ where: { email: email } });
-    if (!otpRecord) {
-      return res.json(ApiResponse("0", "No password reset was requested for this email.", {}));
-    }
-
-    // 2. Verify OTP was recently generated (within 10 minutes)
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-    if (!otpRecord.requestAt || otpRecord.requestAt < tenMinutesAgo) {
-      return res.json(ApiResponse("0", "OTP has expired. Please request a new one.", {}));
-    }
-
-    // 3. Verify OTP status is valid
-    if (!otpRecord.status) {
-      return res.json(ApiResponse("0", "OTP has already been used. Please request a new one.", {}));
-    }
-
-    // 4. Verify OTP value matches
-    if (!otp || String(otpRecord.otp).trim() !== otp) {
-      return res.json(ApiResponse("0", "Invalid OTP. Please verify the code and try again.", {}));
-    }
+    // 1-4. Code exists, not expired, not used / cancelled, matches (wrong
+    //      tries count here too).
+    const r = await otpStore.check(email, otp);
+    if (!r.ok) return res.json(ApiResponse("0", r.message, {}));
 
     // 5. Find user and update password
     const user = await User.findOne({ where: { email: email } });
@@ -300,13 +264,14 @@ async function change_password_after_otp(req, res) {
     await user.save();
 
     // 6. Invalidate OTP after successful password change
-    otpRecord.status = false;
-    await otpRecord.save();
+    await otpStore.consume(r.record);
+    // 7. New password: every old login token stops working.
+    await revoke(user.id).catch((e) => console.error("revoke:", e.message));
 
     return res.json(ApiResponse("1", "Password updated successfully!", {}));
   } catch (error) {
     console.error("change_password_after_otp error:", error);
-    return res.json(ApiResponse("0", error.message || "Something went wrong", {}));
+    return res.json(ApiResponse("0", "Something went wrong. Please try again.", {}));
   }
 }
 async function get_profile(req, res) {
@@ -471,8 +436,12 @@ async function save_cycle_data(req, res) {
     let cycleData = await UserCycleData.findOne({ where: { userId: req.user.id } });
 
     if (cycleData) {
+      // Hormonal engine (Oct 2026): a new period start teaches it her
+      // real cycle length (helper/cycleLearning.js).
+      const learned = require("../../helper/cycleLearning").learn(cycleData, lastPeriodDate, averageCycleLength);
       cycleData.lastPeriodDate = lastPeriodDate || null;
-      cycleData.averageCycleLength = averageCycleLength || 28;
+      cycleData.averageCycleLength = learned.averageCycleLength || averageCycleLength || 28;
+      if (learned.cycleHistory !== undefined) cycleData.cycleHistory = learned.cycleHistory;
       cycleData.isRegular = isRegular || null;
       if (periodDuration !== undefined) cycleData.periodDuration = periodDuration;
       if (flowType !== undefined) cycleData.flowType = flowType;
@@ -579,6 +548,9 @@ async function save_health_screening(req, res) {
       }
     }
 
+    // Paid diet clients: tell her dietitian automatically if signs went up.
+    require("../../helper/healthScreeningActions").afterSaved(screening);
+
     const response = ApiResponse("1", `${conditionType} screening saved`, { screening });
     return res.json(response);
   } catch (error) {
@@ -608,6 +580,72 @@ async function get_health_screening(req, res) {
   } catch (error) {
     const response = ApiResponse("0", error.message, {});
     return res.json(response);
+  }
+}
+
+/**
+ * GET /users/health_screening/summary — home "Check my symptoms" card.
+ * { results: latest per condition (highest risk first), planType }
+ * planType tells the card whether "Talk to a dietitian" opens her diet
+ * plan (diet / combined) or the plans screen.
+ */
+async function health_screening_summary(req, res) {
+  try {
+    const { latestByCondition } = require("../../helper/healthScreeningSummary");
+    const { planTypeForUser } = require("../../helper/preConsultRequirements");
+    const results = await latestByCondition(req.user.id);
+    let planType = null;
+    try {
+      planType = await planTypeForUser(req.user.id);
+    } catch (_) {}
+    // Condition she already has (health form / earlier result): the card
+    // becomes "Track my PCOS signs" with her trend.
+    let tracking = { known: null, history: [] };
+    try {
+      tracking = await require("../../helper/healthScreeningActions").trackingInfo(req.user.id);
+    } catch (_) {}
+    return res.json(ApiResponse("1", "Health screening summary", { results, planType, tracking }));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
+  }
+}
+
+/**
+ * POST /users/health_screening/notify-dietitian { conditionType? }
+ * "Tell my dietitian": push to her dietitian about her latest result.
+ */
+async function notify_dietitian_screening(req, res) {
+  try {
+    const { HealthScreening } = require("../../models");
+    const where = { userId: req.user.id };
+    if (req.body && req.body.conditionType) where.conditionType = req.body.conditionType;
+    const latest = await HealthScreening.findOne({ where, order: [["createdAt", "DESC"]] });
+    const r = await require("../../helper/healthScreeningActions").notifyDietitian(latest);
+    if (!r.sent) {
+      const msg = r.reason === "no_dietitian"
+        ? "You don't have a dietitian yet. Book your consultation first."
+        : "Take the check first.";
+      return res.json(ApiResponse("0", msg, r));
+    }
+    return res.json(ApiResponse("1", "Sent to your dietitian", r));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
+  }
+}
+
+/**
+ * GET /admin/healthScreening/:userId — staff view (dietitian client
+ * profile, admin). Latest result per condition, with her answers.
+ */
+async function staff_health_screening(req, res) {
+  try {
+    const { latestByCondition } = require("../../helper/healthScreeningSummary");
+    const userId = Number(req.params.userId);
+    if (!userId) return res.json(ApiResponse("0", "userId is required", {}));
+    const results = await latestByCondition(userId, { withAnswers: true });
+    return res.json(ApiResponse("1", "Health screening", { results }));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
   }
 }
 
@@ -844,7 +882,7 @@ async function get_notification_preferences(req, res) {
 async function save_notification_preferences(req, res) {
   const {
     morningNudge, classPrep, classStart,
-    missedRecovery, trainerCancelled, weeklyCheckin,
+    missedRecovery, trainerCancelled, weeklyCheckin, dietUpdates,
     quietStart, quietEnd, timeBlock
   } = req.body;
 
@@ -862,6 +900,7 @@ async function save_notification_preferences(req, res) {
     if (missedRecovery !== undefined) prefs.missedRecovery = missedRecovery;
     if (trainerCancelled !== undefined) prefs.trainerCancelled = trainerCancelled;
     if (weeklyCheckin !== undefined) prefs.weeklyCheckin = weeklyCheckin;
+    if (dietUpdates !== undefined) prefs.dietUpdates = dietUpdates ? 1 : 0;
     if (quietStart !== undefined) prefs.quietStart = quietStart;
     if (quietEnd !== undefined) prefs.quietEnd = quietEnd;
     if (timeBlock !== undefined && validTimeBlocks.includes(timeBlock)) {
@@ -915,7 +954,8 @@ async function get_notifications(req, res) {
     const offset = Math.max(Number(req.query.offset) || 0, 0);
 
     const { rows, count } = await UserNotification.findAndCountAll({
-      where: { userId: req.user.id },
+      // Swiped away in the bell = hidden (Oct 2026).
+      where: { userId: req.user.id, hiddenAt: null },
       order: [['sentAt', 'DESC']],
       limit,
       offset,
@@ -927,6 +967,25 @@ async function get_notifications(req, res) {
       limit,
       offset,
     }));
+  } catch (error) {
+    return res.json(ApiResponse("0", error.message, {}));
+  }
+}
+
+// POST /users/notifications/hide  { notificationIds: [..] }
+// She swiped them away in the bell. Hidden for her, not deleted.
+async function hide_notifications(req, res) {
+  try {
+    const { notificationIds } = req.body || {};
+    const ids = Array.isArray(notificationIds)
+      ? notificationIds.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+      : [];
+    if (!ids.length) return res.json(ApiResponse("0", "notificationIds is required", {}));
+    const [hidden] = await UserNotification.update(
+      { hiddenAt: new Date() },
+      { where: { userId: req.user.id, id: { [Sequelize.Op.in]: ids } } }
+    );
+    return res.json(ApiResponse("1", "Notifications hidden", { hidden }));
   } catch (error) {
     return res.json(ApiResponse("0", error.message, {}));
   }
@@ -1007,11 +1066,36 @@ async function save_target_weight(req, res) {
     if (!user) {
       return res.json(ApiResponse("0", "User not found", {}));
     }
+    // Oct 2026: a target that goes the wrong way for her goal is refused
+    // (e.g. "Lose weight" with a target above her current weight).
+    if (value != null) {
+      const { currentWeightKg } = require("../../helper/goalSync");
+      const now = await currentWeightKg(user.id);
+      const way = hasDirection && direction
+        ? direction
+        : user.mainGoal === "Lose weight"
+          ? "lose"
+          : user.mainGoal === "Gain weight"
+            ? "gain"
+            : user.weightGoalDirection;
+      if (now != null && way === "lose" && value >= now) {
+        return res.json(ApiResponse("0", `To lose weight, pick a target below your current weight (${now} kg).`, {}));
+      }
+      if (now != null && way === "gain" && value <= now) {
+        return res.json(ApiResponse("0", `To gain weight, pick a target above your current weight (${now} kg).`, {}));
+      }
+    }
     user.targetWeightKg = value;
     if (hasDirection) {
       user.weightGoalDirection = direction;
     }
     await user.save();
+    // One goal everywhere: the Progress tab reads the Goal table.
+    try {
+      await require("../../helper/goalSync").syncGoalFromTarget(user.id);
+    } catch (e) {
+      console.error("save_target_weight goal sync:", e.message);
+    }
     return res.json(
       ApiResponse("1", "Target weight saved", {
         targetWeightKg: value,
@@ -1144,6 +1228,9 @@ async function save_weight_log(req, res) {
 }
 
 module.exports = {
+  notify_dietitian_screening,
+  health_screening_summary,
+  staff_health_screening,
   registration,
   login,
   forget_password,
@@ -1178,6 +1265,7 @@ module.exports = {
   update_device_token,
   get_notifications,
   mark_notifications_read,
+  hide_notifications,
   save_target_weight,
   save_main_goal,
   save_weight_log,

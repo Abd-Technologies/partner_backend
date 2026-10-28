@@ -69,7 +69,36 @@ async function getAssignedClientIds(dietitianId) {
 // a negation of "User") so it's an explicit allow-list if more admin-ish
 // roles are ever added.
 function isUnscopedRole(userType) {
-  return userType === "Admin";
+  return String(userType || "").trim().toLowerCase() === "admin";
 }
 
-module.exports = { getAssignedClientIds, isUnscopedRole };
+// Express middleware (after validateAdmin): a dietitian may only open her
+// own clients; trainers may not open client health data at all; admin and
+// other staff pass. `param` = route param holding the client id, or a
+// dotted request path such as "body.userId".
+const readParam = (req, param) =>
+  param.includes(".")
+    ? param.split(".").reduce((o, k) => (o == null ? o : o[k]), req)
+    : req.params[param];
+
+function ownClientOnly(param = "userId") {
+  return async (req, res, next) => {
+    try {
+      const type = String((req.user && req.user.userType) || "").trim().toLowerCase();
+      if (type === "trainer") {
+        return res.json({ status: "0", message: "Only the client's dietitian can see this.", data: {} });
+      }
+      if (type === "dietition" || type === "dietitian") {
+        const ids = await getAssignedClientIds(req.user.id);
+        if (!ids.has(Number(readParam(req, param)))) {
+          return res.json({ status: "0", message: "This client is not assigned to you.", data: {} });
+        }
+      }
+      return next();
+    } catch (e) {
+      return next(e);
+    }
+  };
+}
+
+module.exports = { getAssignedClientIds, isUnscopedRole, ownClientOnly };

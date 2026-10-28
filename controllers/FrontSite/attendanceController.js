@@ -115,77 +115,14 @@ const { Op } = require("sequelize");
 const { ClassAttendance } = require("../../models");
 const ApiResponse = require("../../helper/ApiResponse");
 
-// Get Motivation Stats
+// Get Motivation Stats — real attendance (10+ min in class) and a streak
+// that skips non-class days and doesn't drop to 0 before today's class.
+// See helper/attendanceStats.js. Same response shape as before.
 exports.getMotivationStats = async (req, res) => {
   try {
     const userId = req.params.userId;
-
-    // Fetch all attendance for last 30 days
-    const attendances = await ClassAttendance.findAll({
-      where: {
-        user_id: userId,
-        attended_at: {
-          [Op.gte]: new Date(new Date().setDate(new Date().getDate() - 29))
-        }
-      },
-      attributes: ["attended_at"],
-      group: ["attended_at"],
-      order: [["attended_at", "ASC"]]
-    });
-
-    const dates = attendances.map(a => new Date(a.attended_at));
-    dates.sort((a, b) => b - a);
-
-    // ---------- Calculate Streak ----------
-    let streak = 0;
-    let currentDate = new Date();
-    currentDate.setHours(0, 0, 0, 0);
-
-    for (let date of dates) {
-      date.setHours(0, 0, 0, 0);
-      if (date.getTime() === currentDate.getTime()) {
-        streak++;
-        currentDate.setDate(currentDate.getDate() - 1);
-      } else {
-        break;
-      }
-    }
-
-    // ---------- Attendance Counts ----------
-    const daysAttendedLast7 = dates.filter(d => {
-      const diffDays = (new Date() - d) / (1000 * 60 * 60 * 24);
-      return diffDays < 7;
-    }).length;
-
-    const daysAttendedLast30 = dates.length;
-    const regularityPercentage = (daysAttendedLast30 / 30) * 100;
-
-    // ---------- Chart Data ----------
-    const last30DaysData = [];
-    let today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    for (let i = 29; i >= 0; i--) {
-      const date = new Date(today);
-      date.setDate(today.getDate() - i);
-      const dateStr = date.toISOString().split("T")[0];
-      const attended = dates.some(d => d.toISOString().split("T")[0] === dateStr);
-
-      last30DaysData.push({
-        date: dateStr,
-        attended: attended ? 1 : 0
-      });
-    }
-
-    const response = ApiResponse("1", "Motivation stats fetched successfully", {
-      streak,
-      daysAttendedLast7,
-      daysAttendedLast30,
-      regularityPercentage: Math.round(regularityPercentage),
-      attendanceHistory: last30DaysData
-    });
-    return res.json(response);
-
+    const data = await require("../../helper/attendanceStats").motivationStats(userId);
+    return res.json(ApiResponse("1", "Motivation stats fetched successfully", data));
   } catch (err) {
     const response = ApiResponse("0", err.message, {});
     return res.json(response);

@@ -25,6 +25,7 @@
 const sendNotification = require("./notification");
 const { User } = require("../models");
 const bookingPolicy = require("./bookingPolicy");
+const { queueConsultationCancelled } = require("./consultationCancelledPopup");
 
 async function resolveDietitianNoShow(appointment, { actorUserId = null } = {}) {
   const alreadyResolved =
@@ -63,6 +64,8 @@ async function resolveDietitianNoShow(appointment, { actorUserId = null } = {}) 
   }
 
   if (!alreadyResolved) {
+    // In-app "consultation cancelled" pop-up (urgent in the app).
+    await queueConsultationCancelled(appointment, "dietitian_no_show", { bonusDays: daysAdded });
     try {
       const user = await User.findByPk(appointment.userId);
       if (user && user.deviceToken) {
@@ -214,6 +217,7 @@ async function resolveClientNoShow(appointment, { actorUserId = null } = {}) {
   } catch (e) {
     console.error("[noShowResolution] client no-show notify failed:", e);
   }
+  await queueConsultationCancelled(appointment, "client_no_show", { locked });
   return appointment;
 }
 

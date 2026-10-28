@@ -23,14 +23,17 @@ const uploadimage = multer.diskStorage({
 });
 const upload = multer({
   storage: uploadimage,
+  // Oct 2026 security audit: images only, 15 MB (helper/uploadRules.js).
+  fileFilter: require('../../helper/uploadRules').filter(),
+  limits: require('../../helper/uploadRules').limits,
 });
 
 
 // Read-only endpoints — public list of weekday days and per-dietitian
 // slot read are unauthenticated so the client can render booking UIs
 // without forcing login first.
-router.get('/', dietController.getAllDietTimes);
-router.post('/', dietController.getAllSlotsOfDay);
+router.get('/', validateToken, dietController.getAllDietTimes);
+router.post('/', validateToken, dietController.getAllSlotsOfDay);
 
 // Writes / reads scoped to the caller. validateToken populates req.user;
 // each handler enforces that req.user.id matches the resource being

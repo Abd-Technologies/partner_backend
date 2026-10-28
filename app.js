@@ -2,6 +2,8 @@ require("dotenv").config();
 const { init,getIO } = require("./socket");
 const express = require("express");
 const app = express();
+// Behind one proxy (nginx): req.ip = the real client IP (rate limits).
+if (!app.get("trust proxy")) app.set("trust proxy", 1);
 
 const bodyParser = require("body-parser");
 const cors = require("cors");
@@ -95,7 +97,7 @@ const { checkMeetAttendance } = require("./helper/checkMeetAttendance");
 const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
 const { sendPlanDeliveryReminders } = require("./helper/planDeliveryReminders");
 const { sendTrialClassReminders } = require("./helper/trialClasses");
-const { sendTrialOfferReminders } = require("./helper/trialOffer");
+const { sendTrialOfferReminders, sendTrialLastDayPushes } = require("./helper/trialOffer");
 const { sendPostpartumReadyReminders, sendDueDateCheckIns } = require("./helper/lifeStage");
 const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
 const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
@@ -108,6 +110,37 @@ const popupEligibility = require("./helper/popupEligibility");
 // with what users actually see. Without this, the cron runs at the
 // host's local time (UTC on most VPS deployments) which is +5h off.
 const CRON_TZ = "Asia/Karachi";
+
+// Dietitian emergency day (Oct 2026): every minute, apply requests whose
+// 2-minute undo window has passed. See helper/emergencyDay.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const n = await require("./helper/emergencyDay").applyDue();
+      if (n) console.log(`[emergency-day] applied ${n}`);
+    } catch (error) {
+      console.error("Error in emergency-day job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Dietitian no-show while the client waits (Oct 2026): every minute.
+// 5 min late → "Your client is waiting" + admin alert; not started 10 min after the start time → cancelled as a dietitian
+// no-show (+3 days, client told). See helper/dietitianLateCheck.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const r = await require("./helper/dietitianLateCheck").runDietitianLateCheck();
+      if (r.alerted || r.cancelled) console.log(`[dietitian-late] alerted ${r.alerted}, cancelled ${r.cancelled}`);
+    } catch (error) {
+      console.error("Error in dietitian-late job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
 
 // Notification cron — every 3 minutes, PKT-anchored.
 cron.schedule(
@@ -165,6 +198,29 @@ cron.schedule(
       await sendTrialOfferReminders();
     } catch (error) {
       console.error("Error in trial-offer-reminders job:", error);
+    }
+    // Last trial day: "look what you did" push, once (Oct 2026).
+    try {
+      const n = await sendTrialLastDayPushes();
+      if (n) console.log(`[trial-last-day] sent ${n}`);
+    } catch (error) {
+      console.error("Error in trial-last-day job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Trial starter plans the AI couldn't make in time (or a restart lost):
+// try again quietly every 5 minutes (Oct 2026).
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const { retryPendingTrialPlans } = require("./controllers/FrontSite/trialDietPlanController");
+      const n = await retryPendingTrialPlans();
+      if (n) console.log(`[trial-plan] retrying ${n} plan(s)`);
+    } catch (error) {
+      console.error("Error in trial-plan retry job:", error);
     }
   },
   { timezone: CRON_TZ }
@@ -250,6 +306,21 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Quiet hours (Oct 2026): pushes held during her quiet hours go out when
+// they end. Checked every 5 minutes.
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const n = await require("./helper/notification").releaseHeldPushes();
+      if (n) console.log(`[quiet-hours] sent ${n} held push(es)`);
+    } catch (error) {
+      console.error("Error in quiet-hours release job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Auto-cancel a class the trainer hasn't started 10 min after its time,
 // with an apology push + in-app popup pointing to the next class.
 const { autoCancelLateClasses, retireOldClassCancelledPopups, LATE_START_MINUTES } = require("./helper/autoCancelLateClasses");
@@ -260,6 +331,7 @@ cron.schedule(
       const ids = await autoCancelLateClasses();
       if (ids.length) console.log(`[auto-cancel-class] cancelled ${ids.length} class(es) not started ${LATE_START_MINUTES}m after start: ${ids.join(", ")}`);
       await retireOldClassCancelledPopups();
+      await require("./helper/consultationCancelledPopup").retireOldConsultationCancelledPopups();
     } catch (error) {
       console.error("Error in auto-cancel-class job:", error);
     }
@@ -278,6 +350,49 @@ cron.schedule(
       if (n) console.log(`[preconsult-reminder] sent ${n}`);
     } catch (error) {
       console.error("[preconsult-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Monthly "check your PCOS signs" push for paid women who track a
+// condition (only when due, max once a month). helper/healthScreeningActions.js
+cron.schedule(
+  "31 11 * * *",
+  async () => {
+    try {
+      const n = await require("./helper/healthScreeningActions").sendMonthlyReminders();
+      if (n) console.log(`[screening-reminder] sent ${n}`);
+    } catch (error) {
+      console.error("[screening-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// AI-approved payments: admin reminders at 24 h / 40 h, pause at 48 h.
+cron.schedule(
+  "17 * * * *",
+  async () => {
+    try {
+      const r = await require("./helper/paymentVerify").runChecks();
+      if (r.reminded || r.held) console.log(`[payment-verify] reminded ${r.reminded}, paused ${r.held}`);
+    } catch (error) {
+      console.error("[payment-verify]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Sign-up questions left unfinished: one "finish setting up" push, 7:10 PM.
+cron.schedule(
+  "10 19 * * *",
+  async () => {
+    try {
+      const n = await require("./helper/onboardingReminder").sendFinishSignupReminders();
+      if (n) console.log(`[finish-signup] sent ${n}`);
+    } catch (error) {
+      console.error("[finish-signup]", error.message);
     }
   },
   { timezone: CRON_TZ }
@@ -459,6 +574,21 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Class diary: count joined / attended / minutes for today's classes
+// before the 00:01 reset (helper/classDiary.js). Analytics only.
+cron.schedule(
+  "55 23 * * *",
+  async () => {
+    try {
+      const n = await require("./helper/classDiary").countDay();
+      console.log(`[class-diary] counted ${n} class(es)`);
+    } catch (e) {
+      console.error("[class-diary] count failed:", e.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Daily reset at 00:01 PKT. Wipes all slots back to "Upcoming Class"
 // so next-day users see a clean schedule. Calorie counters reset too.
 cron.schedule(
@@ -622,6 +752,8 @@ app.use("/country", contriesRoute);
 app.use('/duration/create', priceDurationRoutes);
 app.use('/api/priceingRoutes', priceingRoutes);
 app.use('/appointment', appointmentRoutes);
+// Dietitian "Emergency: cancel my day" (Oct 2026).
+app.use('/emergency-day', require('./routes/FrontSite/emergencyDayRoutes'));
 app.use('/dietTimes', dietRoutes);
 app.use("/attendance", attendanceRoutes);
 app.use("/posts", postsRoutes);
@@ -651,10 +783,28 @@ app.use('/users/diet-plan', dietPlanUserRoutes);
 // Error middleware : To show any error if promise fails
 app.use(error);
 // To make the folder Public
-app.use("/public", express.static("./public"));
+// Protected private files (Oct 2026, helper/privateFiles.js):
+//  - GET /files/<path under public>?t=<accessToken> serves slips, progress
+//    photos, support screenshots and meal photos only to the owner / allowed
+//    staff (accessToken header also accepted).
+//  - PRIVATE_FILES_PUBLIC (default "true"): while true, /public still serves
+//    private files too (old app versions load them from there). Set
+//    PRIVATE_FILES_PUBLIC=false once most users are on the new app: then
+//    /public/<private file> returns 403 and only /files serves them.
+const privateFiles = require("./helper/privateFiles");
+console.log(`🔒 Private files: ${privateFiles.privateFilesPublic() ? "ALSO PUBLIC via /public (PRIVATE_FILES_PUBLIC=true)" : "PROTECTED — only via /files (PRIVATE_FILES_PUBLIC=false)"}`);
+app.use("/files", require("./routes/FrontSite/privateFiles"));
+app.use("/public", privateFiles.publicGuard, express.static("./public"));
 
 // Initializing Server along with creating all the tables that exist in the models folder
 db.sequelize.sync().then(async () => {
+  // Must run first: the Slot model is paranoid (needs Slots.deletedAt).
+  try {
+    await require("./migrations/20261026120000-slot-delete-announcement-text").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Slot delete + announcement text columns checked");
+  } catch (e) {
+    console.error("❌ Slot delete / announcement columns FAILED — classes may not load:", e.message);
+  }
   // Safety net (Oct 2026): the class-room / app-version columns MUST exist
   // before any class is served — otherwise every schedule query fails and
   // nobody can join. This migration is idempotent (adds only what's
@@ -663,8 +813,103 @@ db.sequelize.sync().then(async () => {
     const m = require("./migrations/20261010120000-add-class-rooms");
     await m.up(db.sequelize.getQueryInterface(), db.Sequelize);
     console.log("✅ Class-room columns checked");
+    await require("./helper/classRoomSettings").load();
+    // Admin-set free trial length (AppSettings "trialDays").
+    await require("./helper/trialDaysSetting").load();
   } catch (e) {
     console.error("❌ Class-room columns check FAILED — run: node scripts/checkDbColumns.js --apply", e.message);
+  }
+  // Growth analytics columns (signup source/method, last login). Same
+  // safety net: the User model reads them, so they must exist.
+  try {
+    await require("./migrations/20261020120000-add-growth-fields").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Growth analytics columns checked");
+  } catch (e) {
+    console.error("❌ Growth analytics columns check FAILED:", e.message);
+  }
+  try {
+    await require("./migrations/20261022120000-add-onboarding-fields").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Sign-up questions columns checked");
+  } catch (e) {
+    console.error("❌ Sign-up questions columns check FAILED:", e.message);
+  }
+  // Login security: Users.tokenVersion (logout / password change revokes
+  // tokens) + OtpData.otpTries. The User model reads tokenVersion.
+  try {
+    await require("./migrations/20261028120000-add-login-security").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    console.log("✅ Login security columns checked");
+  } catch (e) {
+    console.error("❌ Login security columns FAILED:", e.message);
+  }
+  // Plan type (diet / workout / combined) for every plan, from its
+  // category. Decides which health-form questions she gets.
+  try {
+    const r = await require("./migrations/20261029120000-backfill-plan-type").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    if (r.changed.length) console.log(`✅ Plan types filled: ${r.changed.join(", ")}`);
+    else console.log("✅ Plan types checked");
+  } catch (e) {
+    console.error("❌ Plan type backfill FAILED:", e.message);
+  }
+  // "Need help" on the diet check-in: new escalation type (admin alert).
+  try {
+    await require("./migrations/20261031130000-escalation-diet-checkin-help").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Escalation types checked");
+  } catch (e) {
+    console.error("❌ Escalation types FAILED:", e.message);
+  }
+  // Consultation on hold while payment unconfirmed (Oct 2026).
+  try {
+    await require("./migrations/20261104120000-appointment-payment-hold").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    console.log("✅ Appointment payment hold checked");
+  } catch (e) {
+    console.error("❌ Appointment payment hold FAILED:", e.message);
+  }
+  // Cycle learning column (Oct 2026, helper/cycleLearning.js).
+  try {
+    await require("./migrations/20261103120000-cycle-learning").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    console.log("✅ Cycle learning checked");
+  } catch (e) {
+    console.error("❌ Cycle learning FAILED:", e.message);
+  }
+  // Dietitian emergency days table + escalation type (Oct 2026).
+  try {
+    await require("./migrations/20261101130000-dietitian-emergency-days").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Dietitian emergency days checked");
+  } catch (e) {
+    console.error("❌ Dietitian emergency days FAILED:", e.message);
+  }
+  // Dietitian late alert column (the Appointment model reads it).
+  try {
+    await require("./migrations/20261101120000-appointment-dietitian-late").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Appointment late-alert column checked");
+  } catch (e) {
+    console.error("❌ Appointment late-alert column FAILED:", e.message);
+  }
+  // Audit fixes: diet updates switch + hidden bell items (the models read them).
+  try {
+    await require("./migrations/20261031120000-notif-diet-and-hide").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Notification columns checked");
+  } catch (e) {
+    console.error("❌ Notification columns FAILED:", e.message);
+  }
+  // One weekly check-in: extra WeeklyCheckins columns (the model reads them).
+  try {
+    await require("./migrations/20261030120000-weekly-checkin-v2").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Weekly check-in columns checked");
+  } catch (e) {
+    console.error("❌ Weekly check-in columns FAILED:", e.message);
+  }
+  try {
+    await require("./migrations/20261024120000-add-payment-verify").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Payment check columns checked");
+  } catch (e) {
+    console.error("❌ Payment check columns FAILED:", e.message);
+  }
+  // Payment accounts: first start adds Fit Her's three accounts.
+  try {
+    if (await require("./helper/paymentAccounts").ensureSeed()) console.log("✅ Payment accounts added");
+  } catch (e) {
+    console.error("❌ Payment accounts seed FAILED:", e.message);
   }
   const serverPort = process.env.PORT || 3001;
   server.listen(serverPort,"0.0.0.0", () => {

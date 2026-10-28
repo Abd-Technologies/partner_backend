@@ -375,7 +375,9 @@ exports.getSummary = async (req, res) => {
   const userId = req.user && req.user.id;
   if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
   const country = String((req.query && req.query.country) || "").trim() || null;
-  const data = await getTrialSummary(userId, country);
+  // ?peek=1: the home recap card only reads (doesn't start the offer).
+  const peek = String((req.query && req.query.peek) || '') === '1';
+  const data = await getTrialSummary(userId, country, { peek });
   if (!data) return res.json(ApiResponse("0", "No trial found", {}));
   return res.json(ApiResponse("1", "Trial summary", data));
 };

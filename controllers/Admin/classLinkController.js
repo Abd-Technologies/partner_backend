@@ -5,6 +5,8 @@ const { Op } = require("sequelize");
 const { User, Slot, Time } = require("../../models");
 const ApiResponse = require("../../helper/ApiResponse");
 const { todayPkt, normalizeZoomRoom, normalizeBackupLink, openableLink } = require("../../helper/classLinks");
+const roomSettings = require("../../helper/classRoomSettings");
+const { isAdmin, adminsOnlyMessage } = require("../../helper/roles");
 
 const ADMIN = process.env.ADMIN || "Admin";
 const TRAINER = process.env.TRAINER || "Trainer";
@@ -17,7 +19,7 @@ async function me(req) {
 /** GET /admin/trainerRooms — every trainer with her Zoom room. Admin only. */
 async function trainerRooms(req, res) {
   const actor = await me(req);
-  if (!actor || actor.userType !== ADMIN) return res.json(ApiResponse("0", "Admins only", {}));
+  if (!isAdmin(actor)) return res.json(ApiResponse("0", adminsOnlyMessage(actor), {}));
   const trainers = await User.findAll({
     where: { userType: TRAINER },
     attributes: ["id", "firstName", "lastName", "email", "zoomRoom"],
@@ -30,6 +32,7 @@ async function trainerRooms(req, res) {
   const countBy = counts.reduce((m, s) => m.set(s.trainerId, (m.get(s.trainerId) || 0) + 1), new Map());
   return res.json(
     ApiResponse("1", "Trainer rooms", {
+      mainRoom: await roomSettings.load(),
       trainers: trainers.map((t) => ({
         id: t.id,
         name: `${t.firstName || ""} ${t.lastName || ""}`.trim(),
@@ -42,25 +45,52 @@ async function trainerRooms(req, res) {
 }
 
 /**
- * POST /admin/trainerRoom { trainerId, zoomRoom } — admin sets it once.
- * Accepts "812 3456 7890" or a Zoom invite link. Empty / invalid is refused.
- * Copies it to every class she teaches.
+ * POST /admin/mainClassRoom { zoomRoom } — the ONE Fit Her Zoom room every
+ * trainer uses (no two classes at the same time). Trainers with their own
+ * room keep it. Accepts "812 3456 7890" or a Zoom invite link.
+ */
+async function setMainRoom(req, res) {
+  const actor = await me(req);
+  if (!isAdmin(actor)) return res.json(ApiResponse("0", adminsOnlyMessage(actor), {}));
+  const room = normalizeZoomRoom((req.body || {}).zoomRoom);
+  if (!room) {
+    return res.json(ApiResponse("0", "Enter a valid Zoom meeting number (9–11 digits) or a Zoom invite link.", {}));
+  }
+  await roomSettings.setMainRoom(room, actor.id);
+  const updated = await roomSettings.syncSlotRooms();
+  console.log(`[class-rooms] main room set by admin ${actor.id}; ${updated} class(es) updated`);
+  return res.json(ApiResponse("1", "Main class room saved", { mainRoom: room, classesUpdated: updated }));
+}
+
+/**
+ * POST /admin/trainerRoom { trainerId, zoomRoom } — OPTIONAL own room for
+ * one trainer (only needed if she teaches at the same time as someone
+ * else). Empty zoomRoom = remove it, she goes back to the main room.
  */
 async function setTrainerRoom(req, res) {
   const actor = await me(req);
-  if (!actor || actor.userType !== ADMIN) return res.json(ApiResponse("0", "Admins only", {}));
+  if (!isAdmin(actor)) return res.json(ApiResponse("0", adminsOnlyMessage(actor), {}));
   const { trainerId, zoomRoom } = req.body || {};
-  const room = normalizeZoomRoom(zoomRoom);
-  if (!room) {
+  const clearing = zoomRoom == null || String(zoomRoom).trim() === "";
+  const room = clearing ? null : normalizeZoomRoom(zoomRoom);
+  if (!clearing && !room) {
     return res.json(ApiResponse("0", "Enter a valid Zoom meeting number (9–11 digits) or a Zoom invite link.", {}));
   }
   const trainer = await User.findOne({ where: { id: trainerId, userType: TRAINER } });
   if (!trainer) return res.json(ApiResponse("0", "Trainer not found", {}));
   trainer.zoomRoom = room;
   await trainer.save();
-  const [updated] = await Slot.update({ trainerLink: room }, { where: { trainerId: trainer.id } });
-  console.log(`[class-rooms] trainer ${trainer.id} room set by admin ${actor.id}; ${updated} class(es) updated`);
-  return res.json(ApiResponse("1", "Zoom room saved", { trainerId: trainer.id, zoomRoom: room, classesUpdated: updated }));
+  await roomSettings.load();
+  const updated = await roomSettings.syncSlotRooms(trainer.id);
+  console.log(`[class-rooms] trainer ${trainer.id} own room ${room ? "set" : "removed"} by admin ${actor.id}; ${updated} class(es) updated`);
+  return res.json(
+    ApiResponse("1", room ? "Own room saved" : "She now uses the main room", {
+      trainerId: trainer.id,
+      zoomRoom: room,
+      mainRoom: roomSettings.mainRoom(),
+      classesUpdated: updated,
+    })
+  );
 }
 
 async function loadTrainerSlot(req, slotId) {
@@ -73,14 +103,14 @@ async function loadTrainerSlot(req, slotId) {
     ],
   });
   if (!slot) return { error: "Class not found" };
-  if (actor.userType !== ADMIN && Number(slot.trainerId) !== Number(actor.id)) {
+  if (!isAdmin(actor) && Number(slot.trainerId) !== Number(actor.id)) {
     return { error: "This is not your class" };
   }
   return { actor, slot };
 }
 
 function classInfo(slot) {
-  const room = slot.User && slot.User.zoomRoom ? slot.User.zoomRoom : null;
+  const room = (slot.User && slot.User.zoomRoom) || roomSettings.mainRoom() || null;
   const usesBackup = slot.usesBackupLink();
   const link = slot.effectiveLink();
   return {
@@ -144,4 +174,4 @@ async function setBackupLink(req, res) {
   return res.json(ApiResponse("1", link ? "Backup link set for today" : "Back to Zoom", classInfo(slot)));
 }
 
-module.exports = { trainerRooms, setTrainerRoom, trainerClass, setBackupLink, classInfo };
+module.exports = { trainerRooms, setTrainerRoom, setMainRoom, trainerClass, setBackupLink, classInfo };

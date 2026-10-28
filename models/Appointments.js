@@ -128,6 +128,19 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: false,
             defaultValue: 0,
         },
+        // Oct 2026: dietitian + admin told the session wasn't started 10 min
+        // after its start time (helper/dietitianLateCheck.js).
+        dietitianLateAlertAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+        // Oct 2026: on hold because her payment isn't confirmed yet
+        // (helper/paymentVerify.js). Can't be started; no reminders or
+        // no-show rules while set. Null = not on hold.
+        paymentHoldAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
 
     });
 

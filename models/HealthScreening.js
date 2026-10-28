@@ -28,6 +28,12 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
       comment: 'JSON string of all question answers',
     },
+    // When her dietitian was told about this result ("Tell my dietitian",
+    // or automatically when signs went up). Migration 20261020120000.
+    dietitianNotifiedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   });
 
   HealthScreening.associate = (models) => {

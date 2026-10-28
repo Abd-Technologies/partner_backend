@@ -1,11 +1,11 @@
 module.exports = (sequelize, DataTypes) => {
     const Announcement = sequelize.define('Announcement', {
         title: {
-            type: DataTypes.STRING(),
+            type: DataTypes.TEXT,
             allowNull: true,
         },
         body: {
-            type: DataTypes.STRING(),
+            type: DataTypes.TEXT,
             allowNull: true,
         },
         status: {

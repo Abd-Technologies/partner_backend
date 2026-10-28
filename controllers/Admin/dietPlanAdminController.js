@@ -82,6 +82,25 @@ async function generateDietPlanDraft(req, res) {
       return res.json(ApiResponse('0', 'This client is not assigned to you', {}));
     }
 
+    // The purchase must be hers, and the sizes must be sensible (the
+    // screens limit these too, but the server is the real check).
+    {
+      const up = await require('../../models').UserPlan.findByPk(userPlanId, { attributes: ['id', 'userId'] });
+      if (!up || String(up.userId) !== String(userId)) {
+        return res.json(ApiResponse('0', "This plan purchase doesn't belong to this client", {}));
+      }
+      const days = Number(planDays);
+      if (!Number.isInteger(days) || days < 3 || days > 14) {
+        return res.json(ApiResponse('0', 'Plan length must be 3 to 14 days', {}));
+      }
+      if (mealsPerDay != null && mealsPerDay !== '') {
+        const m = Number(mealsPerDay);
+        if (!Number.isInteger(m) || m < 3 || m > 6) {
+          return res.json(ApiResponse('0', 'Meals per day must be 3 to 6', {}));
+        }
+      }
+    }
+
     const user = await User.findByPk(userId);
     if (!user) {
       return res.json(ApiResponse('0', 'User not found', {}));

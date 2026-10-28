@@ -2,11 +2,15 @@
 // See fitHer Flows › Class feedback.
 //
 // Rules
-//   • Only AFTER the class ended, up to 24 hours later.
+//   • Only AFTER the class ended, up to 24 hours later. "Ended" also
+//     means: the trainer pressed End today, or she left in the last
+//     15 minutes of the class (so the app can ask right away).
 //   • Only if she was in class at least 10 minutes.
 //   • 1 ask per class (one row per user + class + day).
-//   • Not again if she rated a class in the last 3 days.
-//   • Skipped twice in a row → pause 7 days.
+//   • Per trainer: not again for the same trainer if she rated one of
+//     that trainer's classes in the last 3 days. A class with a
+//     different trainer can still be asked about (Oct 2026).
+//   • Skipped twice in a row (any trainer) → pause 7 days.
 const { Op } = require("sequelize");
 const moment = require("moment-timezone");
 const { ClassFeedback, ClassPresence, Slot, User } = require("../models");
@@ -17,6 +21,7 @@ const MIN_SECONDS = 10 * 60;
 const ASK_WINDOW_HOURS = 24;
 const RATED_COOLDOWN_DAYS = 3;
 const SKIP_PAUSE_DAYS = 7;
+const EARLY_ASK_MINUTES = 15;
 
 const GOOD_TAGS = ["Great energy", "Good pace", "Clear steps", "Good music", "Felt the burn", "Friendly trainer"];
 const BAD_TAGS = ["Too fast", "Too hard", "Audio/video issue", "Started late", "Unclear steps", "Other"];
@@ -38,22 +43,37 @@ function onDay(value, dayPkt) {
   return dayPkt.clone().startOf("day").hour(local.hour()).minute(local.minute()).utc();
 }
 
-/** true when the cooldown / pause rules say "don't ask now". */
-async function inCooldown(userId) {
+/** true when she skipped the last two asks in a row (any trainer) less
+ *  than SKIP_PAUSE_DAYS ago: she's tired of being asked, pause them all. */
+async function inSkipPause(userId) {
   const last = await ClassFeedback.findAll({
     where: { userId },
     order: [["updatedAt", "DESC"]],
     limit: 2,
-    attributes: ["rating", "skipped", "updatedAt"],
+    attributes: ["skipped", "updatedAt"],
   });
-  if (!last.length) return false;
-  const now = moment.utc();
-  const rated = last.find((r) => r.rating != null);
-  if (last[0].rating != null && now.diff(moment.utc(last[0].updatedAt), "days", true) < RATED_COOLDOWN_DAYS) return true;
-  if (rated && now.diff(moment.utc(rated.updatedAt), "days", true) < RATED_COOLDOWN_DAYS) return true;
-  if (last.length === 2 && last[0].skipped && last[1].skipped &&
-      now.diff(moment.utc(last[0].updatedAt), "days", true) < SKIP_PAUSE_DAYS) return true;
-  return false;
+  if (last.length < 2) return false;
+  return (
+    last[0].skipped &&
+    last[1].skipped &&
+    moment.utc().diff(moment.utc(last[0].updatedAt), "days", true) < SKIP_PAUSE_DAYS
+  );
+}
+
+/** true when she rated a class with this same trainer in the last
+ *  RATED_COOLDOWN_DAYS. A slot with no trainer falls back to the slot
+ *  itself, so it's still asked at most once per 3 days. */
+async function trainerInCooldown(userId, slot) {
+  const since = moment.utc().subtract(RATED_COOLDOWN_DAYS, "days").toDate();
+  const where = {
+    userId,
+    rating: { [Op.ne]: null },
+    updatedAt: { [Op.gte]: since },
+  };
+  if (slot.trainerId) where.trainerId = slot.trainerId;
+  else where.slotId = slot.id;
+  const row = await ClassFeedback.findOne({ where, attributes: ["id"] });
+  return !!row;
 }
 
 /**
@@ -64,7 +84,7 @@ async function recentClasses(userId) {
   const rows = await ClassPresence.findAll({
     where: { userId, joinedAt: { [Op.gte]: moment.utc().subtract(36, "hours").toDate() } },
     order: [["joinedAt", "DESC"]],
-    include: [{ model: Slot, as: "slot", include: [{ model: User, attributes: ["id", "firstName", "lastName"] }] }],
+    include: [{ model: Slot, as: "slot", paranoid: false, include: [{ model: User, attributes: ["id", "firstName", "lastName"] }] }],
   });
   const groups = new Map();
   for (const p of rows) {
@@ -76,12 +96,13 @@ async function recentClasses(userId) {
       const endUtc = onDay(p.slot.end, dayPkt);
       if (!startUtc || !endUtc) continue;
       if (endUtc.isBefore(startUtc)) endUtc.add(1, "day");
-      groups.set(key, { slot: p.slot, classDate: dayPkt.format("YYYY-MM-DD"), startUtc, endUtc, seconds: 0 });
+      groups.set(key, { slot: p.slot, classDate: dayPkt.format("YYYY-MM-DD"), startUtc, endUtc, seconds: 0, open: false });
     }
     const g = groups.get(key);
     if (p.leftAt) {
       g.seconds += Number(p.durationSeconds) || 0;
     } else {
+      g.open = true;
       // No "leave" (Zoom app, or the app was closed): count her as there
       // until the class ended.
       const until = moment.min(g.endUtc, moment.utc());
@@ -91,20 +112,38 @@ async function recentClasses(userId) {
   return [...groups.values()];
 }
 
+/** Class over for her: time is up, the trainer ended it today, or she
+ *  left (in the app) during the last 15 minutes. */
+function isOver(c, now) {
+  if (now.isAfter(c.endUtc)) return true;
+  if (now.isBefore(c.startUtc)) return false;
+  const today = moment.tz(PKT).format("YYYY-MM-DD");
+  if (c.classDate === today && c.slot.status === "Completed") return true;
+  return !c.open && now.isAfter(c.endUtc.clone().subtract(EARLY_ASK_MINUTES, "minutes"));
+}
+
 /** The class the home card should ask about, or null. */
 async function pendingFor(userId, tz) {
-  if (await inCooldown(userId)) return null;
+  if (await inSkipPause(userId)) return null;
   const now = moment.utc();
   const classes = (await recentClasses(userId))
-    .filter((c) => now.isAfter(c.endUtc) && now.diff(c.endUtc, "hours", true) <= ASK_WINDOW_HOURS)
+    .filter((c) => isOver(c, now) && now.diff(c.endUtc, "hours", true) <= ASK_WINDOW_HOURS)
     .sort((a, b) => b.endUtc.valueOf() - a.endUtc.valueOf());
-  const c = classes[0];
-  if (!c || c.seconds < MIN_SECONDS) return null;
-  const done = await ClassFeedback.findOne({
-    where: { userId, slotId: c.slot.id, classDate: c.classDate },
-    attributes: ["id"],
-  });
-  if (done) return null;
+  // Newest class she can still be asked about: stayed 10+ min, not yet
+  // asked (rated or skipped), and its trainer isn't in the 3-day pause.
+  let c = null;
+  for (const cand of classes) {
+    if (cand.seconds < MIN_SECONDS) continue;
+    const done = await ClassFeedback.findOne({
+      where: { userId, slotId: cand.slot.id, classDate: cand.classDate },
+      attributes: ["id"],
+    });
+    if (done) continue;
+    if (await trainerInCooldown(userId, cand.slot)) continue;
+    c = cand;
+    break;
+  }
+  if (!c) return null;
   const trainerName = fullName(c.slot.User);
   return {
     slotId: c.slot.id,

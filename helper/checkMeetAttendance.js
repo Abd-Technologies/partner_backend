@@ -45,6 +45,7 @@ async function checkMeetAttendance() {
     where: {
       status: { [Op.notIn]: ['canceled', 'canceledByUser'] },
       meetAttendanceCheckedAt: null,
+      paymentHoldAt: null,
       date: { [Op.gte]: cutoff },
     },
     include: [{ model: SlotDiet, attributes: ['id', 'start', 'end', 'dietitionLink'] }],

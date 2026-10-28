@@ -14,7 +14,7 @@ const {
 // validateAdmin lets every staff type through (dietitians, trainers...).
 // Support tickets are for userType "Admin" only.
 function isAdmin(req) {
-  return req.user && req.user.userType === "Admin";
+  return !!req.user && String(req.user.userType || "").trim().toLowerCase() === "admin";
 }
 
 /**

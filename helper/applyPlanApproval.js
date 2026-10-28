@@ -95,21 +95,47 @@ async function applyPlanApproval(planImage, opts = {}) {
 
     // Mark this slip as processed
     image.status = 0;
+    // AI-approved: admin must confirm the money arrived within 48 h
+    // (helper/paymentVerify.js), otherwise this plan is paused.
+    if (opts.approvalSource === 'auto') {
+      image.verifyStatus = 'pending';
+      image.verifyUserPlanId = userPlanId;
+      image.verifyExtended = extended;
+      image.verifyDays = newPlanDays;
+      image.verifyStartedAt = now;
+    }
     await image.save();
-
-    // Remove expired plans for the user (housekeeping)
-    const expired = await UserPlan.findAll({
-      where: {
-        userId: image.UserId,
-        expireDate: { [Op.lt]: now },
-        status: true,
-      },
-    });
-    for (const p of expired) {
-      await p.destroy().catch(() => {});
+    // Oct 2026: admins hear about an AI approval at once (not after 24 h).
+    if (opts.approvalSource === 'auto') {
+      require('./paymentVerify').notifyAutoApproved(image).catch(() => {});
     }
 
+    // Her ended plans (Oct 2026): switched OFF, no longer deleted. Deleting
+    // a plan also deleted (DB cascade) its diet plan, Day 7 review and
+    // progress, and an ended trial plan was deleted here before its AI
+    // diet plan could be moved to the paid plan. status=false hides it
+    // from her plan list; planStatus 'expired' is set by the hourly job.
+    await UserPlan.update(
+      { status: false },
+      {
+        where: {
+          userId: image.UserId,
+          expireDate: { [Op.lt]: now },
+          status: true,
+          id: { [Op.ne]: userPlanId },
+        },
+      }
+    ).catch((e) => console.warn('[applyPlanApproval] switch off ended plans:', e.message));
+
     // Remove free trial if user has one
+    // Oct 2026: her dietitian comes from the package she bought.
+    await require('./planDietitianAssign').assignFromPlan(userPlanId);
+
+    // Oct 2026: keep her trial diet plan / Day 7 review / progress (moved to
+    // the paid plan) and mark the trial converted, BEFORE the trial row is
+    // deleted below (the DB would cascade-delete them).
+    await require('./trialConversion').onPaidPlan(image.UserId, userPlanId);
+
     const freePlan = await Plan.findOne({ where: { title: 'Free Trial' } });
     if (freePlan) {
       const trialPlan = await UserPlan.findOne({
@@ -136,6 +162,14 @@ async function applyPlanApproval(planImage, opts = {}) {
         console.warn('notification send failed:', err.message);
       });
     }
+
+    // Purchase history + server-side Mixpanel "Purchase" (add-on).
+    require('./purchaseLedger').purchased({
+      planImage: image,
+      userPlanId,
+      approvedBy: opts.approvalSource === 'auto' ? 'auto' : 'admin',
+      approvedById: opts.approvedById || null,
+    });
 
     return { ok: true, userPlanId, extended };
   } catch (err) {

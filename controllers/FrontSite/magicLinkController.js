@@ -73,6 +73,46 @@ const slipUpload = multer({
   },
 });
 
+// Sec pass 1 (Oct 2026): a rep can't create a link for any amount she
+// likes. paidAmount must be > 0 and inside the plan's real price range:
+// from 50% of its lowest price up to its highest price. Pakistan (PKR)
+// prices are used when the plan has them, so a USD row doesn't drag the
+// floor down. A plan with no prices (or no plan) is Admin only.
+const MIN_PAID_SHARE = 0.5;
+
+const toAmount = (v) => {
+  const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? n : NaN;
+};
+
+async function planPriceRange(planId) {
+  if (!planId) return null;
+  const rows = await Price.findAll({
+    where: { planId },
+    attributes: ['id', 'priceAmount', 'countryId'],
+    include: [{ association: 'country', attributes: ['code', 'currency'], required: false }],
+  });
+  const isPk = (r) => {
+    const c = r.country || {};
+    return String(c.code || '').trim().toUpperCase() === 'PK' ||
+      String(c.currency || '').trim().toUpperCase() === 'PKR';
+  };
+  const pk = rows.filter(isPk);
+  const use = pk.length ? pk : rows;
+  const amounts = use.map((r) => toAmount(r.priceAmount)).filter((n) => n > 0);
+  if (!amounts.length) return null;
+  return { min: Math.min(...amounts), max: Math.max(...amounts) };
+}
+
+async function callerIsAdmin(req) {
+  const roles = require('../../helper/roles');
+  if (req.authUser) return roles.isAdmin(req.authUser);
+  const me = req.user && req.user.id
+    ? await User.findByPk(req.user.id, { attributes: ['id', 'userType'] })
+    : null;
+  return roles.isAdmin(me);
+}
+
 // ─── 1. Create a magic link (rep-side) ────────────────────────────
 
 async function createLink(req, res) {
@@ -94,8 +134,29 @@ async function createLink(req, res) {
     if (!listPrice || !paidAmount) {
       return res.status(200).json(ApiResponse('0', 'listPrice and paidAmount are required', {}));
     }
-    if (paidAmount > listPrice) {
+    const paidNum = toAmount(paidAmount);
+    const listNum = toAmount(listPrice);
+    if (!(paidNum > 0) || !(listNum > 0)) {
+      return res.status(200).json(ApiResponse('0', 'Please enter a paid amount greater than 0.', {}));
+    }
+    if (paidNum > listNum) {
       return res.status(200).json(ApiResponse('0', 'paidAmount cannot exceed listPrice', {}));
+    }
+    {
+      const range = await planPriceRange(PlanId);
+      if (!range) {
+        if (!(await callerIsAdmin(req))) {
+          return res.status(200).json(ApiResponse('0',
+            'This package has no price set yet, so only the Fit Her admin can make a link for it.', {}));
+        }
+      } else {
+        const floor = Math.ceil(range.min * MIN_PAID_SHARE);
+        if (paidNum < floor || paidNum > range.max) {
+          return res.status(200).json(ApiResponse('0',
+            `The amount must be between Rs ${floor} and Rs ${range.max} for this package. ` +
+            'For a bigger discount, please ask the Fit Her admin.', { minAmount: floor, maxAmount: range.max }));
+        }
+      }
     }
     if (payerRelationship && !ALLOWED_RELATIONSHIPS.includes(String(payerRelationship).toLowerCase())) {
       return res.status(200).json(ApiResponse('0',
@@ -252,9 +313,16 @@ async function redeemLink(req, res) {
     let duplicateOf = null;
     if (ocrResult?.refNumber) {
       const dup = await PlanImage.findOne({
-        attributes: ['id', 'UserId', 'createdAt'],
+        attributes: ['id', 'UserId', 'createdAt', 'verifyStatus'],
         where: { ocrTransactionId: ocrResult.refNumber },
       });
+      // Oct 2026: a slip the admin rejected can't be sent again.
+      if (dup && dup.verifyStatus === 'rejected') {
+        return res.status(200).json(ApiResponse('0',
+          'This payment slip was not approved before, so it can\'t be used again. Please contact support.',
+          { duplicateOf: dup.id, rejected: true }
+        ));
+      }
       if (dup) duplicateOf = dup.id;
     }
 
@@ -269,23 +337,16 @@ async function redeemLink(req, res) {
     // ─── Decide auto-approve vs admin queue based on OCR ───
     let autoApproved = false;
     let approvalReason = null;
-    const wrongReceiver = ocrResult?.receiver && !ocrResult?.receiverVerified;
-
-    if (ocrResult && ocrResult.confidence >= AUTO_APPROVE_MIN_CONFIDENCE && !wrongReceiver) {
-      const receiverTag = ocrResult.receiverVerified ? `, receiver verified (${ocrResult.receiver})` : '';
-      // Amount must match within tolerance
-      if (ocrResult.amount &&
-          Math.abs(ocrResult.amount - link.paidAmount) <= AMOUNT_TOLERANCE_PKR) {
-        autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified${receiverTag}`;
-      } else if (ocrResult.amount && ocrResult.amount > link.paidAmount) {
-        // Customer paid more than expected — auto-approve at the actual amount paid.
-        // Admin can still see this case and refund difference or credit it.
-        autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward${receiverTag}`;
-      }
-    } else if (wrongReceiver) {
-      approvalReason = `Slip receiver is "${ocrResult.receiver}" (expected FitHer or Shaista Khalid) — admin review required`;
+    // Slip rules (helper/slipRules.js): our account + reference + date
+    // within 3 days + amount. Anything else waits for the admin, with why.
+    let slipDecision = null;
+    try {
+      slipDecision = await require("../../helper/slipRules").decideSlip(ocrResult, link.paidAmount);
+      autoApproved = slipDecision.autoApproved;
+      approvalReason = slipDecision.reason;
+    } catch (e) {
+      console.error("[slipRules] decide failed:", e.message);
+      approvalReason = "Slip check failed — admin review";
     }
 
     // Create the PlanImage row (status reflects auto vs manual review)
@@ -319,6 +380,9 @@ async function redeemLink(req, res) {
                             rawText:          ocrResult.rawText?.slice(0, 1000),
                             autoApproved,
                             approvalReason,
+                            account:  slipDecision?.account || null,
+                            slipDate: slipDecision?.slipDate || null,
+                            checks:   slipDecision?.checks || null,
                           } : null,
       ocrConfidence:      ocrResult?.confidence || null,
       // Top-level OCR columns — easier to query, index, and display
@@ -351,6 +415,11 @@ async function redeemLink(req, res) {
       console.warn('Auto-approve flag set but missing UserId/PlanId — admin review required');
       autoApproved = false;
       approvalReason = 'OCR passed but link not associated with user/plan — admin review required';
+    }
+
+    // Oct 2026: payment-link slips that need a person now alert admins too.
+    if (!autoApproved) {
+      require('../../helper/paymentVerify').notifySlipForReview(planImage, approvalReason).catch(() => {});
     }
 
     // Update the link

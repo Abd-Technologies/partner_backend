@@ -1,5 +1,5 @@
 const ApiResponse = require("../../helper/ApiResponse");
-const { PendingPopupState } = require("../../models");
+const { PendingPopupState, User } = require("../../models");
 
 // Whitelist of popup variables the client may post about. Server rejects
 // unknown variables so a typo or stale client can't poison the state row.
@@ -18,6 +18,10 @@ const KNOWN_POPUPS = new Set([
   "POPUP_PLAN_DELAYED",
   "POPUP_CONSULTANT_NO_SHOW",
   "POPUP_MEDICAL_CONCERN",
+  // Urgent cancelled pop-ups (Oct 2026): their OK / "Pick a new time"
+  // buttons complete them. Missing here, the server refused it.
+  "POPUP_CLASS_CANCELLED",
+  "POPUP_CONSULTATION_CANCELLED",
   "POPUP_PHOTO_PRIVACY_NOTICE",
 ]);
 
@@ -144,6 +148,8 @@ exports.completePopup = async (req, res) => {
     }
 
     let state = await findActiveState(userId, variable);
+    // Had she already asked for help on this check-in? (before this tap)
+    const alreadyAskedForHelp = !!(state && state.metadata && state.metadata.response === "need_help");
     if (!state) {
       // No active state — create one so the completion is recorded.
       state = await PendingPopupState.create({
@@ -153,7 +159,49 @@ exports.completePopup = async (req, res) => {
       });
     }
 
-    await state.update({ completedAt: new Date() });
+    const update = { completedAt: new Date() };
+    // Early check-in: keep her one-tap answer (good / some_issues /
+    // need_help). Before this, the answer was dropped for an existing row.
+    const response = req.body && req.body.metadata && req.body.metadata.response;
+    if (variable === "POPUP_EARLY_CHECKIN" && typeof response === "string") {
+      update.metadata = {
+        ...(state.metadata || {}),
+        response: response.slice(0, 32),
+        answeredAt: new Date().toISOString(),
+      };
+    }
+    await state.update(update);
+
+    // "😟 Need help" on the diet check-in → alert admin (Oct 2026). Once
+    // per check-in (one check-in per shared diet plan). Never blocks her.
+    if (variable === "POPUP_EARLY_CHECKIN" && response === "need_help" && !alreadyAskedForHelp) {
+      try {
+        const { createEscalation } = require("../../helper/escalation");
+        const meta = state.metadata || {};
+        const u = await User.findByPk(userId, { attributes: ["firstName", "lastName", "phone"] });
+        const name = u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "";
+        await createEscalation({
+          userId,
+          dietitianId: null, // admin only
+          trigger: "DIET_CHECKIN_HELP",
+          severity: "high",
+          payload: {
+            dietPlanId: meta.dietPlanId || null,
+            userPlanId: meta.userPlanId || null,
+            firstPlan: meta.firstPlan !== false,
+            clientName: name || null,
+            phone: (u && u.phone) || null,
+            answeredAt: new Date().toISOString(),
+          },
+          copy: {
+            title: `${name || "A client"} needs help with her diet plan`,
+            body: `${name || "She"} tapped "Need help" on her ${meta.firstPlan === false ? "new " : ""}diet plan check-in. Please contact her.`,
+          },
+        });
+      } catch (e) {
+        console.error("[popupState] need-help alert failed:", e.message);
+      }
+    }
 
     return res.json(
       ApiResponse("1", "Popup completed", { state: state.toJSON() })

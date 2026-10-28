@@ -65,6 +65,12 @@ async function autoEndExpiredSessions() {
 
   if (toEnd.length === 0) return [];
 
+  // Class diary: the trainer forgot to tap End.
+  const diary = require("./classDiary");
+  for (const s of inProgressSlots) {
+    if (toEnd.includes(s.id)) await diary.ended(s, "system", null);
+  }
+
   // completed_by stays NULL — that's the audit signal saying "the cron
   // did this, the trainer never clicked End". status_changed_at is set
   // so we can rank the events on the audit dashboard.

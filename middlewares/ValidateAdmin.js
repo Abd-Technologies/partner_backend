@@ -1,6 +1,6 @@
-const { verify } = require("jsonwebtoken");
 const ApiResponse = require("../helper/ApiResponse");
-const { User } = require("../models");
+const { verifyAccess, renew } = require("../helper/authToken");
+const { isStaff } = require("../helper/roles");
 
 const validateAdmin = async (req, res, next) => {
   const accessToken = req.header("accessToken");
@@ -11,23 +11,24 @@ const validateAdmin = async (req, res, next) => {
   // Bug A fix: verify() throws JsonWebTokenError / TokenExpiredError on invalid
   // or expired tokens. Without try/catch this was an unhandled async throw in
   // Express 4 middleware, crashing the server process instead of returning JSON.
-  let validToken;
+  // Oct 2026: helper/authToken.js (expiry, logout revocation, renewal).
+  let auth;
   try {
-    validToken = verify(accessToken, process.env.JWT_ACCESS_SECRET);
+    auth = await verifyAccess(accessToken);
   } catch (err) {
-    return res.json(ApiResponse("0", "Invalid accessToken!", {}));
+    // Bug B fix kept: deleted account / stale token -> "User not found!".
+    if (err && err.code === "NO_USER") return res.json(ApiResponse("0", "User not found!", {}));
+    if (err && err.code) return res.json(ApiResponse("0", "Invalid accessToken!", {}));
+    return next(err);
   }
 
-  req.user = validToken;
+  req.user = auth.payload;
+  const user = auth.user;
+  renew(res, auth.payload, auth.user);
 
-  // Bug B fix: User.findOne can return null (deleted account, stale token).
-  // Accessing user.userType on null threw TypeError — crash same path as Bug A.
-  const user = await User.findOne({ where: { id: req.user.id } });
-  if (!user) {
-    return res.json(ApiResponse("0", "User not found!", {}));
-  }
-
-  if (user.userType !== "User") {
+  // Normalised check: a client stored as "user" / "User " is NOT staff,
+  // and an account with no type at all is not staff either.
+  if (isStaff(user)) {
     // Enrich req.user (until now just the JWT payload — {email, id}) with
     // the userType we already fetched above, at no extra query cost.
     // Downstream Admin-side controllers use this to scope data to the

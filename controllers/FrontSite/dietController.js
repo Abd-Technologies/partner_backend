@@ -392,6 +392,11 @@ exports.getAllClients = async (req, res, next) => {
           }
         }
       }
+      // Plan ended: she keeps seeing her meal plan, but no new bookings.
+      if (plan.expireDate && new Date(plan.expireDate).getTime() < Date.now() && !(lastCompleted && !delivered)) {
+        status = "PLAN_ENDED";
+        statusDetail = `Plan ended ${require("moment-timezone")(plan.expireDate).tz("Asia/Karachi").format("D MMM")}`;
+      }
       if (todayAppt) {
         status = "CONSULTATION_TODAY";
         statusDetail = "Consultation scheduled today";
@@ -408,7 +413,11 @@ exports.getAllClients = async (req, res, next) => {
       let planPipeline = null;
       if (lastCompleted && !delivered) {
         const consultStartedAt = new Date(lastCompleted.date).getTime();
-        const dueAt = consultEndedAt + PLAN_SLA_HOURS * 3600000;
+        // Oct 2026: 48 WORKING hours (no Sat/Sun, no her emergency days).
+        const dueAt = (
+          await require("../../helper/planDeliveryClock").dueAt(
+            new Date(consultEndedAt), lastCompleted.dietitionId, PLAN_SLA_HOURS)
+        ).getTime();
         const hoursLeft = Math.round((dueAt - Date.now()) / 3600000);
         const profileRow = profileByUser.get(userId);
         const editedAt = profileRow && profileRow.lastDietitianEdit
@@ -454,6 +463,7 @@ exports.getAllClients = async (req, res, next) => {
       "AWAITING_PLAN",
       "ON_TRACK",
       "NEW",
+      "PLAN_ENDED",
     ];
     clients.sort(
       (a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status)

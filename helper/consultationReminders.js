@@ -32,6 +32,7 @@ async function sendConsultationReminders() {
     where: {
       status: "confirmed",
       reminderSentAt: null,
+      paymentHoldAt: null,
       date: {
         [Op.gte]: new Date(now - 36 * 3600000),
         [Op.lte]: new Date(now + 36 * 3600000),

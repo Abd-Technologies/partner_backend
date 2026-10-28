@@ -8,3 +8,35 @@ config/google-meet/token.json
 
 # Firebase service-account key (secret, never commit)
 fither-e7a36-*.json
+
+# Vertex AI service-account key (secret, never commit)
+vertex-key.json
+
+# ── Added Oct 2026: working files that should never be committed ──
+# Backup / proposal copies made while editing
+*.bak
+*.bak_*
+*.proposal_*
+*.orig
+# Logs, Redis dump, temp
+*.log
+error_log
+stderr.log
+dump.rdb
+tmp/
+# One-off debug / test scripts
+debug_*.js
+test_vertex*.js
+# Secrets
+.env.*
+!.env.example
+config/config.json
+config/google-meet/
+*.pem
+# Women's uploads (slips, photos, reports): private data, not code
+public/payment_slips/
+public/issueUploads/
+public/calorieUploads/
+public/posts/
+# Tool folders
+.claude/

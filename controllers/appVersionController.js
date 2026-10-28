@@ -43,8 +43,9 @@ async function getAppVersion(req, res) {
 
 async function setAppVersion(req, res) {
   const actor = req.user && req.user.id ? await User.findByPk(req.user.id, { attributes: ["userType"] }) : null;
-  if (!actor || actor.userType !== (process.env.ADMIN || "Admin")) {
-    return res.json(ApiResponse("0", "Admins only", {}));
+  const roles = require("../helper/roles");
+  if (!roles.isAdmin(actor)) {
+    return res.json(ApiResponse("0", roles.adminsOnlyMessage(actor), {}));
   }
   const { platform, latestVersion, minimumVersion, storeUrl, message } = req.body || {};
   if (!["android", "ios"].includes(platform)) return res.json(ApiResponse("0", "Platform must be android or ios", {}));
@@ -91,12 +92,14 @@ async function reportAppVersion(req, res) {
     { appVersion: String(version), appPlatform: platform, appVersionAt: new Date() },
     { where: { id: req.user.id } }
   );
+  // Growth analytics: one row per day she opens the app.
+  require("../helper/growthTracking").activeDay(req.user.id, { platform, appVersion: String(version) });
   return res.json(ApiResponse("1", "OK", {}));
 }
 
 async function isAdmin(req) {
   const actor = req.user && req.user.id ? await User.findByPk(req.user.id, { attributes: ["userType"] }) : null;
-  return !!actor && actor.userType === (process.env.ADMIN || "Admin");
+  return require("../helper/roles").isAdmin(actor);
 }
 
 /**

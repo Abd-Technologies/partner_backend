@@ -51,6 +51,23 @@ module.exports = (sequelize, DataTypes) => {
     },
   });
 
+  // Keep planType in step with the category (Oct 2026): new plans get it,
+  // and changing a plan's category updates it. Admins never set planType
+  // directly, so the category is the real choice.
+  const syncPlanType = async (plan) => {
+    if (plan.planType && !plan.changed("CategoryId")) return;
+    const { typeFromWords } = require("../helper/planKind");
+    let type = null;
+    if (plan.CategoryId && sequelize.models.Category) {
+      const cat = await sequelize.models.Category.findByPk(plan.CategoryId, { attributes: ["title"] });
+      const t = String((cat && cat.title) || "").toLowerCase();
+      type = t.includes("both") || t.includes("combined") ? "combined" : typeFromWords(t);
+    }
+    plan.planType = type || plan.planType || typeFromWords(plan.title);
+  };
+  Plan.beforeCreate(syncPlanType);
+  Plan.beforeUpdate(syncPlanType);
+
   // Each user can have one email verification code
   Plan.associate = (models) => {
     Plan.hasMany(models.UserPlan);

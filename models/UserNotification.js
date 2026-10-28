@@ -53,6 +53,13 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DATE,
       allowNull: true,
     },
+    // She swiped it away in the bell (Oct 2026). Hidden, not deleted, so it
+    // can be brought back. Column added by
+    // migrations/20261031120000-notif-diet-and-hide.js.
+    hiddenAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   });
 
   UserNotification.associate = (models) => {

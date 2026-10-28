@@ -115,7 +115,16 @@ async function latestWeight(userId, asOfDate) {
 }
 
 async function buildGoalBlock(userId, userRow, asOfDate) {
-  const goal = await fetchActiveGoal(userId);
+  let goal = await fetchActiveGoal(userId);
+  // Oct 2026: target set on Home (User.targetWeightKg) but no Goal row
+  // yet: make it now, so Progress shows her goal instead of "Set a goal".
+  if (!goal && userRow && userRow.targetWeightKg != null) {
+    try {
+      goal = await require('./goalSync').syncGoalFromTarget(userId);
+    } catch (e) {
+      console.error('[progress] goal self-heal', userId, e.message);
+    }
+  }
   const latest = await latestWeight(userId, asOfDate);
 
   // No Goal row yet (e.g. backfill skipped this user) → fall back to the
@@ -538,7 +547,7 @@ function buildHubInsights(cycleData, limit = 3) {
     out.push({
       id: `static_${out.length + 1}`,
       headline: deriveHeadline(ins.text),
-      subtitle: phase ? `${capitalise(phase)} phase · static tip` : 'Daily nudge',
+      subtitle: phase ? `Tip for your ${phase} phase` : 'Daily tip',
       body: ins.text,
       tone: 'informational',
       accentHex: ins.accentHex,

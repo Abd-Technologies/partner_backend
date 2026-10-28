@@ -44,6 +44,12 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 0,
     },
+    // Oct 2026: her real cycle lengths (days between two logged period
+    // starts), newest last, up to 6. JSON text. See helper/cycleLearning.js.
+    cycleHistory: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
   });
 
   UserCycleData.associate = (models) => {

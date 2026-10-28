@@ -17,7 +17,22 @@
 const fs = require('fs');
 const path = require('path');
 const { authenticate } = require('@google-cloud/local-auth');
-const { OAuth2Client } = require('google-auth-library');
+// Use the SAME google-auth-library version that the Meet client (google-gax)
+// uses. The top-level copy is v10+ (pulled in by the Gemini/Vertex SDK),
+// whose request headers google-gax v4 can't read, so every Meet call went
+// out without a token: "16 UNAUTHENTICATED: Request is missing required
+// authentication credential".
+function loadOAuth2Client() {
+  try {
+    const gaxPath = require.resolve('google-gax/package.json', {
+      paths: [require.resolve('@google-apps/meet')],
+    });
+    return require(require.resolve('google-auth-library', { paths: [path.dirname(gaxPath)] })).OAuth2Client;
+  } catch (_) {
+    return require('google-auth-library').OAuth2Client;
+  }
+}
+const OAuth2Client = loadOAuth2Client();
 
 const SCOPES = ['https://www.googleapis.com/auth/meetings.space.readonly'];
 

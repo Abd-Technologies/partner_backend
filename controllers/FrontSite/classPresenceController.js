@@ -10,6 +10,23 @@ const { parseEndAsUtc } = require("../../helper/timeFormats");
 // (TRIAL_JOIN_WINDOW_MINUTES, default 10). Paid workout clients are never
 // limited. Returns the minutes late when she's a trial user past the
 // window, otherwise null.
+/** May she attend live classes? A live plan (paid or trial) or a running
+ *  free trial. Ended / cancelled / paused plans: no (attendance not counted). */
+async function hasClassAccess(userId) {
+  const live = await UserPlan.findOne({ where: { userId, ...activeUserPlanWhere() }, attributes: ["id"] });
+  if (live) return true;
+  if (!TrialJourney) return false;
+  const journey = await TrialJourney.findOne({
+    where: {
+      userId,
+      convertedAt: null,
+      startedAt: { [Op.gte]: moment().subtract(getTrialDays(), "days").toDate() },
+    },
+    attributes: ["id"],
+  });
+  return !!journey;
+}
+
 async function trialLateMinutes(userId, slot) {
   if (!TrialJourney) return null;
   const journey = await TrialJourney.findOne({
@@ -126,6 +143,12 @@ exports.join = async (req, res) => {
       presence.lastSeenAt = now;
       await presence.save();
     } else {
+      if (!(await hasClassAccess(userId))) {
+        console.log(`[class-analytics] JOIN_BLOCKED_PLAN_ENDED: userId=${userId} slotId=${slotId}`);
+        return res.json(
+          ApiResponse("0", "Your plan has ended. Renew your plan to join live classes.", { code: "PLAN_ENDED" })
+        );
+      }
       const lateBy = await trialLateMinutes(userId, slot);
       if (lateBy != null) {
         console.log(

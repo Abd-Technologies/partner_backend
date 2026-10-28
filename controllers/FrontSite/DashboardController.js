@@ -117,6 +117,8 @@ async function buildCycleAndPhase(userId) {
     phaseLabel: PHASE_LABELS[info.phase] || "Follicular Phase",
     periodInDays,
     averageCycleLength: length,
+    // How many of her real cycles the engine has learned from (Oct 2026).
+    cyclesLearned: require("../../helper/cycleLearning").historyOf(row).length,
   };
   return { cycle, phase: info.phase };
 }
@@ -272,7 +274,35 @@ function slotMomentOnUtcDate(parts, utcMomentDay) {
     .utc();
 }
 
-async function buildLiveAndComingUp(userTz) {
+/** Trial user, class started more than the join window ago, she hasn't joined it today. */
+async function trialWindowPassed(userId, slot, todayUtc, nowUtc) {
+  const { TrialJourney, UserPlan, Plan, ClassPresence: CP } = require("../../models");
+  const { getTrialDays, getJoinWindowMinutes } = require("../../helper/trialState");
+  const { activeUserPlanWhere } = require("../../helper/activePackage");
+  if (!TrialJourney) return false;
+  const journey = await TrialJourney.findOne({
+    where: { userId, convertedAt: null, startedAt: { [Op.gte]: moment().subtract(getTrialDays(), "days").toDate() } },
+    attributes: ["id"],
+  });
+  if (!journey) return false;
+  const paid = await UserPlan.findOne({
+    where: { userId, ...activeUserPlanWhere(), isTrial: { [Op.not]: true } },
+    include: [{ model: Plan, attributes: [], where: { CategoryId: { [Op.in]: [2, 3] } } }],
+    attributes: ["id"],
+  });
+  if (paid) return false;
+  const p = parseSlotTimeParts(slot.start);
+  if (!p) return false;
+  const startUtc = slotMomentOnUtcDate(p, todayUtc);
+  if (nowUtc.diff(startUtc, "minutes", true) <= getJoinWindowMinutes()) return false;
+  const joined = await CP.findOne({
+    where: { userId, slotId: slot.id, joinedAt: { [Op.gte]: moment.tz("Asia/Karachi").startOf("day").toDate() } },
+    attributes: ["id"],
+  });
+  return !joined;
+}
+
+async function buildLiveAndComingUp(userTz, userId = null) {
   const tz = userTz || DEFAULT_TIMEZONE;
   const slots = await Slot.findAll({
     where: {
@@ -354,6 +384,34 @@ async function buildLiveAndComingUp(userTz) {
       .filter((s) => isWithinTodaysWindow(s) && s.status !== "Completed" && s.status !== "Cancelled")
       .sort((a, b) => startOf(a) - startOf(b))[0];
   }
+  // Free trial: a class can only be joined in its first N minutes. Once
+  // that's gone (and she hasn't joined it), stop showing it and move on
+  // to her next class.
+  if (liveSlot && userId) {
+    try {
+      const late = await trialWindowPassed(userId, liveSlot, todayUtc, nowUtc);
+      if (late) {
+        const lateStart = (() => {
+          const p = parseSlotTimeParts(liveSlot.start);
+          return p ? slotMomentOnUtcDate(p, todayUtc).valueOf() : 0;
+        })();
+        const skipId = liveSlot.id;
+        liveSlot = slots
+          .filter((s) => s.id !== skipId && isWithinTodaysWindow(s) && s.status !== "Completed" && s.status !== "Cancelled")
+          .filter((s) => {
+            const p = parseSlotTimeParts(s.start);
+            return p && slotMomentOnUtcDate(p, todayUtc).valueOf() > lateStart;
+          })
+          .sort((a, b) => {
+            const pa = parseSlotTimeParts(a.start);
+            const pb = parseSlotTimeParts(b.start);
+            return slotMomentOnUtcDate(pa, todayUtc).valueOf() - slotMomentOnUtcDate(pb, todayUtc).valueOf();
+          })[0] || null;
+      }
+    } catch (e) {
+      console.error("DashboardController trial window:", e.message);
+    }
+  }
   if (liveSlot) {
     const trainer = liveSlot.User;
     const trainerName = trainer
@@ -392,7 +450,24 @@ async function buildLiveAndComingUp(userTz) {
       );
     }
 
+    // Did SHE already join this class today? Then her button says
+    // "Rejoin" (she dropped out / closed Zoom and is coming back).
+    let joinedToday = false;
+    if (userId) {
+      try {
+        joinedToday = !!(await ClassPresence.findOne({
+          where: {
+            userId,
+            slotId: liveSlot.id,
+            joinedAt: { [Op.gte]: moment.tz("Asia/Karachi").startOf("day").toDate() },
+          },
+          attributes: ["id"],
+        }));
+      } catch (_) {}
+    }
+
     live = {
+      joinedToday,
       slotId: liveSlot.id,
       classType: liveSlot.type,
       trainerName: trainerName.length ? trainerName : null,
@@ -683,7 +758,7 @@ async function getDashboard(req, res) {
     settledOrNull(buildUserBlock(userRow), "user"),
     settledOrNull(buildCycleAndPhase(userId), "cycle"),
     settledOrNull(buildGoal(userRow, userId), "goal"),
-    settledOrNull(buildLiveAndComingUp(userTz), "liveAndComingUp"),
+    settledOrNull(buildLiveAndComingUp(userTz, userId), "liveAndComingUp"),
     settledOrNull(buildTodayCheckin(userId), "todayCheckin"),
     settledOrNull(computeHydrationSummary(userId), "hydration"),
     settledOrNull(buildSleep(userId), "sleep"),

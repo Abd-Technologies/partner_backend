@@ -21,9 +21,30 @@
 
 const { Op } = require('sequelize');
 const moment = require('moment-timezone');
-const { User, WeeklyCheckin } = require('../../models');
+const { User, WeeklyCheckin, UserPlan } = require('../../models');
 const sendNotification = require('../notification');
 const { buildBody, getPhase, recentlySent } = require('./_shared');
+const { stateFor } = require('../weeklyCheckin');
+
+// Same words as the Home card (one weekly check-in, Oct 2026).
+const COPY = {
+  week1: {
+    title: 'How was your first week? 📊',
+    body: 'Your week 1 check-in is ready. Your dietitian uses it to tune your plan.',
+  },
+  halfway: {
+    title: 'Halfway there! ⭐',
+    body: 'Share your progress to unlock your follow-up call.',
+  },
+  end: {
+    title: 'Your end-of-plan check-in 🌿',
+    body: "See how far you've come and plan what's next.",
+  },
+  weekly: {
+    title: 'Weekly check-in time 📊',
+    body: 'How did your week go? Log your weight, measurements, and weekly rating before the week closes.',
+  },
+};
 
 async function sendWeeklyCheckinReminders() {
   try {
@@ -33,11 +54,28 @@ async function sendWeeklyCheckinReminders() {
 
     // Users who already submitted a check-in this week — no point nudging them.
     const submitted = await WeeklyCheckin.findAll({
-      where:      { weekDate: { [Op.gte]: weekStart } },
+      // Only real check-ins count (Oct 2026). A weight logged from the
+      // Home tile also saves a row for the week, which wrongly silenced
+      // her check-in reminder. stateFor() below makes the final call.
+      where:      { weekDate: { [Op.gte]: weekStart }, checkinDay: { [Op.ne]: null } },
       attributes: ['userId'],
     });
     const submittedUserIds = new Set(submitted.map((r) => r.userId));
 
+    // Only paid women, from 7 days after their paid plan began (same rule
+    // as the app's Weekly check-in card). Never during the free trial.
+    const weekAgo = moment().subtract(7, 'days').toDate();
+    const paidPlans = await UserPlan.findAll({
+      where: {
+        status: true,
+        isTrial: { [Op.not]: true },
+        cancelledAt: null,
+        expireDate: { [Op.gte]: new Date() },
+        buyingDate: { [Op.lte]: weekAgo },
+      },
+      attributes: ['userId'],
+    });
+    const eligible = new Set(paidPlans.map((p) => p.userId));
     const users = await User.findAll({
       where: {
         userType:    'User',
@@ -51,20 +89,23 @@ async function sendWeeklyCheckinReminders() {
 
     for (const user of users) {
       // Already checked in this week — skip
+      if (!eligible.has(user.id)) continue;
       if (submittedUserIds.has(user.id)) { results.skippedSubmitted++; continue; }
 
       // Prevent double-fire within 6 days
       if (await recentlySent(user.id, 'weeklyCheckin', 6)) { results.skippedCooldown++; continue; }
 
+      // Her own check-in week (7 days from her diet plan / plan start).
+      const state = await stateFor(user.id);
+      if (!state.due) { results.skippedSubmitted++; continue; }
+      const copy = COPY[state.label] || COPY.weekly;
+
       const phase = await getPhase(user.id);
       await sendNotification(
         [user.deviceToken],
         {
-          title: 'Weekly check-in time 📊',
-          body:  buildBody(
-            'How did your week go? Log your weight, measurements, and weekly rating before the week closes.',
-            phase
-          ),
+          title: copy.title,
+          body:  buildBody(copy.body, phase),
         },
         { type: 'weeklyCheckin', screen: 'checkin' },
       );

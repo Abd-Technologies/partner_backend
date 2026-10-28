@@ -4,9 +4,10 @@ const { getMotivationStats, markAttendance } = require("../../controllers/FrontS
 const classPresenceController = require("../../controllers/FrontSite/classPresenceController");
 const checkActivePlan = require('../../middlewares/attendanceplancheck'); // Import the authentication middleware
 const { validateToken } = require("../../middlewares/AuthorizationMW");
+const { selfOrStaff } = require("../../middlewares/roleGuards");
 
-router.get("/motivation/:userId", getMotivationStats);
-router.post('/mark/:userId', markAttendance);
+router.get("/motivation/:userId", validateToken, selfOrStaff("params.userId"), getMotivationStats);
+router.post('/mark/:userId', validateToken, selfOrStaff("params.userId"), markAttendance);
 router.post("/presence/join", validateToken, classPresenceController.join);
 router.post("/presence/leave", validateToken, classPresenceController.leave);
 

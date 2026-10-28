@@ -37,7 +37,7 @@ function toIsoDate(d) {
 // then evaluateConsultantNoShows has auto-retired it and opened an
 // escalation for staff to follow up on instead.
 function isAwaitingConsultant(appt) {
-  if (!appt || appt.status !== "confirmed" || appt.noShowReportedAt) {
+  if (!appt || appt.status !== "confirmed" || appt.noShowReportedAt || appt.paymentHoldAt) {
     return false;
   }
   // appt.date is only the DAY; the start time comes from the slot.
@@ -107,6 +107,8 @@ exports.getDietitianAvailability = async (req, res) => {
     const blockedSet = new Set(
       blockingAppts.map((a) => `${a.timeSlotId}|${toIsoDate(a.date)}`)
     );
+    // Oct 2026: her emergency days are fully closed (helper/emergencyDay.js).
+    const emergencyDays = await require("../../helper/emergencyDay").blockedDays(dietitianId, from, to);
 
     // Walk every date in [from, to], emit one entry per template that
     // actually belongs to that date's weekday. Previously this emitted
@@ -132,7 +134,7 @@ exports.getDietitianAvailability = async (req, res) => {
           date: isoDate,
           start: t.start,
           end: t.end,
-          available: !blockedSet.has(key),
+          available: !blockedSet.has(key) && !emergencyDays.has(isoDate),
         });
       }
     }
@@ -333,9 +335,12 @@ exports.getMyCurrentAppointment = async (req, res) => {
           // confirmed before the snapshot existed. Null until either
           // exists — the client app uses null vs non-null to decide
           // the grey/yellow "Join Meeting" button state.
-          dietitionLink:
-            appt.meetLink ||
-            (appt.SlotDiet ? appt.SlotDiet.dietitionLink || null : null),
+          dietitionLink: appt.paymentHoldAt
+            ? null // on hold: no join link until her payment is confirmed
+            : appt.meetLink ||
+              (appt.SlotDiet ? appt.SlotDiet.dietitionLink || null : null),
+          // Oct 2026: on hold until her payment is confirmed.
+          paymentHold: !!appt.paymentHoldAt,
           awaitingConsultant: isAwaitingConsultant(appt),
           // True only for the Priority-3 fallback above: a canceled
           // appointment specifically caused by the dietitian never
@@ -343,6 +348,9 @@ exports.getMyCurrentAppointment = async (req, res) => {
           // state on the client — never true for an ordinary
           // client/dietitian-initiated cancellation.
           noShow: appt.status === "canceled" && !!appt.noShowReportedAt,
+          // Oct 2026: confirmed, not started 10+ min after its start time
+          // (helper/dietitianLateCheck.js) — "your dietitian is running late".
+          dietitianLate: appt.status === "confirmed" && !!appt.dietitianLateAlertAt,
           // Free days added to her package for that missed session.
           noShowBonusDays: appt.noShowBonusDays || 0,
           // She (the client) missed this session; drives the "you missed
@@ -495,7 +503,7 @@ exports.reportClientNoShow = async (req, res) => {
     if (!appt) return res.json(ApiResponse("0", "Appointment not found", {}));
 
     const isOwnDietitian = Number(appt.dietitionId) === Number(actorId);
-    const isAdmin = req.user.userType === "Admin";
+    const isAdmin = String(req.user.userType || "").trim().toLowerCase() === "admin";
     if (!isOwnDietitian && !isAdmin) {
       return res.json(ApiResponse("0", "Not your appointment", {}));
     }
