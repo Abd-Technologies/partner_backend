@@ -822,4 +822,4 @@ async function getDashboard(req, res) {
   return res.json(ApiResponse("1", "Dashboard", data));
 }
 
-module.exports = { getDashboard };
+module.exports = { getDashboard, buildLiveAndComingUp }; // export: scripts/diag_home_classes.js
