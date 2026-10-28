@@ -199,6 +199,12 @@ function parseSlipText(rawText) {
   const refPatterns = [
     // "Reference: ABC1234" / "Reference #ABC1234" / "Ref. No. ABC1234"
     /(?:Reference|Ref(?:erence)?\s*(?:No|Number|#)|Transaction\s*ID|Transaction\s*Number|Trans(?:action)?\s*Ref(?:erence)?|Trx(?:n)?\s*ID|TID)\s*[#:]\s*([A-Z0-9][A-Z0-9\-]{6,31})/i,
+    // Oct 2026: slips name it many ways ("Transaction ID #5757...",
+    // "Transaction ID 5757...", "Reference No 1234...", "TRX ID", "Txn ID",
+    // "RRN", "STAN"). Any one counts. A space, new line, #, : or - may
+    // follow the label; the value must contain a digit, so a word such as
+    // "Number" is never taken as the ID.
+    /(?:(?:Trans(?:action)?|Txn|Trx)\s*(?:ID|No\.?|Number|Ref(?:erence)?(?:\s*(?:ID|No\.?|Number))?)|Reference\s*(?:ID|No\.?|Number)?|Ref\.?\s*(?:ID|No\.?|Number)|\bRRN\b|\bSTAN\b|\bTID\b)\s*[#:.\-]?\s*(?=[A-Z0-9\-]*\d)([A-Z0-9][A-Z0-9\-]{6,31})\b/i,
     // "Ref. ABC1234" or "Ref ABC1234" — space-only separator allowed but only with Ref. abbreviation
     /\bRef\.?\s+([A-Z0-9][A-Z0-9\-]{6,31})\b/i,
     // Generic "ID: XYZ" if it's a long alphanumeric
@@ -214,6 +220,16 @@ function parseSlipText(rawText) {
         break;
       }
     }
+  }
+  // Oct 2026: two-column slips (EasyPaisa, JazzCash…) are often read as
+  // all labels first, then all values ("Transaction ID / Date & Time /
+  // … / #57577788377 / 21 October…"), so the ID is not next to its label.
+  // If the slip has an ID label anywhere, a value written "#<7+ chars
+  // with a digit>" is the ID. Only the # form, so an account or phone
+  // number is never taken as the ID.
+  if (!refNumber && /\b(?:Transaction|Trans|Txn|Trx|Reference|Ref|TID|RRN|STAN)\b/i.test(text)) {
+    const m = /(?:^|[^A-Z0-9])#\s?((?=[A-Z0-9\-]*\d)[A-Z0-9][A-Z0-9\-]{6,31})\b/i.exec(text);
+    if (m) refNumber = m[1];
   }
 
   return {

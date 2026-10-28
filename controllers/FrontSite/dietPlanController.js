@@ -40,7 +40,9 @@ async function buildPlanPreparing(userId) {
   // });
   // if (pdf) return null;
 
-  const dueAt = new Date(doneAt.getTime() + PLAN_DUE_HOURS * 3600000);
+  // Oct 2026: 48 WORKING hours (no Sat/Sun, no dietitian emergency days).
+  const dueAt = await require('../../helper/planDeliveryClock').dueAt(
+    doneAt, consult.dietitionId, PLAN_DUE_HOURS);
   let dietitianName = null;
   if (consult.dietitionId) {
     const d = await User.findByPk(consult.dietitionId, {
@@ -172,8 +174,10 @@ async function getMyBookingContext(req, res) {
     // dietitianId (on itself or its Plan) over just the newest row, so
     // an old workout-only purchase never shadows a newer combined
     // package's assignment.
+    // status: true (Oct 2026) — ended plans are now kept switched off; an
+    // old plan must not show her previous dietitian.
     const userPlan = await UserPlan.findOne({
-      where: { UserId: userId },
+      where: { UserId: userId, status: true },
       include: [{ model: Plan, attributes: ['id', 'title', 'dietitianId'] }],
       order: [
         [db.sequelize.literal('`UserPlan`.`dietitianId` IS NULL'), 'ASC'],
@@ -196,21 +200,42 @@ async function getMyBookingContext(req, res) {
           order: [['date', 'DESC'], ['createdAt', 'DESC']],
         });
 
-    const userPlanId = activeDietPlan
+    let userPlanId = activeDietPlan
       ? activeDietPlan.userPlanId
       : (userPlan ? userPlan.id : null);
 
-    const dietitianId =
+    let dietitianId =
       (activeDietPlan && activeDietPlan.dietitianId) ||
       userPlanDietitianId ||
       (appt ? appt.dietitionId : null) ||
       null;
 
+    // Plan ended (Oct 2026): never book under an old plan when she has a
+    // live one (e.g. renewed while the old meal plan is still showing).
+    const { activeUserPlanWhere } = require('../../helper/activePackage');
+    const livePlan = await UserPlan.findOne({
+      where: { userId, ...activeUserPlanWhere(), isTrial: { [Op.not]: true } },
+      include: [{ model: Plan, attributes: ['id', 'dietitianId'] }],
+      order: [['expireDate', 'DESC']],
+    });
+    if (livePlan && livePlan.id !== userPlanId) {
+      const liveDietitian =
+        livePlan.dietitianId != null
+          ? livePlan.dietitianId
+          : (livePlan.Plan && livePlan.Plan.dietitianId) || null;
+      if (liveDietitian) {
+        userPlanId = livePlan.id;
+        dietitianId = liveDietitian;
+      }
+    }
+    // No live paid plan at all, but she had one: her plan has ended.
+    const planEnded = !livePlan && !!userPlan && !userPlan.isTrial;
+
     // Change policy: after a second missed session self-booking is
     // locked until staff help her (helper/bookingPolicy.js).
     const ctxPlan = userPlanId
       ? await UserPlan.findByPk(userPlanId, {
-          attributes: ['id', 'bookingLockedAt', 'isTrial', 'expireDate'],
+          attributes: ['id', 'bookingLockedAt', 'isTrial', 'expireDate', 'lateChangeUsedAt', 'firstPlanDeliveredAt'],
         })
       : null;
     const bookingLocked = !!(ctxPlan && ctxPlan.bookingLockedAt);
@@ -221,6 +246,8 @@ async function getMyBookingContext(req, res) {
     //   renew           package expired, or her follow-up is already used
     //   locked          self-booking locked (second missed session)
     //   book_initial    paid package, initial consultation not done yet
+    //   initial_booked  initial consultation booked, not happened yet
+    //   plan_preparing  consultation done, her first real plan not shared
     //   day15_checkin   follow-up needs her Day-15 check-in first
     //   book_followup   check-in done, follow-up not booked yet
     //   followup_booked follow-up already booked
@@ -234,15 +261,32 @@ async function getMyBookingContext(req, res) {
         nextStep = 'locked';
       } else {
         const used = ['confirmed', 'In Progress', 'completed'];
-        const initial = await Appointment.findOne({
+        const initialRow = await Appointment.findOne({
           where: {
             userId,
             planId: ctxPlan.id,
             [Op.or]: [{ kind: 'initial' }, { kind: null }],
-            status: { [Op.in]: used },
+            status: { [Op.in]: ['pending', ...used] },
           },
-          attributes: ['id'],
+          attributes: ['id', 'status', 'date'],
+          order: [['date', 'DESC']],
         });
+        // Oct 2026: a booked ("confirmed") consultation that hasn't
+        // happened yet is NOT done. Before, a woman who upgraded from the
+        // trial and booked her first call was already told "Do my
+        // check-in, then book your follow-up". A confirmed session more
+        // than 2 hours in the past counts as done (staff sometimes never
+        // mark it completed).
+        const TWO_HOURS = 2 * 60 * 60 * 1000;
+        const initialDone =
+          !!initialRow &&
+          (initialRow.status === 'completed' ||
+            initialRow.status === 'In Progress' ||
+            (initialRow.status === 'confirmed' &&
+              initialRow.date &&
+              new Date(initialRow.date).getTime() + TWO_HOURS < Date.now()));
+        const initialBooked = !!initialRow && !initialDone;
+        const initial = initialDone ? initialRow : null;
         const followup = await Appointment.findOne({
           where: {
             userId,
@@ -253,7 +297,9 @@ async function getMyBookingContext(req, res) {
           attributes: ['id', 'status'],
           order: [['date', 'DESC']],
         });
-        if (!initial) {
+        if (initialBooked) {
+          nextStep = 'initial_booked';
+        } else if (!initial) {
           nextStep = 'book_initial';
         } else if (followup && followup.status === 'completed') {
           nextStep = 'renew';
@@ -265,6 +311,10 @@ async function getMyBookingContext(req, res) {
             attributes: ['id'],
           });
           nextStep = day15 ? 'book_followup' : 'day15_checkin';
+          // The halfway check-in counts from her first REAL plan (shared
+          // by the dietitian), never from the trial starter plan. Before
+          // that plan exists there is nothing to check in on.
+          if (!day15 && !ctxPlan.firstPlanDeliveredAt) nextStep = 'plan_preparing';
         }
       }
     }
@@ -275,7 +325,20 @@ async function getMyBookingContext(req, res) {
         userPlanId,
         dietitianId,
         bookingLocked,
+        // Oct 2026: her one free late change (cancel / miss inside 24 h)
+        // on this package is still unused — the booking screen warns her.
+        lateChangeAvailable: !(ctxPlan && ctxPlan.lateChangeUsedAt),
+        // Oct 2026 (Diet tab after a plan ends): when her package ends, and
+        // when the halfway check-in that unlocks the follow-up opens
+        // (14 days after her first plan was shared; helper/weeklyCheckin.js).
+        packageEndsOn: ctxPlan && ctxPlan.expireDate ? ctxPlan.expireDate : null,
+        halfwayOpensOn:
+          nextStep === 'day15_checkin' && ctxPlan && ctxPlan.firstPlanDeliveredAt
+            ? new Date(new Date(ctxPlan.firstPlanDeliveredAt).getTime() + 14 * 86400000)
+            : null,
         nextStep,
+        planEnded,
+        planEndedOn: planEnded && userPlan.expireDate ? userPlan.expireDate : null,
         hasActivePlan: !!activeDietPlan,
         // Filled only between "consultation done" and "plan delivered".
         planPreparing: activeDietPlan ? null : await buildPlanPreparing(userId),

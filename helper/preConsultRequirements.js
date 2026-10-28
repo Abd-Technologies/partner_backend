@@ -18,6 +18,7 @@
  */
 const { Op } = require("sequelize");
 const { PreConsultationProfile, User, UserCycleData, UserPlan, Plan } = require("../models");
+const { planTypeOf } = require("./planKind");
 
 /**
  * ONE truth for "which questions": her live PAID packages decide it.
@@ -39,16 +40,9 @@ async function planTypeForUser(userId) {
     if (!p) continue;
     const title = String(p.title || "").toLowerCase();
     if (title.startsWith("system") || title === "free trial") continue;
-    let type = p.planType;
-    if (!type) {
-      const cat = Number(p.CategoryId);
-      if (cat === 1) type = "diet";
-      else if (cat === 2) type = "workout";
-      else if (cat === 3) type = "combined";
-      else if (title.includes("combined") || title.includes("both")) type = "combined";
-      else if (title.includes("diet")) type = "diet";
-      else if (title.includes("workout")) type = "workout";
-    }
+    // planType, then category, then title (helper/planKind.js). A paid
+    // plan we can't type gets the full form (diet + workout questions).
+    const type = planTypeOf(p) || "combined";
     if (type === "diet" || type === "combined") diet = true;
     if (type === "workout" || type === "combined") workout = true;
   }
@@ -96,7 +90,9 @@ async function requirementsFor(userId, planType = "diet") {
   ) {
     required.push("cycle");
   }
-  if (blank(user && user.healthConditions)) required.push("conditions");
+  // Oct 2026: an answer from the trial form (profile.medicalConditions)
+  // counts too, so trial users who answered there aren't asked again.
+  if (blank(user && user.healthConditions) && blank(p.medicalConditions)) required.push("conditions");
   if (diet && blank(p.allergies)) required.push("health");
   const prefs = asJson(p.dietaryPreferences, []);
   if (diet && (!Array.isArray(prefs) || prefs.length === 0 || p.mealsPerDay == null)) {

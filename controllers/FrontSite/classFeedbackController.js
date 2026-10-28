@@ -10,6 +10,7 @@ const ApiResponse = require("../../helper/ApiResponse");
 const { ClassFeedback, User, Slot } = require("../../models");
 const { GOOD_TAGS, BAD_TAGS, pendingFor, findClass, fullName } = require("../../helper/classFeedback");
 const sendNotification = require("../../helper/notification");
+const { isAdmin, isTrainer, adminsOnlyMessage } = require("../../helper/roles");
 
 const ADMIN = process.env.ADMIN || "Admin";
 const TRAINER = process.env.TRAINER || "Trainer";
@@ -147,7 +148,7 @@ const sinceDate = (req) => {
 exports.trainerSummary = async (req, res) => {
   try {
     const user = await me(req);
-    if (!user || user.userType !== TRAINER) return res.json(ApiResponse("0", "Trainers only", {}));
+    if (!isTrainer(user)) return res.json(ApiResponse("0", "Trainers only", {}));
     const { days, since } = sinceDate(req);
     const rows = await ClassFeedback.findAll({
       where: { trainerId: user.id, classDate: { [Op.gte]: since }, rating: { [Op.ne]: null } },
@@ -162,7 +163,7 @@ exports.trainerSummary = async (req, res) => {
 exports.adminList = async (req, res) => {
   try {
     const user = await me(req);
-    if (!user || user.userType !== ADMIN) return res.json(ApiResponse("0", "Admins only", {}));
+    if (!isAdmin(user)) return res.json(ApiResponse("0", adminsOnlyMessage(user), {}));
     const { days, since } = sinceDate(req);
     const where = { classDate: { [Op.gte]: since }, rating: { [Op.ne]: null } };
     if (req.query.trainerId) where.trainerId = Number(req.query.trainerId);

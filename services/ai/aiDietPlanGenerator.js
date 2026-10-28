@@ -4,6 +4,15 @@ const { buildDietPlanSchema } = require('./schemas/dietPlanSchema');
 const { validateDietPlan } = require('./validators/dietPlanValidator');
 const db = require('../../models');
 
+// Oct 2026: a clear time limit for every AI call, so a call that hangs
+// never blocks the server. Over the limit = a failure (the trial plan
+// job then retries it). .env AI_TIMEOUT_SECONDS, default 90 (30..300).
+function aiTimeoutMs() {
+  const n = parseInt(process.env.AI_TIMEOUT_SECONDS, 10);
+  if (!Number.isInteger(n)) return 90000;
+  return Math.min(Math.max(n, 30), 300) * 1000;
+}
+
 const MODEL_NAME = process.env.GCP_AI_MODEL || 'gemini-2.5-flash';
 
 /**
@@ -59,14 +68,27 @@ async function generateDietPlan(user, planDays = 7, dietitianId = null) {
     prompt = buildDietPlanPrompt(user, planDays);
     const schema = buildDietPlanSchema(planDays, user.mealsPerDay);
 
-    const response = await aiClient.models.generateContent({
-      model: MODEL_NAME,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: schema,
-      },
-    });
+    const limitMs = aiTimeoutMs();
+    const abort = new AbortController();
+    let timer;
+    const response = await Promise.race([
+      aiClient.models.generateContent({
+        model: MODEL_NAME,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: schema,
+          // Cancels the request itself when the limit is reached.
+          abortSignal: abort.signal,
+        },
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          reject(new Error(`AI timed out after ${Math.round(limitMs / 1000)} s`));
+        }, limitMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
 
     rawResponse = response.text;
     tokensUsed = extractTokenUsage(response);

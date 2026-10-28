@@ -58,6 +58,12 @@ const COPY = {
     title: "System issue",
     body: "Backend reported a system-level issue. Tap for details.",
   },
+  // Admin only (not in DIETITIAN_NOTIFIED_TRIGGERS). The caller passes a
+  // copy with her name; this is the fallback.
+  DIET_CHECKIN_HELP: {
+    title: "A client needs help with her diet plan",
+    body: "She tapped \"Need help\" on her diet plan check-in. Please contact her.",
+  },
 };
 
 // Lazy admin-tokens fetch. Cached for 60s so a burst of escalations doesn't
@@ -114,6 +120,8 @@ async function createEscalation({
   trigger,
   severity = "medium",
   payload = null,
+  // Optional { title, body } for the staff push, e.g. with her name.
+  copy: customCopy = null,
 }) {
   const ticket = await EscalationTicket.create({
     userId,
@@ -126,7 +134,7 @@ async function createEscalation({
     notifiedAdmin: false,
   });
 
-  const copy = COPY[trigger] || {
+  const copy = customCopy || COPY[trigger] || {
     title: "Escalation",
     body: "An escalation was opened. Tap to review.",
   };

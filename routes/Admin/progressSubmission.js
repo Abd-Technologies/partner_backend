@@ -9,6 +9,7 @@ const ctrl = require("../../controllers/FrontSite/progressSubmissionController")
 router.get(
   "/:userId/progress",
   validateAdmin,
+  require("../../helper/dietitianScope").ownClientOnly("userId"),
   asyncMiddleware(ctrl.listForUser)
 );
 

@@ -13,7 +13,12 @@ const STAFF_ROLES = new Set([
   'Psychiatrist',
 ]);
 
-const isStaff = (user) => !!user && STAFF_ROLES.has(user.userType);
+// Role names are compared ignoring case and spaces ("admin ", "ADMIN"):
+// a strict 'Admin' check locked real admins out of post review.
+const { isAdmin } = require('../../helper/roles');
+const normRole = (r) => String(r || '').trim().toLowerCase();
+const STAFF_NORM = new Set([...STAFF_ROLES].map(normRole).concat(['dietitian']));
+const isStaff = (user) => !!user && (isAdmin(user) || STAFF_NORM.has(normRole(user.userType)));
 
 // "Paid" = a live PAID package (diet, workout or combined). Free-trial
 // plans never count — neither the old "Free Trial" plan nor the new
@@ -69,7 +74,7 @@ exports.getAllPosts = async (req, res) => {
 
     if (!isApproved) {
       const requester = await User.findByPk(req.user.id);
-      if (!requester || requester.userType !== 'Admin') {
+      if (!isAdmin(requester)) {
         return res
           .status(403)
           .json(ApiResponse('0', 'Admin access required to view pending posts', {}));
@@ -108,7 +113,17 @@ exports.getAllPosts = async (req, res) => {
       queryOpts.offset = parseInt(req.query.offset, 10) || 0;
     }
 
-    const posts = await Post.findAll(queryOpts);
+    // No limit asked: send the newest 300 only (the feed was loading every
+    // post ever). Same oldest-first order as before.
+    let flip = false;
+    if (req.query.limit === undefined && isApproved) {
+      queryOpts.limit = 300;
+      queryOpts.order = [['createdAt', 'DESC']];
+      flip = true;
+    }
+
+    let posts = await Post.findAll(queryOpts);
+    if (flip) posts = posts.reverse();
 
     const data = posts.map((post) => {
       const postJson = post.toJSON();
@@ -359,8 +374,8 @@ exports.deletePost = async (req, res) => {
 
     const requester = await User.findByPk(req.user.id);
     const isOwner = post.userId === req.user.id;
-    const isAdmin = requester && requester.userType === 'Admin';
-    if (!isOwner && !isAdmin) {
+    const isAdminUser = isAdmin(requester);
+    if (!isOwner && !isAdminUser) {
       return res
         .status(403)
         .json(ApiResponse('0', 'Not authorized to delete this post', {}));
@@ -384,7 +399,7 @@ exports.deletePost = async (req, res) => {
 exports.approvePost = async (req, res) => {
   try {
     const requester = await User.findByPk(req.user.id);
-    if (!requester || requester.userType !== 'Admin') {
+    if (!isAdmin(requester)) {
       return res.status(403).json(ApiResponse('0', 'Admin access required', {}));
     }
 

@@ -103,6 +103,11 @@ async function autoExpireUserPlans() {
             { planStatus: { [Op.notIn]: ["cancelled"] } },
           ],
           expireDate: { [Op.gt]: now },
+          // A free trial or a cancelled / switched-off plan doesn't keep
+          // her paid (a paused plan still does).
+          isTrial: { [Op.not]: true },
+          cancelledAt: null,
+          status: true,
         },
         transaction: t,
       });

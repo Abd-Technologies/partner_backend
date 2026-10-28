@@ -24,7 +24,8 @@
 
 const crypto       = require('crypto');
 const { Op }       = require('sequelize');
-const { TrialToken } = require('../../models');
+const { TrialToken, User } = require('../../models');
+const { isAdmin } = require('../../helper/roles');
 const ApiResponse  = require('../../helper/ApiResponse');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -174,6 +175,8 @@ async function listMyTrialTokens(req, res) {
       total:  count,
       page,
       limit,
+      // Trial length (admin setting) so the share message says the right days.
+      trialDays: require('../../helper/trialState').getTrialDays(),
     }));
   } catch (err) {
     console.error('[trial-token] listMyTrialTokens error:', err);
@@ -205,8 +208,13 @@ async function revokeTrialToken(req, res) {
 
     // Ownership check — reps can only revoke their own tokens.
     // Allow if referrerUserId matches OR if the caller is an Admin userType.
-    if (row.referrerUserId !== repId && req.user?.userType === 'User') {
-      return res.json(ApiResponse('0', 'Not authorised to revoke this token', {}));
+    // Sec pass 1: req.user is only the JWT payload here (no userType), so
+    // the old check let anyone revoke anyone's link. Load the caller.
+    if (String(row.referrerUserId) !== String(repId)) {
+      const me = repId ? await User.findByPk(repId, { attributes: ['id', 'userType'] }) : null;
+      if (!isAdmin(me)) {
+        return res.json(ApiResponse('0', 'You can only cancel your own trial links.', {}));
+      }
     }
 
     if (row.status === 'used') {

@@ -24,7 +24,11 @@ const {
   Plan,
   User,
   PreConsultationProfile,
+  ClassPresence,
+  WaterLog,
+  DailyCheckin,
 } = require('../models');
+const { minTrialAttendanceSeconds } = require('./trialAttendance');
 const { getTrialDays, getTrialClassGoal } = require('./trialState');
 const { countTrialClassesAttended } = require('./trialClasses');
 const { TRIAL_PLAN_TITLE } = require('../services/trialPlanService');
@@ -73,10 +77,8 @@ async function countryPrices(countryName) {
 }
 
 function isCombined(plan) {
-  if (!plan) return false;
-  if (plan.planType) return plan.planType === 'combined';
-  const t = (plan.title || '').toLowerCase();
-  return t.includes('both') || t.includes('combined');
+  // planType, then category, then title (helper/planKind.js).
+  return require('./planKind').planTypeOf(plan) === 'combined';
 }
 
 async function buildOfferItems(userId, countryName) {
@@ -142,10 +144,93 @@ function buildNote({ attended, goal, mealsLogged, days, goalKey }) {
 }
 
 /**
+ * Her trial, day by day (Oct 2026, "last day" recap on home + summary).
+ *
+ * Days are CALENDAR days in her time zone, numbered from the day she
+ * started, exactly like her starter meal plan ("Day 3 of 3, Mon"). There
+ * are always getTrialDays() of them (the admin's trial length), so a day
+ * is never split or mixed with the next one. Activity on a day after the
+ * last trial day is not counted.
+ *
+ * Each day: { day, date, isToday, isFuture, classes, meals, waterMl,
+ *             sleepHours, moodLevel }
+ */
+async function buildTrialDays(userId, journey) {
+  const n = getTrialDays();
+  const user = await User.findByPk(userId, { attributes: ['timeZone'] });
+  let tz = (user && user.timeZone) || 'Asia/Karachi';
+  if (!moment.tz.zone(tz)) tz = 'Asia/Karachi';
+  const first = moment(journey.startedAt).tz(tz).startOf('day');
+  const today = moment().tz(tz).format('YYYY-MM-DD');
+  const dates = [];
+  for (let i = 0; i < n; i++) dates.push(first.clone().add(i, 'days').format('YYYY-MM-DD'));
+  const from = first.toDate();
+  const to = first.clone().add(n, 'days').toDate();
+
+  const [presence, meals, water, checkins] = await Promise.all([
+    ClassPresence.findAll({
+      where: { userId, joinedAt: { [Op.gte]: from, [Op.lt]: to } },
+      attributes: ['slotId', 'joinedAt', 'durationSeconds'],
+      raw: true,
+    }),
+    MealLog.findAll({
+      where: { userId, date: { [Op.in]: dates }, status: { [Op.in]: ['followed', 'alternative'] } },
+      attributes: ['date'],
+      raw: true,
+    }),
+    WaterLog.findAll({
+      where: { userId, date: { [Op.in]: dates } },
+      attributes: ['date', 'amountMl'],
+      raw: true,
+    }),
+    DailyCheckin.findAll({
+      where: { userId, date: { [Op.in]: dates } },
+      attributes: ['date', 'sleepHours', 'moodLevel'],
+      raw: true,
+    }),
+  ]);
+
+  const dayKey = (d) => (typeof d === 'string' ? d.slice(0, 10) : moment(d).format('YYYY-MM-DD'));
+  // Classes: same rule as the class goal (time in one class on one day
+  // adds up across rejoins; counts once it reaches the minimum).
+  const perClass = new Map();
+  for (const r of presence) {
+    const date = moment(r.joinedAt).tz(tz).format('YYYY-MM-DD');
+    const key = `${r.slotId}|${date}`;
+    perClass.set(key, (perClass.get(key) || 0) + (Number(r.durationSeconds) || 0));
+  }
+  const min = minTrialAttendanceSeconds();
+  const classes = {};
+  for (const [key, secs] of perClass) {
+    if (secs < min) continue;
+    const date = key.split('|')[1];
+    classes[date] = (classes[date] || 0) + 1;
+  }
+  const mealsBy = {};
+  for (const r of meals) mealsBy[dayKey(r.date)] = (mealsBy[dayKey(r.date)] || 0) + 1;
+  const waterBy = {};
+  for (const r of water) waterBy[dayKey(r.date)] = (waterBy[dayKey(r.date)] || 0) + (Number(r.amountMl) || 0);
+  const checkBy = {};
+  for (const r of checkins) checkBy[dayKey(r.date)] = r;
+
+  return dates.map((date, i) => ({
+    day: i + 1,
+    date,
+    isToday: date === today,
+    isFuture: date > today,
+    classes: classes[date] || 0,
+    meals: mealsBy[date] || 0,
+    waterMl: waterBy[date] || 0,
+    sleepHours: checkBy[date] && checkBy[date].sleepHours != null ? Number(checkBy[date].sleepHours) : null,
+    moodLevel: checkBy[date] && checkBy[date].moodLevel != null ? Number(checkBy[date].moodLevel) : null,
+  }));
+}
+
+/**
  * Summary for GET /trial/summary. Creates the offer on the last day /
  * after the trial if it doesn't exist yet.
  */
-async function getTrialSummary(userId, countryName) {
+async function getTrialSummary(userId, countryName, { peek = false } = {}) {
   const journey = await TrialJourney.findOne({ where: { userId } });
   if (!journey || !journey.startedAt) return null;
 
@@ -168,7 +253,9 @@ async function getTrialSummary(userId, countryName) {
 
   let offer = await TrialOffer.findOne({ where: { userId } });
   const eligible = (w.lastDay || w.ended) && !journey.convertedAt && !(user && user.status === true);
-  if (!offer && eligible) {
+  // peek: the home recap card only reads; the offer (and its countdown)
+  // starts when she opens her summary.
+  if (!offer && eligible && !peek) {
     const built = await buildOfferItems(userId, countryName);
     if (built && built.items.length) {
       offer = await TrialOffer.create({
@@ -209,8 +296,17 @@ async function getTrialSummary(userId, countryName) {
     };
   }
 
+  let dayList = [];
+  try {
+    dayList = await buildTrialDays(userId, journey);
+  } catch (e) {
+    console.error('[trialOffer] days', userId, e.message);
+  }
+
   return {
     firstName: (user && user.firstName) || null,
+    converted: !!journey.convertedAt || !!(user && user.status === true),
+    days: dayList,
     trialDays: days,
     endsAt: w.endsAt,
     lastDay: w.lastDay,
@@ -258,6 +354,10 @@ async function applyOfferToSlip({ userId, planId, durationId, price, planImage }
 
 /** Hourly: one reminder when about a day is left on an unused offer. */
 async function sendTrialOfferReminders() {
+  // Switched off (Oct 2026, founder's call): no "offer ends in N hours"
+  // push. The offer itself still shows in the app until it ends.
+  // Remove this line to switch it back on.
+  if (process.env.TRIAL_OFFER_REMINDER !== 'on') return 0;
   const now = new Date();
   const offers = await TrialOffer.findAll({
     where: {
@@ -290,8 +390,58 @@ async function sendTrialOfferReminders() {
   return sent;
 }
 
+/**
+ * Hourly: one push on her last trial day, "look what you did". Only
+ * trial women who haven't upgraded, 10:00 to 20:00 Pakistan time, once.
+ */
+async function sendTrialLastDayPushes() {
+  const hour = moment().tz('Asia/Karachi').hour();
+  if (hour < 10 || hour >= 20) return 0;
+  const Redis = require('ioredis');
+  const redis = new Redis();
+  let sent = 0;
+  try {
+    const days = getTrialDays();
+    const now = Date.now();
+    // Started between N days and N-1 days ago = in her last 24 hours.
+    const journeys = await TrialJourney.findAll({
+      where: {
+        convertedAt: null,
+        startedAt: {
+          [Op.gt]: new Date(now - days * 86400000),
+          [Op.lte]: new Date(now - (days - 1) * 86400000),
+        },
+      },
+      attributes: ['userId', 'startedAt'],
+    });
+    for (const j of journeys) {
+      try {
+        const user = await User.findByPk(j.userId, { attributes: ['deviceToken', 'status'] });
+        if (!user || !user.deviceToken || user.status === true) continue;
+        const ok = await redis.set(`triallastday:${j.userId}`, '1', 'EX', 60 * 60 * 24 * 30, 'NX');
+        if (ok !== 'OK') continue;
+        await sendNotification(
+          [user.deviceToken],
+          {
+            title: 'Last day of your free trial 🌱',
+            body: `Look what you did in ${days} day${days === 1 ? '' : 's'}. Your plan and progress are saved.`,
+          },
+          { type: 'trialLastDay' }
+        );
+        sent++;
+      } catch (e) {
+        console.error('[trialOffer] last-day push', j.userId, e.message);
+      }
+    }
+  } finally {
+    redis.disconnect();
+  }
+  return sent;
+}
+
 module.exports = {
   getTrialSummary,
+  sendTrialLastDayPushes,
   applyOfferToSlip,
   sendTrialOfferReminders,
   getOfferPercent,

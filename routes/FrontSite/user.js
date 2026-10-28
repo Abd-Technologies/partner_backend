@@ -15,16 +15,21 @@ router.get('/app-version', asyncMiddleware(appVersionController.getAppVersion));
 router.post('/app-version/report', validateToken, asyncMiddleware(appVersionController.reportAppVersion));
 
 //AUTH APIS
-router.post('/registration',asyncMiddleware(userController.registration));
-router.post('/login',asyncMiddleware(userController.login));
+// Rate limits (Oct 2026, helper/rateLimit.js): login 10 / 15 min per IP+email
+// and 50 / 15 min per IP; reset-code routes 10 / 15 min per IP; sign-up
+// 20 / hour per IP. Too many -> HTTP 429 { status: "0" }.
+const { loginLimit, otpLimit, signupLimit } = require('../../helper/rateLimit');
+router.post('/registration',signupLimit,asyncMiddleware(userController.registration));
+router.post('/login',loginLimit,asyncMiddleware(userController.login));
+// Logout reads the accessToken header itself (old apps send none).
 router.post('/logout',asyncMiddleware(userController.logout));
-router.post('/forget_password',asyncMiddleware(userController.forget_password));
-router.post('/verify_email_check',asyncMiddleware(userController.verify_email_check));
+router.post('/forget_password',otpLimit,asyncMiddleware(userController.forget_password));
+// (Oct 2026 audit: /verify_email_check and /verify_email removed — their
+// handlers don't exist, so every call crashed; the app doesn't use them.)
 router.post('/change_password',validateToken,asyncMiddleware(userController.change_password));
-router.post('/resend_otp',asyncMiddleware(userController.resend_otp));
-router.post('/verify_otp',asyncMiddleware(userController.verify_otp));
-router.post('/verify_email',asyncMiddleware(userController.verify_email));
-router.post('/change_password_after_otp',asyncMiddleware(userController.change_password_after_otp));
+router.post('/resend_otp',otpLimit,asyncMiddleware(userController.resend_otp));
+router.post('/verify_otp',otpLimit,asyncMiddleware(userController.verify_otp));
+router.post('/change_password_after_otp',otpLimit,asyncMiddleware(userController.change_password_after_otp));
 router.post('/update_profile',validateToken,asyncMiddleware(userController.update_profile));
 router.get('/get_profile',validateToken,asyncMiddleware(userController.get_profile));
 
@@ -57,6 +62,16 @@ router.get('/pcos_screening',validateToken,asyncMiddleware(userController.get_pc
 //GENERIC HEALTH SCREENING (PCOS, Thyroid, Menopause, Postpartum, Endometriosis)
 router.post('/health_screening',validateToken,asyncMiddleware(userController.save_health_screening));
 router.get('/health_screening',validateToken,asyncMiddleware(userController.get_health_screening));
+router.get('/health_screening/summary',validateToken,asyncMiddleware(userController.health_screening_summary));
+// Fit Her accounts to pay into (upload slip screen).
+router.get('/payment-accounts', validateToken, asyncMiddleware(require('../../controllers/Admin/paymentAccountController').listActive));
+// Can she download her progress PDF yet? (start + a weekly check-in 7+ days later)
+router.get('/progress-report/eligibility', validateToken, asyncMiddleware(require('../../controllers/FrontSite/progressReportController').eligibility));
+// Plan paused because her payment wasn't confirmed: banner + proof.
+router.post('/chat/notify', validateToken, asyncMiddleware(require('../../controllers/FrontSite/chatNotifyController').notify));
+router.get('/payment-hold', validateToken, asyncMiddleware(require('../../controllers/Admin/paymentCheckController').myHold));
+router.post('/payment-hold/proof', validateToken, asyncMiddleware(require('../../controllers/Admin/paymentCheckController').sendProof));
+router.post('/health_screening/notify-dietitian',validateToken,asyncMiddleware(userController.notify_dietitian_screening));
 
 //DAILY CHECK-IN APIS
 router.post('/daily_checkin',validateToken,asyncMiddleware(userController.save_daily_checkin));
@@ -70,6 +85,11 @@ router.get('/weekly_checkins/recent',validateToken,asyncMiddleware(userControlle
 
 //PaidHomeV2 — weight tracking (Phase B2.7)
 router.post('/weekly_checkin/weight',validateToken,asyncMiddleware(userController.save_weight_log));
+// One weekly check-in (Oct 2026): helper/weeklyCheckin.js
+router.get('/weekly-checkin/state', validateToken, asyncMiddleware(require('../../controllers/FrontSite/weeklyCheckinController').getState));
+router.post('/weekly-checkin', validateToken, asyncMiddleware(require('../../controllers/FrontSite/weeklyCheckinController').save));
+router.post('/weekly-checkin/measurements', validateToken, asyncMiddleware(require('../../controllers/FrontSite/weeklyCheckinController').logMeasurements));
+router.get('/weekly-checkin/history', validateToken, asyncMiddleware(require('../../controllers/FrontSite/weeklyCheckinController').getHistory));
 router.post('/profile/target_weight',validateToken,asyncMiddleware(userController.save_target_weight));
 
 // PaidHero "Set goal →" chip (Diet tab home screen) — reads/writes the
@@ -89,5 +109,6 @@ router.post('/notification_preferences',validateToken,asyncMiddleware(userContro
 router.post('/device-token',validateToken,asyncMiddleware(userController.update_device_token));
 router.get('/notifications',validateToken,asyncMiddleware(userController.get_notifications));
 router.post('/notifications/read',validateToken,asyncMiddleware(userController.mark_notifications_read));
+router.post('/notifications/hide',validateToken,asyncMiddleware(userController.hide_notifications));
 
 module.exports = router;

@@ -31,7 +31,13 @@ module.exports = (sequelize, DataTypes) => {
           'MEDICAL',
           'REVIEW_FLAG',
           'BOOKING_REMINDER_5X',
-          'SYSTEM_ISSUE'
+          'SYSTEM_ISSUE',
+          // Diet check-in (day 4-6): she tapped "Need help". Admin only.
+          // Added to the DB by migrations/20261031130000-escalation-diet-checkin-help.js
+          'DIET_CHECKIN_HELP',
+          // Dietitian "Emergency: cancel my day" summary / approval request.
+          // Added by migrations/20261101130000-dietitian-emergency-days.js
+          'DIETITIAN_EMERGENCY_DAY'
         ),
         allowNull: false,
       },

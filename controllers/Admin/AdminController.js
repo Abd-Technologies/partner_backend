@@ -56,7 +56,8 @@ const { normalizeSlotTime } = require("../../helper/normalizeSlotTime");
 const { getDeviceTokensForSlot } = require("../../helper/crownjobfunction");
 
 const bcrypt = require("bcryptjs");
-const { sign } = require("jsonwebtoken");
+const { issueToken, verifyAccess, revoke } = require("../../helper/authToken");
+const otpStore = require("../../helper/otpStore");
 const { Op } = require("sequelize");
 const sequelize = require("sequelize");
 const { response } = require("../../routes/Admin/admin");
@@ -205,24 +206,21 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASSWORD,
   },
 });
-console.log("JWT_ACCESS_SECRET:", process.env.JWT_ACCESS_SECRET);
 
+// Oct 2026 security pass: codes are stored per email (helper/otpStore.js),
+// expire after 10 min, 5 wrong tries cancel them, max 3 codes / 15 min per
+// email. Same answer whether or not the email has an account, and it
+// always answers (it used to hang when the email was not found).
 async function sendOtp(req, res) {
-  const { email } = req.body;
+  const email = otpStore.normEmail(req.body && req.body.email);
   try {
-    let user = await User.findOne({ where: { email: email } });
+    if (!email) return res.json(ApiResponse("0", "Email is required", {}));
+    if (!otpStore.requestAllowed(email)) {
+      return res.status(429).json(ApiResponse("0", otpStore.TOO_MANY_REQUESTS, {}));
+    }
+    let user = await User.findOne({ where: { email: email }, attributes: ["id", "email"] });
     if (user) {
-      let OTP = generateOTP();
-      let otpData = await OtpData.findOne({ where: { UserId: user.id } });
-      if (otpData) {
-        otpData.otp = OTP;
-        await otpData.save();
-      } else {
-        let newData = new OtpData();
-        newData.otp = OTP;
-        newData.UserId = user.id;
-        await newData.save();
-      }
+      let OTP = await otpStore.issue(email);
       transporter.sendMail(
         {
           from: process.env.EMAIL_USERNAME, // sender address
@@ -235,27 +233,27 @@ async function sendOtp(req, res) {
           console.log(info);
         }
       );
-      const response = ApiResponse("1", "OTP send successfully", {});
-      return res.json(response);
     }
+    return res.json(ApiResponse("1", otpStore.GENERIC_SENT, {}));
   } catch (error) {
-    const response = ApiResponse("0", error.message, {});
-    return res.json(response);
+    console.error("sendOtp error:", error);
+    return res.json(ApiResponse("0", "Something went wrong. Please try again.", {}));
   }
 }
+// Looks the code up by email + code (it used to find ANY account by code alone).
 async function verifyOtp(req, res) {
-  let { otp } = req.body;
-  let otpData = await OtpData.findOne({ where: { otp: otp } });
-  if (otpData) {
-    let userData = await User.findOne({
-      where: { id: otpData.UserId },
-      attributes: ["id", "email"],
-    });
-    let response = ApiResponse("1", "Opt verified", { userData });
-    return res.json(response);
-  } else {
-    let ressponse = ApiResponse("0", "Invalid OTP", {});
-    return res.json(ressponse);
+  try {
+    const email = otpStore.normEmail(req.body && req.body.email);
+    const otp = String((req.body && req.body.otp) || "").trim();
+    if (!email || !otp) return res.json(ApiResponse("0", "Email and OTP are required.", {}));
+    const r = await otpStore.check(email, otp);
+    if (!r.ok) return res.json(ApiResponse("0", r.message, {}));
+    const userData = await User.findOne({ where: { email: email }, attributes: ["id", "email"] });
+    if (!userData) return res.json(ApiResponse("0", "Invalid OTP", {}));
+    return res.json(ApiResponse("1", "Opt verified", { userData }));
+  } catch (error) {
+    console.error("verifyOtp error:", error);
+    return res.json(ApiResponse("0", "Something went wrong. Please try again.", {}));
   }
 }
 async function updatePassword(req, res) {
@@ -266,7 +264,17 @@ async function updatePassword(req, res) {
     userData.password = await bcrypt.hashSync(password, salt);
     userData
       .save()
-      .then((dat) => {
+      .then(async (dat) => {
+        // New password: every old login token stops working.
+        try {
+          const fresh = await revoke(userData.id);
+          if (fresh && req.user && String(req.user.id) === String(userData.id)) {
+            // Keep the person who changed it logged in on this device.
+            require("../../helper/authToken").setNewToken(res, issueToken(fresh, { client: require("../../helper/authToken").clientOf(req.user) }));
+          }
+        } catch (e) {
+          console.error("updatePassword revoke:", e.message);
+        }
         let response = ApiResponse("1", "Password updated successfully", {});
         return res.json(response);
       })
@@ -279,7 +287,12 @@ async function updatePassword(req, res) {
 
 async function login_check(req, res) {
   const token = req.header("accessToken");
-  const validToken = verify(token, process.env.JWT_ACCESS_SECRET);
+  let validToken = null;
+  try {
+    validToken = (await verifyAccess(token)).payload;
+  } catch (_) {
+    validToken = null;
+  }
   if (validToken) {
     const check = await BlackList.findOne({ where: { accessToken: token } });
     if (check) {
@@ -320,10 +333,7 @@ async function registration(req, res) {
     user
       .save()
       .then(async (dat) => {
-        const accessToken = sign(
-          { email: user.email, id: user.id },
-          process.env.JWT_ACCESS_SECRET
-        );
+        const accessToken = issueToken(user);
         let data = {
           id: dat.id,
           firstName: dat.firstName,
@@ -349,9 +359,27 @@ async function registration(req, res) {
 async function login(req, res) {
 
   const { email, password, deviceToken, userType, timeZone } = req.body;
+  // Staff web portal (Oct 2026): staff only, found by email (no role
+  // picker), and it must NOT overwrite the phone's push token / timezone.
+  const isPortal = req.body.client === "portal";
+  // Member web app (Oct 2026, client: "web"): same account as the phone.
+  // A browser login must not wipe the phone's push token or its timezone,
+  // and gets a shorter (7-day) token — helper/authToken.js.
+  const isWeb = !isPortal && req.body.client === "web";
   const user = await User.findOne({
-    where: { email: email, userType: userType },
+    where: isPortal && !userType
+      ? { email: email, userType: { [Op.ne]: "User" } }
+      : { email: email, userType: userType },
   });
+  if (isPortal && !user) {
+    const client = await User.findOne({ where: { email: email }, attributes: ["id", "userType"] });
+    if (client) {
+      return res.json(ApiResponse("0", "This portal is for the Fit Her team. Please use the Fit Her mobile app.", { code: "NOT_STAFF" }));
+    }
+  }
+  if (isPortal && user && String(user.userType || "").trim().toLowerCase() === "user") {
+    return res.json(ApiResponse("0", "This portal is for the Fit Her team. Please use the Fit Her mobile app.", { code: "NOT_STAFF" }));
+  }
   let adminData = await User.findOne({ where: { userType: "Admin" } });
   //return res.json(process.env.JWT_ACCESS_SECRET);
   if (user) {
@@ -376,13 +404,21 @@ async function login(req, res) {
 
     const validPassword = await bcrypt.compare(password, user.password);
     if (validPassword) {
-      const accessToken = sign(
-        { email: user.email, id: user.id },
-        process.env.JWT_ACCESS_SECRET
-      );
-      user.deviceToken = deviceToken;
-      user.timeZone = timeZone;
-      await user.save();
+      // Portal tokens last 12 h, web 7 days, app tokens 30 days (helper/authToken.js).
+      const accessToken = issueToken(user, { client: isPortal ? "portal" : isWeb ? "web" : "app" });
+      if (isWeb) {
+        // Keep the phone's push token; take the browser's timezone only
+        // when she has none yet (first login ever happened on the web).
+        if (!user.timeZone && timeZone) {
+          user.timeZone = timeZone;
+          await user.save();
+        }
+      } else if (!isPortal) {
+        user.deviceToken = deviceToken;
+        user.timeZone = timeZone;
+        await user.save();
+      }
+      require("../../helper/growthTracking").loggedIn(user, isPortal ? "portal" : isWeb ? "web" : "email");
       let data = {
         id: user.id,
         firstName: user.firstName,
@@ -399,6 +435,7 @@ async function login(req, res) {
         weight: user.weight,
         mainGoal: user.mainGoal || '',
         healthConditions: user.healthConditions || '',
+        onboardingDone: !!user.onboardingDoneAt,
         useNewPaidHome: user.useNewPaidHome ?? false,
         useNewUnpaidHome: user.useNewUnpaidHome ?? false,
         // Phase F.3 — surfaced so Flutter can cache the user's IANA
@@ -429,15 +466,13 @@ async function socialLogin(req, res) {
     }); const adminData = await User.findOne({ where: { userType: "Admin" } });
 
     if (user) {
-      const accessToken = sign(
-        { email: user.email, id: user.id },
-        process.env.JWT_ACCESS_SECRET
-      );
+      const accessToken = issueToken(user);
 
       // Update deviceToken and timeZone
       user.deviceToken = deviceToken;
       user.timeZone = timeZone;
       await user.save();
+      require("../../helper/growthTracking").loggedIn(user, req.body.signupMethod || "social");
 
       const data = {
         id: user.id,
@@ -455,6 +490,7 @@ async function socialLogin(req, res) {
         weight: user.weight,
         mainGoal: user.mainGoal || '',
         healthConditions: user.healthConditions || '',
+        onboardingDone: !!user.onboardingDoneAt,
         useNewPaidHome: user.useNewPaidHome ?? false,
         useNewUnpaidHome: user.useNewUnpaidHome ?? false,
         // Phase F.3 — see login() above for rationale.
@@ -477,6 +513,7 @@ async function socialLogin(req, res) {
 async function admin_get_profile(req, res) {
   const user = await User.findOne({
     where: [{ userType: "Admin" }, { status: true }, { id: req.user.id }],
+    attributes: { exclude: ["password", "deviceToken"] }, // sec pass 1
   });
   const response = ApiResponse("1", "Profile", user);
   return res.json(response);
@@ -516,6 +553,20 @@ async function updateUser(req, res) {
     const user = await User.findOne({ where: { id: userId } });
     if (!user) {
       return res.status(404).json(ApiResponse("0", "User not found", {}));
+    }
+
+    // Sec pass 1: an admin's password (and login email) can only be
+    // changed by that admin herself, never by another account.
+    {
+      const roles = require("../../helper/roles");
+      const isSelf = String(user.id) === String(req.user && req.user.id);
+      const emailChanged =
+        email !== undefined && roles.norm(email) !== roles.norm(user.email);
+      if (roles.isAdmin(user) && !isSelf && (password || emailChanged)) {
+        return res.json(
+          ApiResponse("0", "Only that admin can change her own email or password.", {})
+        );
+      }
     }
 
     user.firstName = firstName;
@@ -841,6 +892,14 @@ async function update_slot_trainer(req, res) {
     // Find the slot by ID and wait for the result
     const slot = await Slot.findOne({ where: { id: slotId } });
 
+    // Only the class's own trainer, or an admin, may change its details.
+    if (slot) {
+      const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+      if (!me || (Number(slot.trainerId) !== Number(me.id) && !require("../../helper/roles").isAdmin(me))) {
+        return res.json(ApiResponse("0", "You can only change your own classes.", {}));
+      }
+    }
+
     if (slot) {
       // Update the trainerId for the slot
       slot.type = type;
@@ -897,11 +956,32 @@ async function update_slot_status(req, res) {
     // Only the class's trainer or an admin can change it (clients could
     // call this endpoint before — anyone logged in could start/cancel).
     const actor = req.user && req.user.id
-      ? await User.findByPk(req.user.id, { attributes: ["id", "userType"] })
+      ? await User.findByPk(req.user.id, { attributes: ["id", "userType", "timeZone"] })
       : null;
-    const isAdmin = actor && actor.userType === (process.env.ADMIN || "Admin");
+    const isAdmin = require("../../helper/roles").isAdmin(actor);
     if (!actor || (!isAdmin && Number(slot.trainerId) !== Number(actor.id))) {
       return res.json(ApiResponse("0", "Only this class's trainer can change it.", {}));
+    }
+
+    // Start opens 10 minutes before class time, never earlier (women would
+    // miss the start, and "starts in 15 min" reminders would arrive after
+    // it went live). Admin can still start any time.
+    if (status === "In Progress" && slot.status !== "In Progress" && !isAdmin) {
+      const { parseEndAsUtc } = require("../../helper/timeFormats");
+      const START_EARLY_MIN = 10;
+      const startUtc = parseEndAsUtc(slot.start, moment.tz("Asia/Karachi"));
+      if (startUtc && moment.utc().isBefore(startUtc.clone().subtract(START_EARLY_MIN, "minutes"))) {
+        const opens = startUtc.clone().subtract(START_EARLY_MIN, "minutes");
+        const tz = (actor && actor.timeZone) || "Asia/Karachi";
+        const at = opens.clone().tz(tz).format("h:mm A");
+        return res.json(
+          ApiResponse("0", `Too early. You can start this class at ${at} (10 minutes before).`, {
+            code: "TOO_EARLY",
+            opensAt: opens.toISOString(),
+            opensAtLabel: at,
+          })
+        );
+      }
     }
 
     // Start needs a room: the trainer's Zoom room (set once by admin) or
@@ -922,6 +1002,18 @@ async function update_slot_status(req, res) {
     if (req.user && req.user.id) slot.completed_by = req.user.id;
     slot.status_changed_at = now;
     await slot.save();
+
+    // Class diary (analytics add-on, never blocks): one row per class per day.
+    try {
+      const diary = require("../../helper/classDiary");
+      if (status === "In Progress" && prevStatus !== "In Progress") diary.started(slot, actor);
+      else if (status === "Completed" && prevStatus !== "Completed") {
+        const byTrainer = actor && Number(slot.trainerId) === Number(actor.id);
+        diary.ended(slot, byTrainer ? "trainer" : "admin", actor ? actor.id : null);
+      } else if (status === "Cancelled" && prevStatus !== "Cancelled") {
+        diary.cancelled(slot, { auto: false, actorId: actor ? actor.id : null });
+      }
+    } catch (_) {}
 
     // Log operational timing metrics (trainer punctuality & class duration)
     try {
@@ -1445,6 +1537,7 @@ async function edit_plan(req, res) {
     plan.longDescription = longDescription;
     plan.price = price;
     const service_image = req.file;
+  if (!service_image) return res.json(ApiResponse("0", "Please add the testimonial picture.", {}));
     let tmpPath = service_image.path;
     let imagePath = tmpPath.replace(/\\/g, "/");
     plan.image = imagePath;
@@ -1783,6 +1876,14 @@ async function get_all_users(req, res) {
 
 async function delete_user(req, res) {
   try {
+    // Only her own account, or an admin (not trainers/dietitians).
+    const requesterId = req.user && req.user.id;
+    if (String(requesterId) !== String(req.body.userId)) {
+      const me = await User.findByPk(requesterId, { attributes: ["id", "userType"] });
+      if (!require("../../helper/roles").isAdmin(me)) {
+        return res.json(ApiResponse("0", "You can only delete your own account.", {}));
+      }
+    }
     let user = await User.findOne({
       where: { id: req.body.userId, userType: "User" },
     });
@@ -1808,12 +1909,18 @@ async function delete_user(req, res) {
 }
 
 async function get_all_dietitions(req, res) {
-  const users = await User.findAll({ where: { userType: "Dietition" } });
+  const users = await User.findAll({
+    where: { userType: "Dietition" },
+    attributes: { exclude: ["password", "deviceToken"] }, // sec pass 1
+  });
   const response = ApiResponse("1", "All Users", users);
   return res.json(response);
 }
 async function get_all_trainers(req, res) {
-  const users = await User.findAll({ where: { userType: "Trainer" } });
+  const users = await User.findAll({
+    where: { userType: "Trainer" },
+    attributes: { exclude: ["password", "deviceToken"] }, // sec pass 1
+  });
   const response = ApiResponse("1", "All Users", users);
   return res.json(response);
 }
@@ -2024,7 +2131,13 @@ async function get_all_contact_messages(req, res) {
 async function dieitionPlans(req, res) {
   let data = await PlanDietition.findAll({
     where: { DeititionId: req.user.id },
-    include: [{ model: UserPlan, include: [{ model: User }, { model: Plan }] }],
+    include: [{
+      model: UserPlan,
+      include: [
+        { model: User, attributes: ["id", "firstName", "lastName", "email", "phone", "image", "bmiResult"] },
+        { model: Plan },
+      ],
+    }],
   });
   let response = ApiResponse("1", "Dietition Plans", data);
   return res.json(response);
@@ -2319,20 +2432,34 @@ async function addUserDetails(req, res) {
       weight,
       bmiResult,
       mainGoal,
-      healthConditions
+      healthConditions,
+      onboardingStep,
+      onboardingDone
     } = req.body;
 
     const user = await User.findOne({ where: { id: userId } });
 
     if (user) {
-      user.age = age;
-      user.height = height;
-      user.weight = weight;
-      user.bmiResult = bmiResult;
+      // Sign-up questions: the app saves what she has answered after each
+      // page (draft, onboardingStep set) and once more at the end
+      // (onboardingDone). A draft only writes the fields it sends.
+      const isDraft = onboardingStep !== undefined && onboardingStep !== null && !onboardingDone;
+      if (age !== undefined || !isDraft) user.age = age;
+      if (height !== undefined || !isDraft) user.height = height;
+      if (weight !== undefined || !isDraft) user.weight = weight;
+      if (bmiResult !== undefined || !isDraft) user.bmiResult = bmiResult;
       if (mainGoal !== undefined) user.mainGoal = mainGoal;
       if (healthConditions !== undefined) user.healthConditions = healthConditions;
+      if (isDraft) {
+        const step = parseInt(onboardingStep, 10);
+        if (!isNaN(step)) user.onboardingStep = Math.max(user.onboardingStep || 0, step);
+      }
+      if (onboardingDone && !user.onboardingDoneAt) user.onboardingDoneAt = new Date();
 
       await user.save();
+      if (isDraft) {
+        return res.json(ApiResponse("1", "Saved", {}));
+      }
 
       // Best-effort side effect: anchor weight-progress math by creating the
       // user's first WeeklyCheckin row for this week. Idempotent via the
@@ -2415,7 +2542,12 @@ async function addUser(req, res) {
       user.weight = weight;
     user.bmiResult = bmiResult;
     user.height = height;
+    // Added by the team with a plan: no sign-up questions for her.
+    if (status) user.onboardingDoneAt = new Date();
+    // Growth analytics: how and where she signed up (add-on, no flow change).
+    Object.assign(user, require("../../helper/growthTracking").signupInfo(req.body));
     await user.save();
+    require("../../helper/growthTracking").activeDay(user.id);
     // Initialize UserPlan variables
     let userPlan = new UserPlan();
     let now = new Date();
@@ -2470,14 +2602,15 @@ async function addUser(req, res) {
     //   }
     // }
     // // Save the user plan
-    // Generate JWT access token
-    const accessToken = sign(
-      { email: user.email, id: user.id },
-      process.env.JWT_ACCESS_SECRET
-    );
+    // Generate JWT access token (web sign-up gets the shorter web token;
+    // it has no phone push token to store).
+    const isWebSignup = req.body.client === "web";
+    const accessToken = issueToken(user, { client: isWebSignup ? "web" : "app" });
     // Update user with deviceToken
-    user.deviceToken = deviceToken;
-    await user.save();
+    if (!isWebSignup) {
+      user.deviceToken = deviceToken;
+      await user.save();
+    }
     // Fetch admin data
     let adminData = await User.findOne({ where: { userType: "Admin" } });
     if (customSupporterId) {
@@ -2509,6 +2642,7 @@ async function addUser(req, res) {
       userType: user.userType,
       useNewPaidHome: user.useNewPaidHome ?? false,
       useNewUnpaidHome: user.useNewUnpaidHome ?? false,
+      onboardingDone: !!user.onboardingDoneAt,
     };
     const response = ApiResponse(
       "1",
@@ -2736,6 +2870,13 @@ async function slotStatus(req, res) {
 
 async function trainerHome(req, res) {
   const { userId } = req.params;
+  // Her own classes only (admins may look at any trainer).
+  {
+    const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+    if (!me || (String(me.id) !== String(userId) && !require("../../helper/roles").isAdmin(me))) {
+      return res.json(ApiResponse("0", "You can only see your own classes.", {}));
+    }
+  }
 
   try {
     // Trainer's own timezone — render times in their local wall clock.
@@ -2806,6 +2947,14 @@ async function updateTrainerJoin(req, res) {
     if (!slot) {
       // If slot not found, send error response
       return res.json(ApiResponse("0", "Slot not found", {}));
+    }
+
+    // Sec pass 1: only this class's trainer (or Admin) may flip it.
+    {
+      const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+      if (!me || (Number(slot.trainerId) !== Number(me.id) && !require("../../helper/roles").isAdmin(me))) {
+        return res.json(ApiResponse("0", "You can only update your own classes.", {}));
+      }
     }
 
     // Update the trainer link for the slot
@@ -3086,7 +3235,13 @@ async function userHome(req, res) {
             currentDate.getDate()
           );
 
-        const remainingDays = Math.floor(remaining / (1000 * 60 * 60 * 24));
+        // Days left counted from the real end time (not calendar days on
+        // the server's clock): on her last day it's 1, after the end 0.
+        // Before, the last day showed 0 (unpaid home) while she was still paid.
+        void remaining;
+        const remainingDays = plan?.expireDate
+          ? Math.ceil((expireDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24)) || 0
+          : 0;
 
         if (remainingDays <= 0 && plan?.Plan?.title === "Free Trial") {
           // Bug D fix: userData was fetched without 'status' in attributes, so
@@ -3361,7 +3516,21 @@ async function addReport(req, res) {
 
   report
     .save()
-    .then((dat) => {
+    .then(async (dat) => {
+      // The weekly measurements also count as this week's weigh-in, so
+      // the Progress tab's weight trend and the PDF report see it.
+      try {
+        const w = parseFloat(currentWeight);
+        if (!isNaN(w) && w > 0 && userId) {
+          const [row, created] = await WeeklyCheckin.findOrCreate({
+            where: { userId, weekDate: currentWeekMonday() },
+            defaults: { weightKg: w },
+          });
+          if (!created) await row.update({ weightKg: w });
+        }
+      } catch (e) {
+        console.warn("[addReport] weekly weight sync failed:", e.message);
+      }
       const response = ApiResponse("1", "Report added successfully", {});
       return res.json(response);
     })
@@ -3654,7 +3823,9 @@ async function getGuest(req, res) {
     let data = await User.findAll({
       where: {
         bmiResult: { [Op.ne]: null } // Ensures bmiResult is not null
-      }
+      },
+      // Never send password hashes / push tokens to the admin screen.
+      attributes: { exclude: ["password", "deviceToken"] },
     });
 
     let response = ApiResponse("1", "Data retrieved successfully", { data });
@@ -3697,7 +3868,125 @@ async function payment(req, res) {
     res.status(500).send({ error: error.message });
   }
 }
+// DirectPay "payment done" (the app calls this after DirectPay redirects to
+// fither://payment/success). Oct 2026 security pass — no DirectPay check API
+// yet, so:
+//   • a client must have opened DirectPay for this plan in the last 3 hours
+//     (PaymentAttempt "initiated", helper/purchaseLedger.directPayStarted);
+//     each start can be used once;
+//   • the plan starts at once but goes into the admin "Confirm payments"
+//     list (helper/paymentVerify.js) as "DirectPay · ref <id>": the admin
+//     checks the DirectPay merchant portal; not confirmed in 48 h → paused.
+//   • Admin callers keep the old direct activation.
+const DIRECTPAY_NOT_FOUND = "We couldn't find your payment. If you paid, send the receipt to support.";
+const DIRECTPAY_WINDOW_MS = 3 * 60 * 60 * 1000;
+const SAFE_USER = { exclude: ["password", "deviceToken"] };
+
 async function payment_success(req, res) {
+  const roles = require("../../helper/roles");
+  const caller = req.authUser || null;
+  if (caller && roles.isAdmin(caller)) return payment_success_admin(req, res);
+  return payment_success_directpay(req, res);
+}
+
+async function payment_success_directpay(req, res) {
+  const { PaymentAttempt } = require("../../models");
+  const userId = req.user && req.user.id;
+  const planId = parseInt(req.body && req.body.planId, 10);
+  if (!userId || !planId) return res.json(ApiResponse("0", DIRECTPAY_NOT_FOUND, {}));
+  let attempt = null;
+  let claimed = false;
+  try {
+    attempt = await PaymentAttempt.findOne({
+      where: {
+        userId,
+        planId,
+        method: "directpay",
+        status: "initiated",
+        createdAt: { [Op.gte]: new Date(Date.now() - DIRECTPAY_WINDOW_MS) },
+      },
+      order: [["id", "DESC"]],
+    });
+    if (!attempt) return res.json(ApiResponse("0", DIRECTPAY_NOT_FOUND, {}));
+    // Claim it (once): a second call for the same start finds nothing.
+    const [n] = await PaymentAttempt.update({ status: "pending" }, { where: { id: attempt.id, status: "initiated" } });
+    if (!n) return res.json(ApiResponse("0", DIRECTPAY_NOT_FOUND, {}));
+    claimed = true;
+
+    const planData = await Plan.findOne({ where: { id: planId } });
+    if (!planData) throw new Error("Plan not found");
+    let durationId = attempt.durationId || null;
+    if (!durationId) {
+      const prices = await Price.findAll({ where: { planId } });
+      const m = prices.find((p) => Number(p.priceAmount) === Number(attempt.amount)) || prices[0];
+      durationId = m ? m.durationId : null;
+    }
+    const amount = Number(attempt.amount) || null;
+    const img = await PlanImage.create({
+      PlanId: planId,
+      UserId: userId,
+      image: null,
+      PriceDurationId: durationId,
+      status: true,
+      price: amount != null ? String(amount) : null,
+      paidAmount: amount,
+      uploadSource: "user_app",
+      ocrAmount: amount,
+      ocrBank: "DirectPay",
+      ocrTransactionId: attempt.ref || null,
+      ocrData: {
+        method: "directpay",
+        refNumber: attempt.ref || null,
+        amount,
+        autoApproved: true,
+        approvalReason: "DirectPay — confirm in the DirectPay merchant portal",
+      },
+    });
+    attempt.planImageId = img.id;
+    await attempt.save();
+    // End-of-trial offer price: record the discount + mark the offer used.
+    try {
+      if (await require("../../helper/trialOffer").applyOfferToSlip({ userId, planId, durationId, price: amount, planImage: img })) {
+        await img.save();
+      }
+    } catch (e) {
+      console.warn("[directpay] trial offer:", e.message);
+    }
+
+    const result = await applyPlanApproval(img, {
+      approvalSource: "auto",
+      notify: { title: "Plan activated!", body: "Payment received — your Fit Her plan is now active. Welcome!" },
+    });
+    if (!result.ok) {
+      console.error("[directpay] activation failed:", result.error);
+      return res.json(ApiResponse("0", "We couldn't start your plan. Please send the receipt to support.", {}));
+    }
+    // Same as before: the plan's own dietitian / the trainer from the app.
+    try {
+      const up = result.userPlanId ? await UserPlan.findByPk(result.userPlanId) : null;
+      if (up && !result.extended) {
+        const dietitianId = planData.dietitianId != null ? planData.dietitianId : req.body.dietitianId;
+        if (dietitianId && !up.dietitianId) up.dietitianId = dietitianId;
+        if (req.body.trainerId && !up.trainerId) up.trainerId = req.body.trainerId;
+        await up.save();
+      }
+    } catch (e) {
+      console.warn("[directpay] trainer/dietitian:", e.message);
+    }
+    const user = await User.findOne({ where: { id: userId }, attributes: SAFE_USER });
+    return res.json(ApiResponse("1", "Plan assigned successfully", { user }));
+  } catch (error) {
+    console.error("[directpay] payment_success:", error);
+    if (claimed && attempt && !attempt.planImageId) {
+      // Nothing was created: let her try again.
+      await PaymentAttempt.update({ status: "initiated" }, { where: { id: attempt.id } }).catch(() => {});
+    }
+    return res.status(500).json(ApiResponse("0", "Error assigning plan", {}));
+  }
+}
+
+// Admin: old direct behaviour (no DirectPay start needed).
+async function payment_success_admin(req, res) {
   const { userId, planId, dietitianId, trainerId, amount } = req.body;
 
   try {
@@ -3751,8 +4040,9 @@ async function payment_success(req, res) {
       planData.dietitianId != null ? planData.dietitianId : dietitianId;
     await userPlan.save();
 
-    // Generate response
-    let response = ApiResponse("1", "Plan assigned successfully", { user });
+    // Generate response (never send the password hash / push token)
+    const safeUser = await User.findOne({ where: { id: userId }, attributes: SAFE_USER });
+    let response = ApiResponse("1", "Plan assigned successfully", { user: safeUser });
     return res.json(response);
   } catch (error) {
     console.error(error);
@@ -3802,9 +4092,16 @@ async function addImage(req, res) {
     // ─── Duplicate detection — has this transaction ref ever been used? ───
     if (ocrResult?.refNumber) {
       const dup = await PlanImage.findOne({
-        attributes: ['id', 'UserId', 'createdAt'],
+        attributes: ['id', 'UserId', 'createdAt', 'verifyStatus'],
         where: { ocrTransactionId: ocrResult.refNumber },
       });
+      // Oct 2026: a slip the admin rejected can't be sent again.
+      if (dup && dup.verifyStatus === 'rejected') {
+        return res.status(200).json(ApiResponse('0',
+          'This payment slip was not approved before, so it can\'t be used again. Please contact support.',
+          { duplicateOf: dup.id, rejected: true }
+        ));
+      }
       if (dup) {
         console.warn(`⚠️ Duplicate transaction ID in addImage: ${ocrResult.refNumber} already used by PlanImage id=${dup.id}`);
         return res.status(200).json(ApiResponse('0',
@@ -3817,21 +4114,17 @@ async function addImage(req, res) {
     // ─── Decide auto-approve vs admin queue ───
     let autoApproved = false;
     let approvalReason = null;
+    // Slip rules (helper/slipRules.js): our account + reference + date
+    // within 3 days + amount. Anything else waits for the admin, with why.
     const expectedAmount = parseInt(price, 10);
-    const wrongReceiver = ocrResult?.receiver && !ocrResult?.receiverVerified;
-
-    if (ocrResult && ocrResult.confidence >= OCR_AUTO_APPROVE_MIN_CONFIDENCE && !wrongReceiver) {
-      const receiverTag = ocrResult.receiverVerified ? `, receiver verified (${ocrResult.receiver})` : '';
-      if (ocrResult.amount &&
-          Math.abs(ocrResult.amount - expectedAmount) <= OCR_AMOUNT_TOLERANCE_PKR) {
-        autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — amount + bank verified${receiverTag}`;
-      } else if (ocrResult.amount && ocrResult.amount > expectedAmount) {
-        autoApproved = true;
-        approvalReason = `OCR confidence ${(ocrResult.confidence * 100).toFixed(0)}% — customer paid more (PKR ${ocrResult.amount}), credit forward${receiverTag}`;
-      }
-    } else if (wrongReceiver) {
-      approvalReason = `Slip receiver is "${ocrResult.receiver}" (expected FitHer or Shaista Khalid) — admin review required`;
+    let slipDecision = null;
+    try {
+      slipDecision = await require("../../helper/slipRules").decideSlip(ocrResult, expectedAmount);
+      autoApproved = slipDecision.autoApproved;
+      approvalReason = slipDecision.reason;
+    } catch (e) {
+      console.error("[slipRules] decide failed:", e.message);
+      approvalReason = "Slip check failed — admin review";
     }
 
     // Create the PlanImage row
@@ -3857,6 +4150,9 @@ async function addImage(req, res) {
       rawText:          ocrResult.rawText?.slice(0, 1000),
       autoApproved,
       approvalReason,
+      account:          slipDecision?.account || null,
+      slipDate:         slipDecision?.slipDate || null,
+      checks:           slipDecision?.checks || null,
     } : null;
     newImage.ocrConfidence    = ocrResult?.confidence || null;
     newImage.ocrAmount        = ocrResult?.amount     || null;
@@ -3899,15 +4195,9 @@ async function addImage(req, res) {
     }
 
     // ─── Notify admin only if NOT auto-approved (no need to bother admin when system handled it) ───
+    // Oct 2026: every admin (was only the first one), with the reason.
     if (!autoApproved) {
-      const admin = await User.findOne({ where: { userType: "Admin" } });
-      if (admin?.deviceToken) {
-        const notification = {
-          title: "Approve Request",
-          body: "A new user image request has been received.",
-        };
-        await sendNotification([admin.deviceToken], notification, { type: "paymentApprovalRequest" });
-      }
+      await require("../../helper/paymentVerify").notifySlipForReview(newImage, approvalReason);
     }
 
     // ─── User-facing response — different message based on outcome ───
@@ -3945,7 +4235,8 @@ async function getAllPlanImages(req, res) {
     const data = await PlanImage.findAll({
       where: { status: true },
       order: [['createdAt', 'DESC']], // Order by createdAt descending
-      attributes: ["id", "image"],
+      // + slip check results so the admin sees why it wasn't auto-approved.
+      attributes: ["id", "image", "price", "ocrData", "ocrAmount", "ocrDate", "ocrTransactionId", "createdAt"],
       include: [
         {
           model: User,
@@ -3981,6 +4272,8 @@ async function getAllPlanImages(req, res) {
 
 async function approvedImage(req, res) {
   const { planImageId, rejected } = req.body;
+  // Oct 2026: why it was rejected (picked by the admin; sent to her).
+  const rejectReason = String((req.body && req.body.reason) || "").trim().slice(0, 120) || null;
 // Inside the approval section (replace the existing UserPlan creation part):
 
 try {
@@ -3997,14 +4290,32 @@ try {
     });
 
   if (rejected) {
-    await image.destroy();
+    if (!image) return res.json(ApiResponse("0", "Slip not found", {}));
+    await require("../../helper/purchaseLedger").slipRejected(image, req.user ? req.user.id : null);
+    // Oct 2026: the slip is KEPT, marked rejected (was deleted). status
+    // null = not waiting (true) and not approved (false), so it leaves the
+    // approval list and never counts as a sale. Keeping it means the same
+    // transaction / reference ID can't be uploaded again.
+    const data = image.ocrData && typeof image.ocrData === "object" ? { ...image.ocrData } : {};
+    data.rejectReason = rejectReason;
+    data.rejectedAt = new Date().toISOString();
+    data.rejectedBy = req.user ? req.user.id : null;
+    image.ocrData = data;
+    image.status = null;
+    image.verifyStatus = "rejected";
+    await image.save();
 
     if (user?.deviceToken) {
       let rejectionNotification = {
-        title: "Request Rejected",
-        body: "Sorry, your plan request has been rejected.",
+        title: "Payment slip not approved",
+        body: rejectReason
+          ? `Reason: ${rejectReason}. Tap to upload a new slip or contact us.`
+          : "Sorry, we couldn't approve your slip. Tap to upload a new slip or contact us.",
       };
-      sendNotification([user.deviceToken], rejectionNotification, { type: "paymentRejected" });
+      sendNotification([user.deviceToken], rejectionNotification, {
+        type: "paymentRejected",
+        reason: rejectReason || "",
+      });
     }
 
     return res.json(ApiResponse("1", "Plan image rejected and notification sent to User", {}));
@@ -4038,7 +4349,7 @@ try {
     await existingPlan.save();
   } else {
     // No existing plan, create new one
-    await UserPlan.create({
+    existingPlan = await UserPlan.create({
       buyingDate: now,
       expireDate: new Date(now.getTime() + newPlanDays * 24 * 60 * 60 * 1000),
       userId: image.UserId,
@@ -4052,24 +4363,43 @@ try {
   image.status = 0;
   await image.save();
 
-  // Remove expired plans
-  const expiredPlans = await UserPlan.findAll({
-    where: {
-      userId: image.UserId,
-      expireDate: { [Op.lt]: now },
-      status: true,
-    },
+  // Purchase history + server-side Mixpanel "Purchase" (add-on).
+  require("../../helper/purchaseLedger").purchased({
+    planImage: image,
+    userPlanId: existingPlan ? existingPlan.id : null,
+    approvedBy: "admin",
+    approvedById: req.user ? req.user.id : null,
   });
 
-  for (const plan of expiredPlans) {
-    await plan.destroy();
-  }
+  // Her ended plans (Oct 2026): switched OFF, no longer deleted (deleting
+  // also deleted their diet plan / Day 7 review / progress, and an ended
+  // trial plan lost its AI diet plan before it could be moved). status=false
+  // hides it from her plan list; planStatus 'expired' is set hourly.
+  await UserPlan.update(
+    { status: false },
+    {
+      where: {
+        userId: image.UserId,
+        expireDate: { [Op.lt]: now },
+        status: true,
+        id: { [Op.ne]: existingPlan.id },
+      },
+    }
+  );
 
   // Update user status
   if (user) {
     user.status = true;
     await user.save();
   }
+
+  // Oct 2026: her dietitian comes from the package she bought.
+  await require("../../helper/planDietitianAssign").assignFromPlan(existingPlan && existingPlan.id);
+
+  // Oct 2026: keep her trial diet plan / Day 7 review / progress (moved to
+  // the paid plan) and mark the trial converted, BEFORE the trial row is
+  // deleted (the DB would cascade-delete them).
+  await require("../../helper/trialConversion").onPaidPlan(image.UserId, existingPlan && existingPlan.id);
 
   // Remove free trial if it exists
   let freePlan = await Plan.findOne({ where: { title: "Free Trial" } });
@@ -4195,6 +4525,16 @@ async function get_users_based_on_types(req, res) {
       "description",
     ],
   });
+  // Sec pass 1: clients use this to list dietitians / trainers / support
+  // reps; they don't get staff emails or phone numbers. Empty strings (not
+  // null) because the app's model needs a String there.
+  const caller = req.authUser || (req.user && req.user.id
+    ? await User.findByPk(req.user.id, { attributes: ["id", "userType"] })
+    : null);
+  if (!require("../../helper/roles").isStaff(caller)) {
+    const safe = data.map((u) => ({ ...u.toJSON(), email: "", phone: "" }));
+    return res.json(ApiResponse("1", "Users Data", { users: safe }));
+  }
   let response = ApiResponse("1", "Users Data", { users: data });
   return res.json(response);
 }
@@ -4340,20 +4680,23 @@ async function dietition_add_plan(req, res) {
 }
 
 async function update_user(req, res) {
-  const { userId, speciality, totalPatients, experience, description } =
-    req.body;
-  let user = await User.findOne({ where: { id: userId } });
-  user.speciality = speciality;
-  user.totalPatients = totalPatients;
-  user.experience = experience;
-  user.description = description;
-  const service_image = req.file;
-  let tmpPath = service_image.path;
-  let imagePath = tmpPath.replace(/\\/g, "/");
-  user.image = imagePath;
-  await user.save();
-  let response = ApiResponse("1", "Updated successfully", {});
-  return res.json(response);
+  // Photo is optional now (was a crash without one), so the web portal can
+  // save text-only changes. Only fields that are sent get changed.
+  try {
+    const { userId, speciality, totalPatients, experience, description } = req.body;
+    const user = await User.findOne({ where: { id: userId } });
+    if (!user) return res.json(ApiResponse("0", "User not found", {}));
+    if (speciality !== undefined) user.speciality = speciality;
+    if (totalPatients !== undefined) user.totalPatients = totalPatients;
+    if (experience !== undefined) user.experience = experience;
+    if (description !== undefined) user.description = description;
+    if (req.file && req.file.path) user.image = req.file.path.replace(/\\/g, "/");
+    await user.save();
+    return res.json(ApiResponse("1", "Updated successfully", {}));
+  } catch (e) {
+    console.error("[update_user]", e.message);
+    return res.json(ApiResponse("0", "Couldn't save the profile. Please try again.", {}));
+  }
 }
 
 async function addDiet(req, res) {
@@ -4521,6 +4864,23 @@ async function dietPlanDetails(req, res) {
 
     if (!planDetails) {
       return res.json(ApiResponse("0", "No Plan found for the UserPlan."));
+    }
+
+    // Sec pass 1: the client herself, her dietitian, or Admin.
+    {
+      const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+      let allowed =
+        !!me &&
+        (Number(userPlanDetails.userId) === Number(me.id) ||
+          Number(planDetails.dietitianId) === Number(me.id) ||
+          require("../../helper/roles").isAdmin(me));
+      if (!allowed && me && ["dietition", "dietitian"].includes(String(me.userType || "").trim().toLowerCase())) {
+        const ids = await require("../../helper/dietitianScope").getAssignedClientIds(me.id);
+        allowed = ids.has(Number(userPlanDetails.userId));
+      }
+      if (!allowed) {
+        return res.json(ApiResponse("0", "You can only see your own diet plan.", {}));
+      }
     }
 
     // Check if an appointment exists for the user
@@ -5270,7 +5630,7 @@ async function me(req, res) {
     }
 
     const userType = user.userType || "";
-    const isAdmin    = userType === "Admin";
+    const isAdmin    = String(userType || "").trim().toLowerCase() === "admin";
     const isSalesRep = userType === "Customer_Support_Representative";
 
     // Only Admin and Customer_Support_Representative are allowed to use CRM-side APIs.

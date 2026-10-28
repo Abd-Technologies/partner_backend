@@ -257,8 +257,13 @@ async function activateDietPlan(dietPlanId, dietitianId = null) {
 
   // Push notification — outside the txn so a delivery failure doesn't
   // roll back activation. Mirrors addDietPdf's pattern.
+  //
+  // Oct 2026: only for a plan a DIETITIAN shared. The free-trial starter
+  // plan (AI, no dietitian) is not "your dietitian has activated your
+  // personalized plan": she sees it right away, or gets "Your starter
+  // plan is ready 🌱" (trialDietPlanController) if it took longer.
   try {
-    const user = await User.findByPk(plan.userId);
+    const user = plan.dietitianId ? await User.findByPk(plan.userId) : null;
     if (user && user.deviceToken) {
       sendNotification([user.deviceToken], {
         title: 'Your Diet Plan is Ready',

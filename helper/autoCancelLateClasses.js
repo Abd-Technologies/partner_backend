@@ -38,6 +38,42 @@ async function rosterUserIds(slot) {
   return audience.map((u) => u.id);
 }
 
+// Oct 2026: tell women about a cancelled class ONCE per class per day.
+// A class could be announced twice: after it was cancelled, its status
+// went back to "Upcoming Class" (admin saved the weekly schedule, or the
+// trainer changed it), so the next minute's run cancelled and announced
+// it again ("Class Cancelled" twice, 10 min apart). Redis claim, with an
+// in-memory fallback if Redis is down.
+const announcedLocal = new Map();
+let _redis = null;
+function redisClient() {
+  if (_redis) return _redis;
+  try {
+    const Redis = require("ioredis");
+    _redis = new Redis();
+    _redis.on("error", () => {});
+  } catch (e) {
+    _redis = null;
+  }
+  return _redis;
+}
+async function firstAnnouncement(slotId) {
+  const key = `classcancelled:${slotId}:${moment.tz(CANONICAL_TZ).format("YYYY-MM-DD")}`;
+  const r = redisClient();
+  if (r) {
+    try {
+      const ok = await r.set(key, "1", "EX", 36 * 3600, "NX");
+      return ok === "OK";
+    } catch (e) {
+      /* fall through to memory */
+    }
+  }
+  if (announcedLocal.has(key)) return false;
+  announcedLocal.set(key, Date.now());
+  if (announcedLocal.size > 2000) announcedLocal.clear();
+  return true;
+}
+
 async function autoCancelLateClasses() {
   const nowUtc = moment.utc();
   const todayPkt = moment.tz(CANONICAL_TZ);
@@ -70,6 +106,7 @@ async function autoCancelLateClasses() {
     );
     if (!changed) continue;
     slot.status = "Cancelled";
+    require("./classDiary").cancelled(slot, { auto: true });
     console.log(
       `[class-analytics] CLASS_AUTO_CANCELLED_NOT_STARTED: slotId=${slot.id} trainerId=${slot.trainerId} scheduledStart="${slot.start}"`
     );
@@ -87,6 +124,11 @@ async function autoCancelLateClasses() {
  * the socket.
  */
 async function announceCancelled(slot, { late = false, todays = null } = {}) {
+  // Already told everyone today: keep it cancelled, say nothing again.
+  if (!(await firstAnnouncement(slot.id))) {
+    console.log(`[auto-cancel-class] slot ${slot.id} already announced today, skipping`);
+    return;
+  }
   const nowUtc = moment.utc();
   const todayPkt = moment.tz(CANONICAL_TZ);
   if (!todays) {

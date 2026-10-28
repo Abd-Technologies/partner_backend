@@ -86,6 +86,12 @@ module.exports = (sequelize, DataTypes) => {
         //     type: DataTypes.INTEGER,
         //     allowNull: true,
         // },
+    }, {
+        // Deleting a slot (admin) only hides it: deletedAt is set, every
+        // normal query skips it, and past attendance/feedback keep working
+        // (those reads use paranoid:false). Column added by migration
+        // 20261026120000-slot-delete-announcement-text.
+        paranoid: true,
     });
 
     const todayPkt = () => {
@@ -93,12 +99,17 @@ module.exports = (sequelize, DataTypes) => {
         return moment.tz('Asia/Karachi').format('YYYY-MM-DD');
     };
 
-    /** Today's backup link (if set for today), else the Zoom room. */
+    /**
+     * Today's backup link (if set for today), else the class room: the
+     * trainer's own room, else the Fit Her main room (helper/classRoomSettings.js).
+     */
     Slot.prototype.effectiveLink = function () {
         const backup = this.getDataValue('backupLink');
         if (backup && this.getDataValue('backupLinkDate') === todayPkt()) return backup;
         const room = this.getDataValue('trainerLink');
-        return room && String(room).trim() ? String(room).trim() : null;
+        if (room && String(room).trim()) return String(room).trim();
+        const main = require('../helper/classRoomSettings').mainRoom();
+        return main || null;
     };
     /** True when today's class uses the trainer's backup link. */
     Slot.prototype.usesBackupLink = function () {
@@ -113,7 +124,9 @@ module.exports = (sequelize, DataTypes) => {
         if (!trainerId) return;
         try {
             const trainer = await sequelize.models.User.findByPk(trainerId, { attributes: ['id', 'zoomRoom'] });
-            if (trainer && trainer.zoomRoom) slot.setDataValue('trainerLink', trainer.zoomRoom);
+            const main = require('../helper/classRoomSettings').mainRoom();
+            const room = (trainer && trainer.zoomRoom) || main;
+            if (room) slot.setDataValue('trainerLink', room);
         } catch (_) { /* keep whatever was there */ }
     });
 

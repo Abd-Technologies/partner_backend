@@ -16,6 +16,12 @@ module.exports = (sequelize, DataTypes) =>{
             type: DataTypes.BOOLEAN,
             allowNull: true,
           },
+        // Wrong tries for the current code; 5 cancel it (helper/otpStore.js).
+        otpTries: {
+            type: DataTypes.INTEGER,
+            allowNull: false,
+            defaultValue: 0,
+        },
         
     });
     OtpData.associate = (models)=>{

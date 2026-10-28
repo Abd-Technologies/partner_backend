@@ -40,10 +40,18 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 1,
     },
+    // "Diet plan updates" switch (Oct 2026). Was only saved on the phone,
+    // so diet pushes still came while the app was closed. Column added by
+    // migrations/20261031120000-notif-diet-and-hide.js.
+    dietUpdates: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 1,
+    },
     quietStart: {
       type: DataTypes.STRING,
       allowNull: false,
-      defaultValue: '22:00',
+      defaultValue: '23:30',
     },
     quietEnd: {
       type: DataTypes.STRING,

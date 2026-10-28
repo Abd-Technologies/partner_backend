@@ -96,6 +96,22 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(32),
       allowNull: true,
     },
+    // Growth analytics (Oct 2026, migration 20261020120000).
+    signupMethod: { type: DataTypes.STRING(16), allowNull: true },
+    signupSource: { type: DataTypes.STRING(40), allowNull: true },
+    signupCampaign: { type: DataTypes.STRING(80), allowNull: true },
+    lastLoginAt: { type: DataTypes.DATE, allowNull: true },
+    loginCount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    // +1 on logout / password change: every older login token stops
+    // working (helper/authToken.js, migration 20261028120000).
+    tokenVersion: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    // Sign-up questions (migration 20261022120000).
+    //   onboardingDoneAt     she finished the questions (NULL = not yet)
+    //   onboardingStep       last question page she reached (0-5)
+    //   onboardingReminderAt the one "finish setting up" push was sent
+    onboardingDoneAt: { type: DataTypes.DATE, allowNull: true },
+    onboardingStep: { type: DataTypes.INTEGER, allowNull: true },
+    onboardingReminderAt: { type: DataTypes.DATE, allowNull: true },
     // Last app version she opened (reported by the app on every start).
     // NULL = an old app that doesn't report → she still needs to update.
     appVersion: {

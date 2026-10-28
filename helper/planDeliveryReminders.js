@@ -50,17 +50,29 @@ async function adminTokens() {
 
 async function sendPlanDeliveryReminders() {
   const now = Date.now();
+  const clock = require("./planDeliveryClock");
+  // Oct 2026: the 48 h clock counts WORKING hours only (no Sat/Sun, no
+  // emergency days). Look at the last 14 days of consultations and send a
+  // window's reminder in the hour its working-hours mark is crossed.
+  const recent = await Appointment.findAll({
+    where: {
+      status: "completed",
+      status_changed_at: { [Op.gt]: new Date(now - 14 * 86400000), [Op.lte]: new Date(now) },
+    },
+    attributes: ["id", "userId", "dietitionId", "status_changed_at"],
+  });
   for (const w of WINDOWS) {
-    const appts = await Appointment.findAll({
-      where: {
-        status: "completed",
-        status_changed_at: {
-          [Op.gt]: new Date(now - w.toH * 3600000),
-          [Op.lte]: new Date(now - w.fromH * 3600000),
-        },
-      },
-      attributes: ["id", "userId", "dietitionId", "status_changed_at"],
-    });
+    const appts = [];
+    for (const a of recent) {
+      try {
+        const at = new Date(a.status_changed_at);
+        const hNow = await clock.workingHoursSince(at, a.dietitionId, new Date(now));
+        const hPrev = await clock.workingHoursSince(at, a.dietitionId, new Date(now - 3600000));
+        if (hPrev < w.fromH && hNow >= w.fromH) appts.push(a);
+      } catch (_) {
+        /* skip this one */
+      }
+    }
 
     for (const a of appts) {
       try {

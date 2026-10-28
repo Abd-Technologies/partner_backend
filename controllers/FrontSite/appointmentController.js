@@ -4,8 +4,14 @@ const ApiResponse = require("../../helper/ApiResponse");
 const sendNotification = require("../../helper/notification");
 const { findFrozenActivePlan } = require("../../helper/freezeGate");
 const bookingPolicy = require("../../helper/bookingPolicy");
+const { queueConsultationCancelled } = require("../../helper/consultationCancelledPopup");
 const { findClassClash } = require("../../helper/classClash");
 const { Op } = require("sequelize");
+const { isAdmin } = require("../../helper/roles");
+const { getAssignedClientIds } = require("../../helper/dietitianScope");
+
+// Never send these User columns to an app screen.
+const USER_PRIVATE = ["password", "deviceToken"];
 
 
 // Get all appointments for a specific dietitian
@@ -83,7 +89,16 @@ exports.getAllAppointments = async (req, res) => {
 
 exports.getAllAppointmentStatus = async (req, res) => {
   try {
+    // Sec pass 1: was every appointment (with client emails) for any
+    // logged-in user. Admin still sees all; anyone else only the ones
+    // she is the client or the dietitian on.
+    const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+    if (!me) return res.json(ApiResponse("0", "User not found!", {}));
+    const where = isAdmin(me)
+      ? {}
+      : { [Op.or]: [{ userId: me.id }, { dietitionId: me.id }] };
     const appointments = await Appointment.findAll({
+      where,
       attributes: { exclude: ["createdAt", "updatedAt"] },
       include: [
         {
@@ -111,13 +126,27 @@ exports.getAppointmentById = async (req, res) => {
     const { id } = req.params;
     const appointment = await Appointment.findByPk(id, {
       include: [
-        { model: User, as: "ClientUser" },
+        { model: User, as: "ClientUser", attributes: { exclude: USER_PRIVATE } },
         { model: SlotDiet },
       ],
     });
     if (!appointment) {
       const response = ApiResponse("0", "Appointment not found", {});
       return res.status(404).json(response);
+    }
+    // Sec pass 1: only the client herself, her dietitian, or Admin.
+    const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+    let allowed =
+      !!me &&
+      (Number(appointment.userId) === Number(me.id) ||
+        Number(appointment.dietitionId) === Number(me.id) ||
+        isAdmin(me));
+    if (!allowed && me && ["dietition", "dietitian"].includes(String(me.userType || "").trim().toLowerCase())) {
+      const ids = await getAssignedClientIds(me.id);
+      allowed = ids.has(Number(appointment.userId));
+    }
+    if (!allowed) {
+      return res.json(ApiResponse("0", "You can only see your own appointments.", {}));
     }
     const response = ApiResponse("1", "Appointment fetched successfully", appointment);
     return res.status(200).json(response);
@@ -143,6 +172,13 @@ exports.createAppointment = async (req, res) => {
   const persistedKind =
     typeof kind === "string" && VALID_KINDS.has(kind) ? kind : null;
 
+  // Oct 2026: no booking into a dietitian's emergency day.
+  if (await require("../../helper/emergencyDay").isBlocked(dietitionId, date)) {
+    return res.json(
+      ApiResponse("0", "Your dietitian isn't available on this day. Please pick another day.", { code: "DIETITIAN_DAY_OFF" })
+    );
+  }
+
   // Freeze gate — block consultation booking while the user's plan is
   // paused. Resume from profile to book again. See helper/freezeGate.js.
   const frozenPlan = await findFrozenActivePlan(userId);
@@ -154,6 +190,25 @@ exports.createAppointment = async (req, res) => {
         { isFrozen: true, frozenAt: frozenPlan.frozenAt }
       )
     );
+  }
+
+  // Plan ended (Oct 2026): a new consultation needs a live plan. The plan
+  // she books under must be hers and live (not expired, cancelled or
+  // paused). Consultations booked before the plan ended are kept.
+  try {
+    const { UserPlan } = require("../../models");
+    const { activeUserPlanWhere } = require("../../helper/activePackage");
+    const live = await UserPlan.findOne({
+      where: { id: userPlanId, userId, ...activeUserPlanWhere() },
+      attributes: ["id"],
+    });
+    if (!live) {
+      return res.json(
+        ApiResponse("0", "Your plan has ended. Renew your plan to book a consultation.", { code: "PLAN_ENDED" })
+      );
+    }
+  } catch (e) {
+    console.error("[createAppointment] plan check failed:", e.message);
   }
 
   // Health form first (Oct 2026): the first consultation can't be booked
@@ -589,7 +644,7 @@ exports.updateAppointment = async (req, res) => {
     // is the ownership check, same pattern as /:id/start.
     const caller = req.user || {};
     const isOwningDietitian = caller.id === appointment.dietitionId;
-    const isAdmin = caller.userType === "Admin";
+    const isAdmin = String(caller.userType || "").trim().toLowerCase() === "admin";
     if (!isOwningDietitian && !isAdmin) {
       return res.status(403).json(
         ApiResponse("0", "You can only update your own appointments.", {})
@@ -598,6 +653,13 @@ exports.updateAppointment = async (req, res) => {
 
     const statusChanged = status != null && status !== appointment.status;
     const prevStatus = appointment.status;
+
+    // On hold (payment not confirmed): it can't be started.
+    if (statusChanged && status === "In Progress" && appointment.paymentHoldAt) {
+      return res.json(
+        ApiResponse("0", "This consultation is on hold: the client's payment isn't confirmed yet.", { code: "PAYMENT_HOLD" })
+      );
+    }
 
     if (status != null) {
       appointment.status = status;
@@ -659,6 +721,14 @@ exports.updateAppointment = async (req, res) => {
         bonusDays = 0;
         console.error("[updateAppointment] cancel compensation failed:", e.message);
       }
+    }
+    // Dietitian/admin cancelled a live booking: in-app pop-up (urgent).
+    if (
+      statusChanged &&
+      status === "canceled" &&
+      ["pending", "confirmed", "In Progress"].includes(prevStatus)
+    ) {
+      await queueConsultationCancelled(appointment, "dietitian_cancelled", { bonusDays });
     }
 
     const user = await User.findByPk(appointment.userId);
@@ -746,13 +816,19 @@ exports.startAppointment = async (req, res) => {
     // Admin, for support/override cases) may start it.
     const caller = req.user || {};
     const isOwningDietitian = caller.id === appointment.dietitionId;
-    const isAdmin = caller.userType === "Admin";
+    const isAdmin = String(caller.userType || "").trim().toLowerCase() === "admin";
     if (!isOwningDietitian && !isAdmin) {
       console.log(
         `[startAppointment] REJECTED — not owner. callerId=${caller.id} appointment.dietitionId=${appointment.dietitionId} callerType=${caller.userType}`
       );
       return res.status(403).json(
         ApiResponse("0", "You can only start your own consultations.", {})
+      );
+    }
+
+    if (appointment.paymentHoldAt) {
+      return res.status(200).json(
+        ApiResponse("0", "This consultation is on hold: the client's payment isn't confirmed yet.", { code: "PAYMENT_HOLD" })
       );
     }
 
