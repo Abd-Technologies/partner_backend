@@ -623,19 +623,14 @@ async function buildSleep(userId) {
 }
 
 async function buildStats(userId) {
-  // Workouts this week: distinct attended_at dates since Monday.
+  // Classes this week: days since Monday (PKT) she was in a class 10+ min.
+  // Same rule as the Profile stats (helper/attendanceStats.js), so Home
+  // and Profile always show the same number (Oct 2026).
   let workoutsThisWeek = 0;
   try {
-    const weekStart = startOfIsoWeek();
-    const rows = await ClassAttendance.findAll({
-      where: {
-        user_id: userId,
-        attended_at: { [Op.gte]: weekStart },
-      },
-      attributes: ["attended_at"],
-      group: ["attended_at"],
-    });
-    workoutsThisWeek = rows.length;
+    const monday = moment.tz("Asia/Karachi").startOf("isoWeek").format("YYYY-MM-DD");
+    const days = await require("../../helper/attendanceStats").attendedDays(userId, 8);
+    workoutsThisWeek = [...days].filter((d) => d >= monday).length;
   } catch (err) {
     console.error("DashboardController.buildStats workouts:", err);
   }
