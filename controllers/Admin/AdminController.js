@@ -834,10 +834,25 @@ async function update_slots(req, res) {
             });
 
             if (existingSlot) {
-              existingSlot.start = normalizedStart ?? slot.start;
-              existingSlot.end = normalizedEnd ?? slot.end;
+              const newStart = normalizedStart ?? slot.start;
+              const newEnd = normalizedEnd ?? slot.end;
+              const timeChanged =
+                String(existingSlot.start) !== String(newStart) ||
+                String(existingSlot.end) !== String(newEnd);
+              existingSlot.start = newStart;
+              existingSlot.end = newEnd;
               existingSlot.trainerId = slot.trainerId;
-              existingSlot.status = "Upcoming Class";
+              // Oct 2026 FIX: this used to set EVERY slot of the day back
+              // to "Upcoming Class" whenever the admin saved the schedule.
+              // A class that had ended (Completed) or was live (In
+              // Progress) came back as "Get ready" in the app, then the
+              // late-class job auto-cancelled it and told the women
+              // "class cancelled". Now today's status is kept; only a
+              // cancelled class that is moved to a new time is reopened.
+              // (The nightly reset still makes every class "Upcoming".)
+              if (timeChanged && existingSlot.status === "Cancelled") {
+                existingSlot.status = "Upcoming Class";
+              }
               // Workout details (type/level/description) used to only be
               // settable later, one slot at a time, via update_slot_trainer
               // -- meaning the trainer had to fill them in themselves after
