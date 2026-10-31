@@ -184,7 +184,10 @@ async function sendUpcomingSlotNotificationsPerUser() {
 
       for (const user of users) {
         if (!isHerClass(user, slot)) continue;
-        if (await alreadyNotified(user.id, slot.id, 'classPrep', endMs)) continue;
+        // Key includes the start time: if the class time is changed after
+        // the reminder went out (6:00 -> 6:15), she gets one for the new
+        // time too, same as trial users (helper/trialClasses.js).
+        if (await alreadyNotified(user.id, slot.id, `classPrep:${startUtc.format('HHmm')}`, endMs)) continue;
         const local = startUtc.clone().tz(user.timeZone || 'Asia/Karachi').format('h:mm A');
         await notificationQueue.add({
           title: 'Class Reminder',
