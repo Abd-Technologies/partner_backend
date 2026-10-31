@@ -3,9 +3,9 @@
 // Days before the switch keep the old ClassAttendance marks so nobody's
 // history disappears.
 //
-// Streak = attended class days in a row. Days with no classes on the
-// schedule are skipped (they don't break it), and TODAY only counts once
-// she has attended, so the streak no longer shows 0 before today's class.
+// Streak = days in a row she did something: a class (10+ min), a meal,
+// water or her daily insights (see motivationStats). TODAY only counts
+// once she has done one, so the streak doesn't show 0 in the morning.
 const { Op } = require("sequelize");
 const moment = require("moment-timezone");
 const { parseEndAsUtc } = require("./timeFormats");
@@ -82,20 +82,62 @@ async function classWeekdays() {
   }
 }
 
+/**
+ * Days (PKT "YYYY-MM-DD") she did ANYTHING for herself in the last [days]
+ * days: logged a meal, water, or a daily check-in (mood / energy / sleep).
+ * Class days come from attendedDays(). Used for the streak (Oct 2026).
+ */
+async function activityDays(userId, days = 60) {
+  const M = require("../models");
+  const from = moment.tz(PKT).startOf("day").subtract(days - 1, "days").format("YYYY-MM-DD");
+  const out = new Set();
+  const add = (d) => {
+    if (!d) return;
+    const key = moment(d).format("YYYY-MM-DD");
+    if (key >= from) out.add(key);
+  };
+  const tries = [
+    M.MealLog && M.MealLog.findAll({
+      where: { userId, date: { [Op.gte]: from }, status: { [Op.ne]: "pending" } },
+      attributes: ["date"], group: ["date"], raw: true,
+    }),
+    M.WaterLog && M.WaterLog.findAll({
+      where: { userId, date: { [Op.gte]: from }, amountMl: { [Op.gt]: 0 } },
+      attributes: ["date"], group: ["date"], raw: true,
+    }),
+    M.DailyCheckin && M.DailyCheckin.findAll({
+      where: { userId, date: { [Op.gte]: from } },
+      attributes: ["date"], group: ["date"], raw: true,
+    }),
+  ];
+  for (const t of tries) {
+    if (!t) continue;
+    try {
+      (await t).forEach((r) => add(r.date));
+    } catch (e) {
+      console.error("[attendanceStats] activityDays", e.message);
+    }
+  }
+  return out;
+}
+
 async function motivationStats(userId) {
   const attended = await attendedDays(userId, 30);
   const weekdays = await classWeekdays();
   const today = moment.tz(PKT).startOf("day");
   const isClassDay = (d) => !weekdays || weekdays.has(d.format("dddd"));
 
-  // Streak
+  // Streak (Oct 2026): days in a row she did something for herself:
+  // joined a class (10+ min), logged a meal, water, or today's insights.
+  // Today only counts once she has done one of them, and doesn't break
+  // the streak before that.
+  const active = new Set([...(await attendedDays(userId, 60)), ...(await activityDays(userId, 60))]);
   let streak = 0;
   const cursor = today.clone();
-  if (!attended.has(cursor.format("YYYY-MM-DD"))) cursor.subtract(1, "day"); // today not attended yet: don't break
+  if (!active.has(cursor.format("YYYY-MM-DD"))) cursor.subtract(1, "day");
   for (let i = 0; i < 60; i++) {
-    const key = cursor.format("YYYY-MM-DD");
-    if (attended.has(key)) streak++;
-    else if (isClassDay(cursor)) break;
+    if (!active.has(cursor.format("YYYY-MM-DD"))) break;
+    streak++;
     cursor.subtract(1, "day");
   }
 
@@ -121,4 +163,4 @@ async function motivationStats(userId) {
   };
 }
 
-module.exports = { attendedDays, motivationStats, ATTENDED_SECONDS };
+module.exports = { attendedDays, activityDays, motivationStats, ATTENDED_SECONDS };

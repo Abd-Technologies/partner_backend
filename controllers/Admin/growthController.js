@@ -33,6 +33,11 @@ async function guard(req, res) {
 const period = (req) => {
   const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
   const to = new Date();
+  // days=1 is "Today": from Pakistan midnight, compared with all of yesterday.
+  if (days === 1) {
+    const midnight = moment().tz(PKT).startOf("day");
+    return { days, from: midnight.toDate(), to, prevFrom: midnight.clone().subtract(1, "day").toDate() };
+  }
   const from = new Date(to.getTime() - days * DAY);
   const prevFrom = new Date(from.getTime() - days * DAY);
   return { days, from, to, prevFrom };
