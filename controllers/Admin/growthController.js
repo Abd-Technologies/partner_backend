@@ -18,7 +18,7 @@ const { isAdmin, adminsOnlyMessage } = require("../../helper/roles");
 const PKT = "Asia/Karachi";
 const M = () => require("../../models");
 const DAY = 24 * 3600 * 1000;
-const ATTENDED_SECONDS = 600;
+const ATTENDED_SECONDS = require("../../helper/trialAttendance").minTrialAttendanceSeconds(); // 5 min (one rule)
 
 // ── helpers ──────────────────────────────────────────────────────────
 async function guard(req, res) {
@@ -191,6 +191,7 @@ const LISTS = {
   workout_only_upsell: { title: "Workout-only for 30+ days", hint: "Offer to add a meal plan" },
   low_ratings: { title: "Low class ratings (1–2★), 7 days", hint: "Call and say sorry" },
   slipping: { title: "Slipping away", hint: "Used to come often, now quiet" },
+  frozen: { title: "Plans on pause (frozen)", hint: "Say hello before she comes back" },
   no_trial_class: { title: "Started trial, no class yet", hint: "Help her book her first class" },
   symptom_high_no_diet: {
     title: "Symptom check moderate/high, no diet plan",
@@ -288,6 +289,33 @@ async function buildList(key) {
         detail: `${r.conditionType}: ${r.riskLevel} · ${d === 0 ? "today" : d + "d ago"} · ${p ? p.type + " plan" : "no plan"}`,
         sort: r.riskLevel === "high" ? -1000 + d : d,
         level: r.riskLevel === "high" ? "high" : "medium",
+      });
+    }
+  } else if (key === "frozen") {
+    // Paused plans right now (Freeze v2: frozenAt set). Back on = frozenAt
+    // + freezeDays (the auto-unfreeze), soonest first.
+    const { UserPlan, Plan } = M();
+    const rows = await UserPlan.findAll({
+      where: { status: true, cancelledAt: null, frozenAt: { [Op.ne]: null }, isTrial: { [Op.not]: true } },
+      include: [{ model: Plan, attributes: ["id", "title", "CategoryId", "planType"] }],
+    });
+    for (const r of rows) {
+      const t = typeOfPlan(r.Plan);
+      if (!t) continue;
+      const since = moment(r.frozenAt).tz(PKT);
+      const days = Math.max(0, Math.floor((now - since.valueOf()) / DAY));
+      const back = r.freezeDays ? since.clone().add(r.freezeDays, "days") : null;
+      const backIn = back ? Math.ceil((back.valueOf() - now) / DAY) : null;
+      const parts = [
+        `${t}`,
+        `paused ${since.format("D MMM")} (${days === 0 ? "today" : days + "d ago"})`,
+        back ? `back on ${back.format("D MMM")}` : "no end date",
+      ];
+      out.push({
+        userId: r.userId,
+        detail: parts.join(" · "),
+        sort: backIn == null ? 9999 : backIn,
+        level: backIn != null && backIn <= 2 ? "medium" : "low",
       });
     }
   } else if (key === "signup_unfinished") {
@@ -480,7 +508,7 @@ exports.workout = wrap(async (req) => {
   const autoCancelled = sessions.filter((s) => s.status === "auto_cancelled").length;
 
   // Per slot
-  const slots = await Slot.findAll({ attributes: ["id", "type", "start", "trainerId"], include: [{ model: User, attributes: ["id", "firstName", "lastName"] }] });
+  const slots = await Slot.findAll({ attributes: ["id", "type", "start", "end", "trainerId"], include: [{ model: User, attributes: ["id", "firstName", "lastName"] }] });
   const slotBy = new Map(slots.map((s) => [s.id, s]));
   const fb = await ClassFeedback.findAll({ where: { rating: { [Op.ne]: null }, updatedAt: { [Op.gte]: from } }, attributes: ["slotId", "trainerId", "rating", "tags"] });
   const avg = (arr) => (arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : null);
@@ -540,6 +568,11 @@ exports.workout = wrap(async (req) => {
     };
   }).filter((t) => t.classesHeld || t.cancelled || t.autoCancelled).sort((a, b) => (a.onTimePct ?? 101) - (b.onTimePct ?? 101));
 
+  // Class diary (Oct 2026): every class in the period with how the
+  // trainer ran it and how many women came. "Today" also lists the
+  // classes that haven't started yet.
+  const diary = await buildClassDiary({ sessions, pres, slotBy, from, today: days === 1 });
+
   // By weekday
   const byDay = {};
   for (const x of attended) {
@@ -552,7 +585,8 @@ exports.workout = wrap(async (req) => {
     days,
     diarySince: sessions.length ? sessions.map((s) => s.date).sort()[0] : null,
     kpis: {
-      classesHeld: classDays.size,
+      // Started by the trainer (class diary), or had a woman in it.
+      classesHeld: Math.max(classDays.size, sessions.filter((x) => x.startedAt).length),
       cancelled,
       autoCancelled,
       stayedPct: pct(attended.length, totalJoined),
@@ -563,8 +597,77 @@ exports.workout = wrap(async (req) => {
     byWeekday: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => ({ day: d, attended: byDay[d] || 0 })),
     slots: slotRows,
     trainers: trainerRows,
+    diary,
+    attendMinutes: Math.round(ATTENDED_SECONDS / 60),
   };
 });
+
+async function buildClassDiary({ sessions, pres, slotBy, from, today }) {
+  const { Slot, Time, User, ClassFeedback } = M();
+  const fromDay = moment(from).tz(PKT).format("YYYY-MM-DD");
+  const todayKey = moment.tz(PKT).format("YYYY-MM-DD");
+  const rows = sessions.map((x) => ({ s: x, slotId: x.slotId, date: x.date }));
+  if (today) {
+    // Today's classes with no diary row yet (not started / not cancelled).
+    const have = new Set(rows.filter((r) => r.date === todayKey).map((r) => r.slotId));
+    const todays = await Slot.findAll({
+      where: { trainerId: { [Op.ne]: null } },
+      attributes: ["id", "type", "start", "end", "trainerId", "status"],
+      include: [{ model: Time, attributes: ["day"], where: { day: moment.tz(PKT).format("dddd") } }],
+    });
+    for (const sl of todays) if (!have.has(sl.id)) rows.push({ s: null, slotId: sl.id, date: todayKey, slot: sl });
+  }
+  if (!rows.length) return [];
+  let fb = [];
+  try {
+    fb = await ClassFeedback.findAll({
+      where: { classDate: { [Op.gte]: fromDay }, rating: { [Op.ne]: null } },
+      attributes: ["slotId", "classDate", "rating"],
+    });
+  } catch (_) {}
+  const trainerIds = new Set();
+  rows.forEach((r) => {
+    const sl = r.slot || slotBy.get(r.slotId);
+    const tid = (r.s && r.s.trainerId) || (sl && sl.trainerId);
+    if (tid) trainerIds.add(tid);
+  });
+  const trainers = await usersByIds([...trainerIds], ["id", "firstName", "lastName"]);
+  const t = (d) => (d ? moment(d).tz(PKT).format("h:mm A") : null);
+  const out = rows.map((r) => {
+    const x = r.s;
+    const sl = r.slot || slotBy.get(r.slotId);
+    const tid = (x && x.trainerId) || (sl && sl.trainerId);
+    const mine = pres.filter((p) => p.slotId === r.slotId && p.day === r.date);
+    const came = mine.filter((p) => p.secs >= ATTENDED_SECONDS);
+    const rates = fb.filter((f) => f.slotId === r.slotId && String(f.classDate) === r.date).map((f) => f.rating);
+    let status = x ? x.status : "upcoming";
+    if (!x && sl && sl.status === "In Progress") status = "live";
+    const endAt = x && (x.endedAt || (status === "live" ? new Date() : null));
+    return {
+      date: r.date,
+      slotId: r.slotId,
+      className: ((x && x.className) || (sl && sl.type) || "Class").trim(),
+      scheduled: `${(sl && sl.start) || (x && t(x.scheduledStart)) || ""} – ${(sl && sl.end) || (x && t(x.scheduledEnd)) || ""}`,
+      trainer: name(trainers.get(tid)) || "",
+      status, // upcoming / live / completed / cancelled / auto_cancelled
+      startedAt: x ? t(x.startedAt) : null,
+      lateMinutes: x && x.startLateMinutes != null ? x.startLateMinutes : null, // minus = early
+      endedAt: x ? t(x.endedAt) : null,
+      endedBy: x ? x.endedBy : null, // trainer / admin / system (forgot to end)
+      ranMinutes: x && x.startedAt && endAt ? Math.max(0, Math.round((new Date(endAt) - new Date(x.startedAt)) / 60000)) : null,
+      usedOtherLink: !!(x && x.usedOtherLink),
+      joined: mine.length,
+      attended: came.length,
+      avgMinutes: came.length ? Math.round(came.reduce((a, p) => a + p.secs, 0) / came.length / 60) : null,
+      rating: rates.length ? Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 10) / 10 : null,
+      ratings: rates.length,
+      _sort: `${r.date} ${String(moment((sl && sl.start) || "12:00 AM", "hh:mm A").format("HH:mm"))}`,
+    };
+  });
+  out.sort((a, b) => (a._sort < b._sort ? 1 : -1));
+  if (today) out.reverse(); // today: morning first
+  return out.slice(0, 80).map(({ _sort, ...rest }) => rest);
+}
 
 exports.revenue = wrap(async (req) => {
   const { PaymentAttempt, PlanImage } = M();
@@ -657,6 +760,7 @@ exports.retention = wrap(async () => {
     cohorts,
     whatKeeps: Object.entries(keep).map(([group, [women, renewed]]) => ({ group, women, renewedPct: pct(renewed, women) })),
     slipping: (await buildList("slipping")).slice(0, 30),
+    frozen: await buildList("frozen"),
     cancelReasons: Object.entries(rc).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count),
   };
 });

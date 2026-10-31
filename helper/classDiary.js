@@ -12,7 +12,7 @@ const moment = require("moment-timezone");
 const { parseEndAsUtc } = require("./timeFormats");
 
 const PKT = "Asia/Karachi";
-const ATTENDED_SECONDS = 10 * 60;
+const ATTENDED_SECONDS = require("./trialAttendance").minTrialAttendanceSeconds(); // 5 min (one rule)
 const models = () => require("../models");
 
 /** Slot wall-clock time ("6:00 PM") on a given PKT day, as a UTC moment. */

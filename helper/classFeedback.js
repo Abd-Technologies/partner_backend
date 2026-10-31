@@ -17,7 +17,7 @@ const { ClassFeedback, ClassPresence, Slot, User } = require("../models");
 const { parseEndAsUtc } = require("./timeFormats");
 
 const PKT = "Asia/Karachi";
-const MIN_SECONDS = 10 * 60;
+const MIN_SECONDS = require("./trialAttendance").minTrialAttendanceSeconds(); // 5 min (one rule)
 const ASK_WINDOW_HOURS = 24;
 const RATED_COOLDOWN_DAYS = 3;
 const SKIP_PAUSE_DAYS = 7;

@@ -2,7 +2,10 @@ const { TrialJourney } = require("../models");
 // Bug 5 fix: use shared state functions instead of duplicating them here.
 const { computeState, computeNextBookableDay } = require("./trialState");
 
-const DEFAULT_MIN_SECONDS = 10 * 60;
+// Oct 2026: 5 minutes in class = attended (was 10). This ONE rule is used
+// everywhere (trial classes, streak, profile, admin dashboard, class
+// diary, rating ask). Change it with TRIAL_ATTENDANCE_MIN_SECONDS in .env.
+const DEFAULT_MIN_SECONDS = 5 * 60;
 
 function minTrialAttendanceSeconds() {
   const raw = Number(process.env.TRIAL_ATTENDANCE_MIN_SECONDS);
