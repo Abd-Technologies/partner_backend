@@ -85,7 +85,35 @@ const POST_PACKAGE_BUCKETS = [
 
 // ─── Paid-plan filter (shared with post-package query) ────────────────────────
 
-const PAID_PLAN_WHERE = { title: { [Op.ne]: 'Free Trial' } };
+// A REAL paid plan (Oct 2026). Free-trial and system plans don't count:
+// the trial gives new users a long-running system plan, so "title is not
+// 'Free Trial'" matched them and a 1-day-old trial user got "Your plan is
+// still running ⏳ · 89 days left on your package". Same rule as
+// helper/preConsultRequirements.js planTypeForUser.
+const PAID_PLAN_WHERE = {
+  [Op.and]: [
+    { title: { [Op.ne]: 'Free Trial' } },
+    { title: { [Op.notLike]: 'system%' } },
+    { title: { [Op.notLike]: '%trial%' } },
+  ],
+};
+// The UserPlan row itself must not be a trial row either.
+const NOT_TRIAL_ROW = { isTrial: { [Op.not]: true } };
+
+// True while her free trial is running: started, not converted, and
+// within the trial length (helper/trialState getTrialDays).
+async function onLiveTrial(userId) {
+  try {
+    const { TrialJourney } = require('../../models');
+    const j = await TrialJourney.findOne({ where: { userId }, order: [['id', 'DESC']] });
+    if (!j || !j.startedAt || j.convertedAt) return false;
+    let days = 3;
+    try { days = require('../trialState').getTrialDays(); } catch (_) {}
+    return moment().diff(moment(j.startedAt), 'days', true) < days;
+  } catch (_) {
+    return false;
+  }
+}
 
 // ─── Segment: mid-package ─────────────────────────────────────────────────────
 
@@ -95,7 +123,7 @@ async function sendMidPackageChurnNudges() {
     include: [{
       model:    UserPlan,
       required: true,
-      where:    { expireDate: { [Op.gt]: new Date() } },
+      where:    { expireDate: { [Op.gt]: new Date() }, ...NOT_TRIAL_ROW },
       include:  [{ model: Plan, required: true, where: PAID_PLAN_WHERE, attributes: ['id'] }],
       attributes: ['id', 'expireDate'],
     }],
@@ -104,6 +132,8 @@ async function sendMidPackageChurnNudges() {
 
   let sent = 0;
   for (const user of users) {
+    // On a running free trial: she isn't a churned paid client.
+    if (await onLiveTrial(user.id)) continue;
     const plan = (user.UserPlans || [])
       .sort((a, b) => new Date(b.expireDate) - new Date(a.expireDate))[0];
     if (!plan) continue;
@@ -138,7 +168,7 @@ async function sendPostPackageChurnNudges() {
     include: [{
       model:    UserPlan,
       required: true,
-      where:    { expireDate: { [Op.lt]: new Date(), [Op.gte]: ninetyDaysAgo } },
+      where:    { expireDate: { [Op.lt]: new Date(), [Op.gte]: ninetyDaysAgo }, ...NOT_TRIAL_ROW },
       include:  [{ model: Plan, required: true, where: PAID_PLAN_WHERE, attributes: ['id'] }],
       attributes: ['id', 'expireDate'],
     }],

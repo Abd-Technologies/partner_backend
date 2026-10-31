@@ -882,6 +882,8 @@ exports.startAppointment = async (req, res) => {
     appointment.status = "In Progress";
     appointment.completed_by = actorUserId != null ? actorUserId : appointment.dietitionId;
     appointment.status_changed_at = new Date();
+    // Tap attendance (Oct 2026): when she started. First start only.
+    if (!appointment.dietitianStartedAt) appointment.dietitianStartedAt = new Date();
     await appointment.save();
     console.log(`[startAppointment] SUCCESS — appointmentId=${id} now In Progress`);
 

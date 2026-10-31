@@ -72,7 +72,9 @@ function blank(v) {
 async function requirementsFor(userId, planType = "diet") {
   const [profile, user, cycle] = await Promise.all([
     PreConsultationProfile.findOne({ where: { userId } }),
-    User.findByPk(userId, { attributes: ["id", "mainGoal", "healthConditions"] }),
+    User.findByPk(userId, {
+      attributes: ["id", "mainGoal", "healthConditions", "age", "weight", "height", "targetWeightKg"],
+    }),
     UserCycleData.findOne({ where: { userId } }),
   ]);
   const p = profile || {};
@@ -106,6 +108,22 @@ async function requirementsFor(userId, planType = "diet") {
     blank(p.currentMedications) && blank(p.familyHistory) && blank(p.surgeries);
   if (diet && dietitianEmpty && !steps.history) optional.push("dietitian");
 
+  // "About you" on the app's profile card (Oct 2026): sign-up body answers
+  // still empty. Kept out of "required" so booking and the form popup are
+  // unchanged. Target weight is optional, so it is reported on its own.
+  const num = (v, lo, hi) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) && n >= lo && n <= hi;
+  };
+  const aboutMissing = [];
+  if (blank(user && user.mainGoal)) aboutMissing.push("goal");
+  if (!num(user && user.age, 18, 70)) aboutMissing.push("age");
+  if (!num(user && user.weight, 30, 150)) aboutMissing.push("weight");
+  if (!num(user && user.height, 3, 7)) aboutMissing.push("height");
+  const goal = String((user && user.mainGoal) || "").toLowerCase();
+  const targetMissing =
+    (goal.includes("lose") || goal.includes("gain")) && (user == null || user.targetWeightKg == null);
+
   const needsConsent = !p.healthConsentAt;
   // Answers carried over from the free trial are confirmed once by a
   // paying client, even if nothing is missing.
@@ -120,6 +138,8 @@ async function requirementsFor(userId, planType = "diet") {
     planType,
     required,
     optional,
+    aboutMissing,
+    targetMissing,
     needsConsent,
     needsConfirm,
     // The form should open when anything required, consent or a confirm

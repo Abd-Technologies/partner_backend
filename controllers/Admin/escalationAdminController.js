@@ -1,4 +1,31 @@
 const { Op } = require("sequelize");
+
+// One plain line for admin: how attendance was decided (Oct 2026).
+//   "via Google · Dietitian 28 min · Client 27 min"
+//   "via app taps · dietitian started 3:30 PM · client tapped Join 3:31 PM"
+function attendanceSummary(a, people) {
+  const mt = require("moment-timezone");
+  const hm = (d) => (d ? mt(d).tz("Asia/Karachi").format("h:mm A") : null);
+  const parts = [];
+  if (a.attendanceSource === "google") {
+    parts.push("via Google");
+    for (const p of people || []) {
+      if (!p.joinedAt || !p.leftAt) continue;
+      const min = Math.max(0, Math.round((new Date(p.leftAt) - new Date(p.joinedAt)) / 60000));
+      parts.push(`${p.name || "Someone"} ${min} min`);
+    }
+  } else {
+    parts.push(a.attendanceSource === "taps" ? "via app taps" : "app taps so far");
+    const s = hm(a.dietitianStartedAt);
+    const j = hm(a.clientJoinTapAt);
+    parts.push(s ? `dietitian started ${s}` : "dietitian didn't press Start");
+    parts.push(j ? `client tapped Join ${j}` : "client didn't tap Join in the app");
+  }
+  if (a.attendanceFlag === "dietitian_confirmed") parts.push("dietitian confirmed the client joined");
+  if (a.clientNoShowAt) parts.push("dietitian marked: client didn't join");
+  if (a.attendanceFlag === "tap_without_google") parts.push("⚠ client tapped Join but Google didn't see her");
+  return parts.join(" · ");
+}
 const ApiResponse = require("../../helper/ApiResponse");
 const { EscalationTicket, User, Day7Review, Appointment } = require("../../models");
 const { notifyClientFlagResolved } = require("../../helper/escalation");
@@ -77,6 +104,8 @@ exports.listTickets = async (req, res) => {
         attributes: [
           "id", "status", "meetAttendanceCheckedAt", "meetDietitianAttended",
           "meetClientAttended", "meetAttendanceRaw",
+          // Oct 2026: how attendance was decided (Google or app taps).
+          "attendanceSource", "attendanceFlag", "dietitianStartedAt", "clientJoinTapAt", "clientNoShowAt",
         ],
       });
       const byId = new Map(appts.map((a) => [a.id, a]));
@@ -96,6 +125,9 @@ exports.listTickets = async (req, res) => {
           dietitianJoined: a.meetDietitianAttended, // true / false / null = unknown
           clientJoined: a.meetClientAttended,
           participants: names,
+          source: a.attendanceSource || null, // 'google' | 'taps' | null
+          flag: a.attendanceFlag || null,
+          summary: attendanceSummary(a, names),
         };
       }
     }

@@ -17,19 +17,42 @@ const redis = new Redis();
 const GAPS = [1, 2, 4, 7, 7, 7];
 const KEEP_SECONDS = 60 * 60 * 24 * 180;
 
+// Oct 2026: same story as the app ("Your plan just got personal"), by
+// package. {team} = dietitian / trainer / dietitian and trainer.
 const MESSAGES = [
-  { title: "Your health form is waiting 💚", body: "Two minutes, and your team can plan around you." },
-  { title: "Help us personalise your plan", body: "Finish your short health form so your plan fits your body and cycle." },
-  { title: "One small step left", body: "Your health form is still open. Complete it to get the most from Fit Her." },
-  { title: "Your plan works best with your answers", body: "A few quick questions are still open in your health form." },
-  { title: "Still a few questions left 💚", body: "Finish your health form so your team can personalise your plan." },
-  { title: "Last reminder: your health form", body: "It takes about 2 minutes. Your answers stay private to your team." },
+  { title: "Your plan just got personal 💚", body: "Tell us a few things and your plan fits your body. About 2 minutes." },
+  { title: "Make your plan follow your cycle 🌸", body: "A few quick answers and your {plan} adapt to every phase." },
+  { title: "Help {team} plan for you 🩺", body: "Your answers let {team} keep your plan safe. Takes 2 minutes." },
+  { title: "Your plan is still one-size-fits-all", body: "Finish a few questions so it's set for your body and cycle." },
+  { title: "Almost there 💚", body: "Just a few answers left to make your plan truly yours." },
+  { title: "Last reminder: your plan works best with your answers", body: "2 minutes now, a plan made for you." },
 ];
+
+const WORDS = {
+  diet: { team: "your dietitian", plan: "meals" },
+  workout: { team: "your trainer", plan: "workouts" },
+  combined: { team: "your dietitian and trainer", plan: "meals and workouts" },
+};
+
+function messageFor(index, planType) {
+  const w = WORDS[planType] || WORDS.diet;
+  const fill = (t) =>
+    t
+      .replace("{team}", w.team)
+      .replace("{plan}", w.plan);
+  const m = MESSAGES[index];
+  return { title: fill(m.title), body: fill(m.body) };
+}
+
+// No push if the form pop-up was shown or put off in the app in the last
+// 24 hours ("Later" an hour ago, then a push, felt pushy). Tried again on
+// the next daily run.
+const RECENT_POPUP_HOURS = 24;
 
 async function sendPreConsultFormReminders() {
   const rows = await PendingPopupState.findAll({
     where: { popupVariable: "POPUP_PRE_CONSULTATION_FORM", completedAt: null },
-    attributes: ["userId", "createdAt"],
+    attributes: ["userId", "createdAt", "lastShownAt"],
   });
   let sent = 0;
   for (const r of rows) {
@@ -51,6 +74,7 @@ async function sendPreConsultFormReminders() {
       // A newer form row (e.g. a new package) starts its own series.
       if (storedLast && opened > storedLast) count = 0;
       if (count >= GAPS.length) continue; // all 6 sent
+      if (r.lastShownAt && moment().diff(moment(r.lastShownAt), "hours", true) < RECENT_POPUP_HOURS) continue;
       const last = storedLast && opened <= storedLast ? storedLast : opened;
       // Small tolerance so a job that runs a few seconds earlier than the
       // last one still counts as "2 days later".
@@ -62,7 +86,9 @@ async function sendPreConsultFormReminders() {
       await redis.set(lastKey, String(Date.now()), "EX", KEEP_SECONDS);
       const user = await User.findByPk(r.userId, { attributes: ["deviceToken"] });
       if (!user || !user.deviceToken) continue;
-      await sendNotification([user.deviceToken], MESSAGES[count], { type: "preConsultReminder" });
+      const { planTypeForUser } = require("./preConsultRequirements");
+      const planType = (await planTypeForUser(r.userId)) || "diet";
+      await sendNotification([user.deviceToken], messageFor(count, planType), { type: "preConsultReminder" });
       sent++;
     } catch (e) {
       console.error("[preconsult-reminder] user", r.userId, e.message);

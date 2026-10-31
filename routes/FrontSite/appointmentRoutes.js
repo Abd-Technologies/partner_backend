@@ -50,8 +50,14 @@ const { selfOrStaff } = require("../../middlewares/roleGuards");
  // (Meet attendance sweep, or the 24h fallback in popupEligibility), so
  // the client is never asked to report one. Kept for reference.
  // (route removed; see consultationBookingController.js)
+// Client tapped "Join Meeting" in the app (Oct 2026): first tap time,
+// for attendance with every dietitian (Google or not). Own bookings only.
+router.post("/:id/join-tap", validateToken, consultationBookingController.recordJoinTap);
+
 // Dietitian: "Client didn't join" (manual backup for the Meet attendance check).
 router.post("/:id/client-no-show", validateToken, consultationBookingController.reportClientNoShow);
+// Dietitian: "Yes, she joined" (no Join tap in the app). Oct 2026.
+router.post("/:id/client-joined", validateToken, consultationBookingController.confirmClientJoined);
 
 // User-initiated cancel (ownership-checked, only from pending/confirmed).
 // Distinct from the dietitian-facing PUT /:id below.

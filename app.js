@@ -864,6 +864,13 @@ db.sequelize.sync().then(async () => {
   } catch (e) {
     console.error("❌ Appointment payment hold FAILED:", e.message);
   }
+  // Attendance from app taps (Oct 2026).
+  try {
+    await require("./migrations/20261105120000-appointment-join-taps").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    console.log("✅ Appointment join taps checked");
+  } catch (e) {
+    console.error("❌ Appointment join taps FAILED:", e.message);
+  }
   // Cycle learning column (Oct 2026, helper/cycleLearning.js).
   try {
     await require("./migrations/20261103120000-cycle-learning").up(db.sequelize.getQueryInterface(), db.Sequelize, db);

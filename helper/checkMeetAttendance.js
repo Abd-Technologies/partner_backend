@@ -30,7 +30,34 @@
 
 const { Op } = require('sequelize');
 const { Appointment, SlotDiet } = require('../models');
-const { checkAttendanceForAppointment } = require('../services/meetAttendance/meetAttendanceService');
+const { checkAttendanceForAppointment, appointmentWindowUtc } = require('../services/meetAttendance/meetAttendanceService');
+const moment = require('moment-timezone');
+
+// Oct 2026: Google can only see calls owned by the ONE linked Google
+// account. Dietitians in MEET_LINKED_DIETITIAN_IDS (comma list of user
+// ids) are checked with Google; everyone else by app taps (she pressed
+// "Start session", the client tapped "Join Meeting"). Empty = old
+// behaviour (Google for everyone).
+function linkedDietitianIds() {
+  return String(process.env.MEET_LINKED_DIETITIAN_IDS || '')
+    .split(',')
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+// Taps only. Never declares a no-show by itself: no tap is not proof she
+// stayed away (she may have used the link outside the app). The late
+// check (5 / 10 min) and the dietitian's "Client didn't join" button
+// still handle no-shows.
+async function applyTaps(appt) {
+  await appt.update({
+    meetAttendanceCheckedAt: new Date(),
+    attendanceSource: 'taps',
+    meetDietitianAttended: appt.dietitianStartedAt || appt.status === 'completed' ? true : null,
+    meetClientAttended:
+      appt.clientJoinTapAt || appt.attendanceFlag === 'dietitian_confirmed' ? true : null,
+  });
+}
 const { resolveDietitianNoShow, resolveClientNoShow } = require('./noShowResolution');
 const { createEscalation } = require('./escalation');
 
@@ -53,16 +80,32 @@ async function checkMeetAttendance() {
     order: [['date', 'ASC']],
   });
 
+  const linked = linkedDietitianIds();
+  const isLinked = (appt) => linked.length === 0 || linked.includes(Number(appt.dietitionId));
+  let tapped = 0;
+  for (const appt of candidates) {
+    if (isLinked(appt)) continue;
+    const w = appointmentWindowUtc(appt);
+    // Wait until 5 min after the call's end, like the Google check.
+    if (w && moment.utc().isBefore(w.endUtc.clone().add(5, 'minutes'))) continue;
+    try {
+      await applyTaps(appt);
+      tapped += 1;
+    } catch (e) {
+      console.error(`[checkMeetAttendance] taps ${appt.id}:`, e.message);
+    }
+  }
+
   // An appointment has a usable link if EITHER its own frozen snapshot
   // (meetLink, taken at confirm time) or the slot's live link is set —
   // meetAttendanceService itself prefers the snapshot when both exist.
-  const withLink = candidates.filter((appt) => {
+  const withLink = candidates.filter((appt) => isLinked(appt)).filter((appt) => {
     const own = appt.meetLink && appt.meetLink.trim();
     const live = appt.SlotDiet && appt.SlotDiet.dietitionLink && appt.SlotDiet.dietitionLink.trim();
     return own || live;
   });
 
-  const results = { checked: 0, skipped: 0, errors: 0 };
+  const results = { checked: 0, skipped: 0, errors: 0, tapped };
 
   for (const appt of withLink) {
     try {
@@ -78,8 +121,13 @@ async function checkMeetAttendance() {
         continue;
       }
 
+      // She tapped Join but Google never saw her: wrong link, another
+      // device, or another account. Flag for admin instead of guessing.
+      const flag = appt.clientJoinTapAt && outcome.clientAttended === false ? 'tap_without_google' : null;
       await appt.update({
         meetAttendanceCheckedAt: new Date(),
+        attendanceSource: 'google',
+        attendanceFlag: flag,
         meetDietitianAttended: outcome.dietitianAttended,
         meetClientAttended: outcome.clientAttended,
         meetConferenceRecordName: outcome.conferenceRecordName,
@@ -122,6 +170,7 @@ async function checkMeetAttendance() {
       if (
         outcome.dietitianAttended === true &&
         outcome.clientAttended === false &&
+        !appt.clientJoinTapAt &&
         ['confirmed', 'In Progress', 'completed'].includes(appt.status) &&
         !appt.clientNoShowAt
       ) {

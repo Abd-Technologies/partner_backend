@@ -141,6 +141,11 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.DATE,
             allowNull: true,
         },
+        // Attendance from app taps (Oct 2026, migration 20261105120000).
+        dietitianStartedAt: { type: DataTypes.DATE, allowNull: true },
+        clientJoinTapAt: { type: DataTypes.DATE, allowNull: true },
+        attendanceSource: { type: DataTypes.STRING(10), allowNull: true },
+        attendanceFlag: { type: DataTypes.STRING(40), allowNull: true },
 
     });
 
