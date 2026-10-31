@@ -37,10 +37,6 @@ exports.appNotify = async (req, res) => {
     }
 
     const user = await User.findByPk(app_user_id);
-    // Quiet hours: no push at all during her quiet hours (Oct 2026 rule).
-    if (user && (await require("../../helper/notification").isInQuietHours(user.id))) {
-      return res.json(ApiResponse("1", "Held back: user is in quiet hours", { pushed: false }));
-    }
     if (!user || !user.deviceToken) {
       return res.json(ApiResponse("0", "No device token on file for this user", {}));
     }
@@ -50,16 +46,13 @@ exports.appNotify = async (req, res) => {
       ([k, v]) => { stringData[k] = String(v); }
     );
 
-    await admin.messaging().send({
-      token: user.deviceToken,
-      notification: {
-        title: title || "Support update",
-        body: String(body).slice(0, 500),
-      },
-      data: stringData,
-      android: { priority: "high" },
-      apns: { payload: { aps: { sound: "default" } } },
-    });
+    // Normal push system (Oct 2026): held until her quiet hours end (was:
+    // not sent), saved in her Notifications list, never nudge-limited.
+    await require("../../helper/notification")(
+      [user.deviceToken],
+      { title: title || "Support update", body: String(body).slice(0, 500) },
+      stringData
+    );
 
     return res.json(ApiResponse("1", "Notified", {}));
   } catch (err) {

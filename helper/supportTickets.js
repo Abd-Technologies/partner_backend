@@ -85,22 +85,21 @@ async function sendToCrm(eventType, payload) {
   }
 }
 
-// Direct push to the user. Quiet hours apply (Oct 2026: no push at all
-// during her quiet hours; the reply is still in the app).
+// Push to the user through the normal push system (Oct 2026): during her
+// quiet hours it is HELD until they end (was: dropped), it is saved in her
+// in-app Notifications list, and as an essential push the daily nudge
+// limit never holds it back.
 async function pushToUser(userId, title, body, data) {
   try {
-    if (await require("./notification").isInQuietHours(userId)) return;
     const user = await User.findByPk(userId, { attributes: ["id", "deviceToken"] });
     if (!user || !user.deviceToken) return;
     const stringData = {};
     Object.entries(data || {}).forEach(([k, v]) => { stringData[k] = String(v); });
-    await admin.messaging().send({
-      token: user.deviceToken,
-      notification: { title, body: String(body).slice(0, 300) },
-      data: stringData,
-      android: { priority: "high" },
-      apns: { payload: { aps: { sound: "default" } } },
-    });
+    await require("./notification")(
+      [user.deviceToken],
+      { title, body: String(body).slice(0, 300) },
+      stringData
+    );
   } catch (err) {
     console.error("[supportTickets] push failed:", err.message);
   }

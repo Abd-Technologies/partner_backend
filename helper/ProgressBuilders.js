@@ -318,6 +318,24 @@ async function buildWeightBlock(userId, period, goalBlock, cycleData) {
       : (deltaKg === 0 ? 'no_change' : 'away_from_goal');
   }
 
+  // Oct 2026: the app shows an EXAMPLE chart until 15 days after her
+  // first weigh-in (all time, not just this period). Weight is weekly, so
+  // this is days since the first one, plus how many she has logged.
+  let firstWeighInDate = null;
+  let weighIns = 0;
+  try {
+    const anyWeight = { userId, weightKg: { [Op.not]: null } };
+    const first = await WeeklyCheckin.findOne({
+      where: anyWeight,
+      order: [['weekDate', 'ASC']],
+      attributes: ['weekDate'],
+    });
+    firstWeighInDate = first ? first.weekDate : null;
+    weighIns = await WeeklyCheckin.count({ where: anyWeight });
+  } catch (e) {
+    console.error('[progress] first weigh-in:', e.message);
+  }
+
   return {
     currentWeightKg,
     deltaKg,
@@ -325,6 +343,8 @@ async function buildWeightBlock(userId, period, goalBlock, cycleData) {
     history,
     phaseSegments,
     projection,
+    firstWeighInDate,
+    weighIns,
   };
 }
 

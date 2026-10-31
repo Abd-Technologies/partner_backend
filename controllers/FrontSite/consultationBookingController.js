@@ -490,6 +490,55 @@ exports.cancelMyAppointment = async (req, res) => {
 // ends, and only once the dietitian's Google account is linked).
 // Allowed from NO_SHOW_GRACE_MINUTES after the start time. Cancels the
 // booking without using up her consultation and asks her to rebook.
+// POST /appointment/:id/join-tap: the client tapped "Join Meeting" in the
+// app (Oct 2026). Stores the FIRST tap only; attendance for dietitians
+// whose Google account isn't linked comes from these taps. Own bookings
+// only, and only around the call (no taps on old / cancelled ones).
+exports.recordJoinTap = async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    const appt = await db.Appointment.findByPk(req.params.id);
+    if (!appt || Number(appt.userId) !== Number(userId)) {
+      return res.status(404).json(ApiResponse("0", "Appointment not found", {}));
+    }
+    if (["canceled", "canceledByUser"].includes(appt.status)) {
+      return res.json(ApiResponse("0", "This consultation was cancelled", {}));
+    }
+    if (!appt.clientJoinTapAt) {
+      appt.clientJoinTapAt = new Date();
+      await appt.save();
+    }
+    return res.json(ApiResponse("1", "Saved", { clientJoinTapAt: appt.clientJoinTapAt }));
+  } catch (err) {
+    console.error("[recordJoinTap]", err.message);
+    return res.status(500).json(ApiResponse("0", "Could not save", {}));
+  }
+};
+
+// POST /appointment/:id/client-joined: the dietitian answers "Yes, she
+// joined" after a call where the client never tapped Join in the app
+// (Oct 2026). Own appointment (or admin). "No" uses /client-no-show.
+exports.confirmClientJoined = async (req, res) => {
+  try {
+    const actorId = req.user && req.user.id;
+    const appt = await db.Appointment.findByPk(req.params.id);
+    if (!appt) return res.json(ApiResponse("0", "Appointment not found", {}));
+    const isOwn = Number(appt.dietitionId) === Number(actorId);
+    const isAdmin = String(req.user.userType || "").trim().toLowerCase() === "admin";
+    if (!isOwn && !isAdmin) return res.json(ApiResponse("0", "Not your appointment", {}));
+    if (!["In Progress", "completed"].includes(appt.status)) {
+      return res.json(ApiResponse("0", "This consultation hasn't happened yet", {}));
+    }
+    appt.meetClientAttended = true;
+    if (appt.attendanceFlag !== "tap_without_google") appt.attendanceFlag = "dietitian_confirmed";
+    await appt.save();
+    return res.json(ApiResponse("1", "Thanks, noted", { appointment: appt.toJSON() }));
+  } catch (err) {
+    console.error("[confirmClientJoined]", err.message);
+    return res.json(ApiResponse("0", "Could not update. Please try again.", {}));
+  }
+};
+
 exports.reportClientNoShow = async (req, res) => {
   try {
     const actorId = req.user && req.user.id;
