@@ -71,13 +71,27 @@ async function countTrialClassesAttended(userId, journey) {
       userId,
       joinedAt: { [Op.between]: [start, end] },
     },
-    attributes: ['slotId', 'joinedAt', 'durationSeconds'],
-    raw: true,
+    attributes: ['slotId', 'joinedAt', 'leftAt', 'lastSeenAt', 'durationSeconds'],
+    include: [{ model: Slot, as: 'slot', attributes: ['id', 'start', 'end'], paranoid: false }],
   });
+  // Same rule as Profile / streak / dashboard (helper/attendanceStats.js,
+  // Oct 2026): no "leave" recorded (Zoom app, or the app was closed) =
+  // she counts as there until the class ended. Before, only
+  // durationSeconds counted, so a woman who stayed the whole class but
+  // whose leave never reached us showed "0 classes" on her trial.
+  const { endOnDay } = require('./attendanceStats');
+  const now = moment.utc();
   const totals = new Map();
   for (const r of rows) {
-    const key = `${r.slotId}|${moment(r.joinedAt).tz(PKT).format('YYYY-MM-DD')}`;
-    totals.set(key, (totals.get(key) || 0) + (Number(r.durationSeconds) || 0));
+    const dayPkt = moment.tz(r.joinedAt, PKT).startOf('day');
+    const key = `${r.slotId}|${dayPkt.format('YYYY-MM-DD')}`;
+    let secs = Number(r.durationSeconds) || 0;
+    if (!r.leftAt) {
+      const classEnd = endOnDay(r.slot, dayPkt);
+      const until = classEnd ? moment.min(classEnd, now) : moment.utc(r.lastSeenAt || r.joinedAt);
+      secs = Math.max(secs, until.diff(moment.utc(r.joinedAt), 'seconds'));
+    }
+    totals.set(key, (totals.get(key) || 0) + Math.max(0, secs));
   }
   const min = minTrialAttendanceSeconds();
   let count = 0;
