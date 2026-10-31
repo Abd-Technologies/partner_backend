@@ -1,3 +1,8 @@
+// Load the same .env as the API (Oct 2026). Without it NODE_ENV was
+// unset, models/index.js picked the "development" DB login (root) and
+// every queued push (class reminder, class live, ...) failed with
+// "Access denied for user 'root'@'localhost'".
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const Queue = require("bull");
 const { Op } = require("sequelize");
 const { Plan, UserPlan, User } = require("./models");

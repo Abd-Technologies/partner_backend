@@ -44,7 +44,7 @@ const DAY_KEYS = {
 
 // Minimum class duration (seconds) required for manual attendance marking.
 // Mirrors the threshold used by classPresenceController → trialAttendance.js.
-const DEFAULT_MIN_ATTENDANCE_SECONDS = 10 * 60;
+const DEFAULT_MIN_ATTENDANCE_SECONDS = 5 * 60; // same as helper/trialAttendance.js
 function minAttendanceSeconds() {
   const raw = Number(process.env.TRIAL_ATTENDANCE_MIN_SECONDS);
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_MIN_ATTENDANCE_SECONDS;
