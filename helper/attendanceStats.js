@@ -3,9 +3,9 @@
 // Days before the switch keep the old ClassAttendance marks so nobody's
 // history disappears.
 //
-// Streak = days in a row she did something: a class (10+ min), a meal,
-// water or her daily insights (see motivationStats). TODAY only counts
-// once she has done one, so the streak doesn't show 0 in the morning.
+// Streak = days she did something since she joined: a class, a meal,
+// water or her daily insights; sign-up day counts (see streakDays).
+// A missed day pauses it, never resets it to 0 (Nov 2026).
 const { Op } = require("sequelize");
 const moment = require("moment-timezone");
 const { parseEndAsUtc } = require("./timeFormats");
@@ -121,25 +121,39 @@ async function activityDays(userId, days = 60) {
   return out;
 }
 
+/**
+ * Streak (Nov 2026, founder's rule): how many days she has done something
+ * for herself since she joined: a class (5+ min), a meal, water or her
+ * daily insights. Her sign-up day counts, so a new member starts at 1.
+ * A day with nothing does NOT reset it to 0: the number pauses and
+ * carries on from there the next day she's active. It never goes down.
+ * Used by Home and Profile (one rule).
+ */
+async function streakDays(userId) {
+  const today = moment.tz(PKT).startOf("day");
+  let signupDay = null;
+  try {
+    const u = await require("../models").User.findByPk(userId, { attributes: ["createdAt"], raw: true });
+    if (u && u.createdAt) signupDay = moment(u.createdAt).tz(PKT).startOf("day");
+  } catch (e) {
+    console.error("[attendanceStats] signup day", e.message);
+  }
+  // Look back to her sign-up day (60 days if unknown; max ~3 years).
+  const span = signupDay ? Math.min(1100, Math.max(1, today.diff(signupDay, "days") + 1)) : 60;
+  const active = new Set([...(await attendedDays(userId, span)), ...(await activityDays(userId, span))]);
+  if (signupDay) active.add(signupDay.format("YYYY-MM-DD"));
+  const todayKey = today.format("YYYY-MM-DD");
+  const fromKey = signupDay ? signupDay.format("YYYY-MM-DD") : null;
+  return [...active].filter((d) => d <= todayKey && (!fromKey || d >= fromKey)).length;
+}
+
 async function motivationStats(userId) {
   const attended = await attendedDays(userId, 30);
   const weekdays = await classWeekdays();
   const today = moment.tz(PKT).startOf("day");
   const isClassDay = (d) => !weekdays || weekdays.has(d.format("dddd"));
 
-  // Streak (Oct 2026): days in a row she did something for herself:
-  // joined a class (10+ min), logged a meal, water, or today's insights.
-  // Today only counts once she has done one of them, and doesn't break
-  // the streak before that.
-  const active = new Set([...(await attendedDays(userId, 60)), ...(await activityDays(userId, 60))]);
-  let streak = 0;
-  const cursor = today.clone();
-  if (!active.has(cursor.format("YYYY-MM-DD"))) cursor.subtract(1, "day");
-  for (let i = 0; i < 60; i++) {
-    if (!active.has(cursor.format("YYYY-MM-DD"))) break;
-    streak++;
-    cursor.subtract(1, "day");
-  }
+  const streak = await streakDays(userId);
 
   // Counts + chart
   const history = [];
@@ -163,4 +177,4 @@ async function motivationStats(userId) {
   };
 }
 
-module.exports = { attendedDays, activityDays, motivationStats, ATTENDED_SECONDS, endOnDay };
+module.exports = { attendedDays, activityDays, streakDays, motivationStats, ATTENDED_SECONDS, endOnDay };
