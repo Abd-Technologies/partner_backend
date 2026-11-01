@@ -252,7 +252,10 @@ async function getTrialSummary(userId, countryName, { peek = false } = {}) {
   const user = await User.findByPk(userId, { attributes: ['firstName', 'status'] });
 
   let offer = await TrialOffer.findOne({ where: { userId } });
-  const eligible = (w.lastDay || w.ended) && !journey.convertedAt && !(user && user.status === true);
+  // Nov 2026: "paid" = a real paid plan, not user.status (a running trial
+  // turns status on too, so trial women never got their offer).
+  const paid = !!journey.convertedAt || (await hasRealPaidPlan(userId));
+  const eligible = (w.lastDay || w.ended) && !paid;
   // peek: the home recap card only reads; the offer (and its countdown)
   // starts when she opens her summary.
   if (!offer && eligible && !peek) {
@@ -305,7 +308,7 @@ async function getTrialSummary(userId, countryName, { peek = false } = {}) {
 
   return {
     firstName: (user && user.firstName) || null,
-    converted: !!journey.convertedAt || !!(user && user.status === true),
+    converted: paid,
     days: dayList,
     trialDays: days,
     endsAt: w.endsAt,
@@ -352,6 +355,24 @@ async function applyOfferToSlip({ userId, planId, durationId, price, planImage }
   return item;
 }
 
+/**
+ * Has a real paid package right now (not the free trial / system trial plan)?
+ * Nov 2026: trial pushes used `user.status === true` to mean "paid", but
+ * starting a free trial also turns status on (assignFreePlan), so most
+ * trial women were skipped. This asks the real question instead (same
+ * rule as trialController's "she paid" check).
+ */
+async function hasRealPaidPlan(userId) {
+  const { UserPlan } = require('../models');
+  const { activeUserPlanWhere } = require('./activePackage');
+  const row = await UserPlan.findOne({
+    where: { userId, ...activeUserPlanWhere(), isTrial: { [Op.not]: true } },
+    include: [{ model: Plan, attributes: [], where: { title: { [Op.notIn]: ['Free Trial', TRIAL_PLAN_TITLE] } } }],
+    attributes: ['id'],
+  });
+  return !!row;
+}
+
 /** Hourly: one reminder when about a day is left on an unused offer. */
 async function sendTrialOfferReminders() {
   // Switched off (Oct 2026, founder's call): no "offer ends in N hours"
@@ -369,10 +390,11 @@ async function sendTrialOfferReminders() {
   let sent = 0;
   for (const o of offers) {
     try {
-      const user = await User.findByPk(o.userId, { attributes: ['deviceToken', 'status'] });
+      const user = await User.findByPk(o.userId, { attributes: ['deviceToken'] });
       o.reminderSentAt = new Date();
       await o.save();
-      if (!user || !user.deviceToken || user.status === true) continue;
+      if (!user || !user.deviceToken) continue;
+      if (await hasRealPaidPlan(o.userId)) continue; // she already bought a plan
       const hours = Math.max(1, Math.round((new Date(o.expiresAt) - now) / 3600000));
       await sendNotification(
         [user.deviceToken],
@@ -416,8 +438,10 @@ async function sendTrialLastDayPushes() {
     });
     for (const j of journeys) {
       try {
-        const user = await User.findByPk(j.userId, { attributes: ['deviceToken', 'status'] });
-        if (!user || !user.deviceToken || user.status === true) continue;
+        const user = await User.findByPk(j.userId, { attributes: ['deviceToken'] });
+        if (!user || !user.deviceToken) continue;
+        // Paid women never get it; trial women do (status alone can't tell them apart).
+        if (await hasRealPaidPlan(j.userId)) continue;
         const ok = await redis.set(`triallastday:${j.userId}`, '1', 'EX', 60 * 60 * 24 * 30, 'NX');
         if (ok !== 'OK') continue;
         await sendNotification(
@@ -440,6 +464,8 @@ async function sendTrialLastDayPushes() {
 }
 
 module.exports = {
+  hasRealPaidPlan,
+  trialWindow,
   getTrialSummary,
   sendTrialLastDayPushes,
   applyOfferToSlip,

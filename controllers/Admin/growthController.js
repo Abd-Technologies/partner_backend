@@ -654,6 +654,7 @@ async function buildClassDiary({ sessions, pres, slotBy, from, today }) {
       lateMinutes: x && x.startLateMinutes != null ? x.startLateMinutes : null, // minus = early
       endedAt: x ? t(x.endedAt) : null,
       endedBy: x ? x.endedBy : null, // trainer / admin / system (forgot to end)
+      cancelReason: x ? x.cancelReason || null : null, // trainer's reason (Nov 2026)
       ranMinutes: x && x.startedAt && endAt ? Math.max(0, Math.round((new Date(endAt) - new Date(x.startedAt)) / 60000)) : null,
       usedOtherLink: !!(x && x.usedOtherLink),
       joined: mine.length,

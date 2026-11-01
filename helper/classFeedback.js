@@ -1,11 +1,19 @@
 // Class feedback: when to ask, and what the home card shows.
 // See fitHer Flows › Class feedback.
 //
-// Rules
+// Rules (Nov 2026)
+//   RATING ("How was the class?")
 //   • Only AFTER the class ended, up to 24 hours later. "Ended" also
 //     means: the trainer pressed End today, or she left in the last
 //     15 minutes of the class (so the app can ask right away).
-//   • Only if she was in class at least 10 minutes.
+//   • Only if she was in class at least HALF the class (min 10 minutes;
+//     a class shorter than 10 min needs the whole class).
+//   LEFT EARLY ("Why did you leave early?") — new app only (?early=1)
+//   • She left (in the app) after 5+ minutes but before half the class.
+//   • Asked right after she leaves, up to 24 hours after the class ends.
+//   • One gentle question: It felt too hard / It felt too easy / Sound or
+//     video trouble / Something came up / Something else. Not affected by the 3-day trainer pause.
+//   BOTH
 //   • 1 ask per class (one row per user + class + day).
 //   • Per trainer: not again for the same trainer if she rated one of
 //     that trainer's classes in the last 3 days. A class with a
@@ -22,6 +30,16 @@ const ASK_WINDOW_HOURS = 24;
 const RATED_COOLDOWN_DAYS = 3;
 const SKIP_PAUSE_DAYS = 7;
 const EARLY_ASK_MINUTES = 15;
+const RATING_MIN_SECONDS = 10 * 60;
+// Soft wording (Nov 2026): she should feel cared for, not questioned.
+const EARLY_REASONS = ["It felt too hard", "It felt too easy", "Sound or video trouble", "Something came up", "Something else"];
+
+/** Seconds she must stay to be asked for a rating: half the class, at
+ *  least 10 minutes (or the whole class when it's shorter than that). */
+function ratingNeedSeconds(c) {
+  const len = Math.max(0, c.endUtc.diff(c.startUtc, "seconds"));
+  return Math.max(Math.min(RATING_MIN_SECONDS, len), Math.round(len / 2));
+}
 
 const GOOD_TAGS = ["Great energy", "Good pace", "Clear steps", "Good music", "Felt the burn", "Friendly trainer"];
 const BAD_TAGS = ["Too fast", "Too hard", "Audio/video issue", "Started late", "Unclear steps", "Other"];
@@ -122,30 +140,46 @@ function isOver(c, now) {
   return !c.open && now.isAfter(c.endUtc.clone().subtract(EARLY_ASK_MINUTES, "minutes"));
 }
 
-/** The class the home card should ask about, or null. */
-async function pendingFor(userId, tz) {
+/** The class the home card should ask about, or null.
+ *  [early]: the app can show "Why did you leave early?" (new app only). */
+async function pendingFor(userId, tz, { early = false } = {}) {
   if (await inSkipPause(userId)) return null;
   const now = moment.utc();
-  const classes = (await recentClasses(userId))
-    .filter((c) => isOver(c, now) && now.diff(c.endUtc, "hours", true) <= ASK_WINDOW_HOURS)
-    .sort((a, b) => b.endUtc.valueOf() - a.endUtc.valueOf());
-  // Newest class she can still be asked about: stayed 10+ min, not yet
-  // asked (rated or skipped), and its trainer isn't in the 3-day pause.
+  const cands = [];
+  for (const c of await recentClasses(userId)) {
+    if (now.diff(c.endUtc, "hours", true) > ASK_WINDOW_HOURS) continue;
+    const need = ratingNeedSeconds(c);
+    if (isOver(c, now) && c.seconds >= need) {
+      cands.push({ c, kind: "rating" });
+    } else if (early && !c.open && !now.isBefore(c.startUtc) && c.seconds >= MIN_SECONDS && c.seconds < need) {
+      // She left (in the app) after 5+ min but before half the class.
+      cands.push({ c, kind: "leftEarly" });
+    }
+  }
+  cands.sort((a, b) => b.c.endUtc.valueOf() - a.c.endUtc.valueOf());
+  // Newest class she can still be asked about: not yet asked (rated,
+  // answered or skipped); for a rating, its trainer isn't in the 3-day pause.
   let c = null;
-  for (const cand of classes) {
-    if (cand.seconds < MIN_SECONDS) continue;
+  let kind = null;
+  for (const cand of cands) {
     const done = await ClassFeedback.findOne({
-      where: { userId, slotId: cand.slot.id, classDate: cand.classDate },
+      where: { userId, slotId: cand.c.slot.id, classDate: cand.c.classDate },
       attributes: ["id"],
     });
     if (done) continue;
-    if (await trainerInCooldown(userId, cand.slot)) continue;
-    c = cand;
+    if (cand.kind === "rating" && (await trainerInCooldown(userId, cand.c.slot))) continue;
+    c = cand.c;
+    kind = cand.kind;
     break;
   }
   if (!c) return null;
   const trainerName = fullName(c.slot.User);
+  // After-class "well done" sheet (Nov 2026): what she did, in one place.
+  const extra = await afterClassExtras(userId, c).catch(() => ({}));
   return {
+    ...extra,
+    kind, // "rating" | "leftEarly"
+    earlyReasons: EARLY_REASONS,
     slotId: c.slot.id,
     classDate: c.classDate,
     className: (c.slot.type || "class").trim(),
@@ -159,6 +193,43 @@ async function pendingFor(userId, tz) {
   };
 }
 
+/** Minutes / kcal (only when we know when she left), the class's
+ *  benefit line, streak, trial progress and a Luna line for her phase. */
+async function afterClassExtras(userId, c) {
+  const tm = require("./trialMoments");
+  const type = c.slot.type || "";
+  const minutesKnown = !c.open;
+  const minutes = Math.round(c.seconds / 60);
+  const user = await User.findByPk(userId, { attributes: ["weight", "firstName"] });
+  const out = {
+    firstName: String((user && user.firstName) || "").trim().split(/\s+/)[0] || null,
+    minutesKnown,
+    kcal: minutesKnown && minutes > 0 ? tm.kcalFor(minutes, type, user && user.weight) : null,
+    benefit: tm.benefitFor(type),
+    streak: await require("./attendanceStats").streakDays(userId).catch(() => null),
+    trial: null,
+    luna: null,
+    // Her next class with a reminder, for paid and trial alike (Nov 2026).
+    nextClass: await tm.nextClassFor(userId),
+  };
+  const phase = await tm.phaseOf(userId);
+  if (phase) out.luna = { label: phase.label, tip: phase.tip };
+  try {
+    const { TrialJourney } = require("../models");
+    const journey = await TrialJourney.findOne({ where: { userId } });
+    if (journey && journey.startedAt && !journey.convertedAt) {
+      const { hasRealPaidPlan, trialWindow } = require("./trialOffer");
+      if (!trialWindow(journey).ended && !(await hasRealPaidPlan(userId))) {
+        out.trial = {
+          attended: await require("./trialClasses").countTrialClassesAttended(userId, journey),
+          goal: require("./trialState").getTrialClassGoal(),
+        };
+      }
+    }
+  } catch (_) {}
+  return out;
+}
+
 /** Her class that day (for saving): must have joined it, ended < 48h ago. */
 async function findClass(userId, slotId, classDate) {
   const classes = await recentClasses(userId);
@@ -168,6 +239,7 @@ async function findClass(userId, slotId, classDate) {
 module.exports = {
   GOOD_TAGS,
   BAD_TAGS,
+  EARLY_REASONS,
   pendingFor,
   findClass,
   fullName,

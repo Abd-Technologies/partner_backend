@@ -177,4 +177,4 @@ async function motivationStats(userId) {
   };
 }
 
-module.exports = { attendedDays, activityDays, streakDays, motivationStats, ATTENDED_SECONDS, endOnDay };
+module.exports = { attendedDays, activityDays, classWeekdays, streakDays, motivationStats, ATTENDED_SECONDS, endOnDay };

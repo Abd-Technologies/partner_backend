@@ -382,6 +382,28 @@ exports.getSummary = async (req, res) => {
   return res.json(ApiResponse("1", "Trial summary", data));
 };
 
+// Trial moments (Nov 2026, helper/trialMoments.js): Day 3 / Day 4 / last
+// day / trial ended sheets, each shown once.
+//   GET  /trial/moment?kind=&country=   the moment due now (or the one she tapped)
+//   POST /trial/moment/seen {kind, via} she saw it (push / popup / card)
+exports.getMoment = async (req, res) => {
+  const userId = req.user && req.user.id;
+  if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
+  const kind = String((req.query && req.query.kind) || "").trim() || null;
+  const country = String((req.query && req.query.country) || "").trim() || null;
+  const moment = await require("../../helper/trialMoments").momentForApp(userId, { kind, country });
+  return res.json(ApiResponse("1", "Trial moment", { moment }));
+};
+
+exports.markMomentSeen = async (req, res) => {
+  const userId = req.user && req.user.id;
+  if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
+  const kind = String((req.body && req.body.kind) || "").trim();
+  const via = String((req.body && req.body.via) || "app").trim().slice(0, 20);
+  const ok = await require("../../helper/trialMoments").markSeenForApp(userId, kind, via);
+  return res.json(ApiResponse(ok ? "1" : "0", ok ? "Saved" : "Nothing to save", {}));
+};
+
 exports.listClasses = async (req, res) => {
   const userId = req.user && req.user.id;
   if (!userId) return res.json(ApiResponse("0", "User not loggedIn!", {}));

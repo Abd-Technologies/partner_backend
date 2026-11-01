@@ -1,6 +1,7 @@
 // Class feedback (see helper/classFeedback.js for the rules).
 //   Client  GET  /attendance/feedback/pending   → the class to rate, or null
 //           POST /attendance/feedback           → { slotId, classDate, rating, tags?, comment?, final? }
+//                                                 or { slotId, classDate, earlyReason, comment? } (left early)
 //           POST /attendance/feedback/skip      → { slotId, classDate }
 //   Trainer GET  /attendance/feedback/trainer   → her average + tag counts (no client names)
 //   Admin   GET  /admin/classFeedback           → low ratings + every trainer's average
@@ -8,7 +9,7 @@ const { Op } = require("sequelize");
 const moment = require("moment-timezone");
 const ApiResponse = require("../../helper/ApiResponse");
 const { ClassFeedback, User, Slot } = require("../../models");
-const { GOOD_TAGS, BAD_TAGS, pendingFor, findClass, fullName } = require("../../helper/classFeedback");
+const { GOOD_TAGS, BAD_TAGS, EARLY_REASONS, pendingFor, findClass, fullName } = require("../../helper/classFeedback");
 const sendNotification = require("../../helper/notification");
 const { isAdmin, isTrainer, adminsOnlyMessage } = require("../../helper/roles");
 
@@ -52,7 +53,8 @@ exports.pending = async (req, res) => {
   try {
     const user = await me(req);
     if (!user) return res.json(ApiResponse("0", "Unauthorized", {}));
-    const pending = await pendingFor(user.id, user.timeZone);
+    // early=1: this app version can show "Why did you leave early?".
+    const pending = await pendingFor(user.id, user.timeZone, { early: String(req.query.early || "") === "1" });
     return res.json(ApiResponse("1", "ok", { pending }));
   } catch (e) {
     return res.json(ApiResponse("0", e.message, {}));
@@ -64,6 +66,31 @@ exports.submit = async (req, res) => {
     const user = await me(req);
     if (!user) return res.json(ApiResponse("0", "Unauthorized", {}));
     const { slotId, classDate, comment } = req.body || {};
+
+    // "Why did you leave early?" answer (Nov 2026): no stars, one reason.
+    const earlyReason = String((req.body && req.body.earlyReason) || "").trim();
+    if (earlyReason) {
+      if (!EARLY_REASONS.includes(earlyReason)) return res.json(ApiResponse("0", "Please pick a reason", {}));
+      const c = await findClass(user.id, slotId, classDate);
+      if (!c) return res.json(ApiResponse("0", "We couldn't find this class", {}));
+      const where = { userId: user.id, slotId: c.slot.id, classDate: c.classDate };
+      let row = await ClassFeedback.findOne({ where });
+      if (!row) {
+        row = ClassFeedback.build({
+          ...where,
+          trainerId: c.slot.trainerId || null,
+          className: (c.slot.type || "class").trim().slice(0, 120),
+        });
+      }
+      row.minutesAttended = Math.round(c.seconds / 60);
+      row.earlyReason = earlyReason;
+      row.skipped = false;
+      row.final = true;
+      if (comment !== undefined) row.comment = String(comment || "").trim().slice(0, 1000) || null;
+      await row.save();
+      return res.json(ApiResponse("1", "Thank you for telling us", { id: row.id }));
+    }
+
     const rating = Number(req.body && req.body.rating);
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
       return res.json(ApiResponse("0", "Rating must be 1 to 5", {}));
@@ -139,6 +166,13 @@ function summarize(rows) {
   return { average: avg, count, loved: sorted(good), improve: sorted(bad), stars };
 }
 
+/** "Why did you leave early?" answers, most common first. */
+function earlyCounts(rows) {
+  const n = {};
+  for (const r of rows) if (r.earlyReason) n[r.earlyReason] = (n[r.earlyReason] || 0) + 1;
+  return Object.entries(n).map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count);
+}
+
 const sinceDate = (req) => {
   const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
   return { days, since: moment.tz("Asia/Karachi").subtract(days, "days").format("YYYY-MM-DD") };
@@ -153,7 +187,11 @@ exports.trainerSummary = async (req, res) => {
     const rows = await ClassFeedback.findAll({
       where: { trainerId: user.id, classDate: { [Op.gte]: since }, rating: { [Op.ne]: null } },
     });
-    return res.json(ApiResponse("1", "ok", { days, ...summarize(rows) }));
+    const early = await ClassFeedback.findAll({
+      where: { trainerId: user.id, classDate: { [Op.gte]: since }, earlyReason: { [Op.ne]: null } },
+      attributes: ["earlyReason"],
+    });
+    return res.json(ApiResponse("1", "ok", { days, ...summarize(rows), leftEarly: earlyCounts(early) }));
   } catch (e) {
     return res.json(ApiResponse("0", e.message, {}));
   }
@@ -199,7 +237,32 @@ exports.adminList = async (req, res) => {
         comment: r.comment,
         minutesAttended: r.minutesAttended,
       }));
-    return res.json(ApiResponse("1", "ok", { days, overall: summarize(rows), trainers, low }));
+    // "Why did you leave early?" (Nov 2026): counts + latest answers with names.
+    const earlyWhere = { classDate: { [Op.gte]: since }, earlyReason: { [Op.ne]: null } };
+    if (req.query.trainerId) earlyWhere.trainerId = Number(req.query.trainerId);
+    const earlyRows = await ClassFeedback.findAll({
+      where: earlyWhere,
+      order: [["classDate", "DESC"], ["updatedAt", "DESC"]],
+      include: [
+        { model: User, as: "client", attributes: ["id", "firstName", "lastName"] },
+        { model: User, as: "trainer", attributes: ["id", "firstName", "lastName"] },
+      ],
+    });
+    const leftEarly = {
+      reasons: earlyCounts(earlyRows),
+      recent: earlyRows.slice(0, 50).map((r) => ({
+        id: r.id,
+        reason: r.earlyReason,
+        classDate: r.classDate,
+        className: r.className,
+        client: fullName(r.client),
+        clientId: r.userId,
+        trainer: fullName(r.trainer),
+        comment: r.comment,
+        minutesAttended: r.minutesAttended,
+      })),
+    };
+    return res.json(ApiResponse("1", "ok", { days, overall: summarize(rows), trainers, low, leftEarly }));
   } catch (e) {
     return res.json(ApiResponse("0", e.message, {}));
   }

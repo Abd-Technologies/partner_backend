@@ -944,6 +944,9 @@ async function update_slot_trainer(req, res) {
 async function update_slot_status(req, res) {
   try {
     const { status, slotId } = req.body;
+    // Trainer's reason when she cancels (portal, Nov 2026). Optional on the
+    // server so older app versions can still cancel.
+    const cancelReason = String((req.body && req.body.reason) || "").trim().slice(0, 200) || null;
 
     if (!slotId || !status) {
       return res.json(ApiResponse("0", "Missing slotId or status", {}));
@@ -1008,6 +1011,24 @@ async function update_slot_status(req, res) {
     }
     const prevStatus = slot.status;
 
+    // Emergency cancel (Nov 2026): only TODAY's class, and not one that has
+    // already ended. A class's status is "today's" status and resets at
+    // 00:01, so cancelling another day's class told women "cancelled today"
+    // and the class still ran on its own day.
+    if (status === "Cancelled" && prevStatus !== "Cancelled") {
+      if (prevStatus === "Completed") {
+        return res.json(ApiResponse("0", "This class has already ended, so it can't be cancelled.", { code: "ALREADY_ENDED" }));
+      }
+      const timeRow = slot.TimeId ? await Time.findByPk(slot.TimeId, { attributes: ["day"] }) : null;
+      const classDay = timeRow && timeRow.day ? String(timeRow.day).trim() : null;
+      const todayName = moment.tz("Asia/Karachi").format("dddd");
+      if (classDay && classDay.toLowerCase() !== todayName.toLowerCase()) {
+        return res.json(
+          ApiResponse("0", `This class is on ${classDay}. You can cancel it on ${classDay}.`, { code: "NOT_TODAY", day: classDay })
+        );
+      }
+    }
+
     // Update slot status. Capture the actor (req.user.id from validateToken)
     // and the change time so the audit log can distinguish manual ends
     // from auto-end cron flips. Auto-end intentionally writes NULL into
@@ -1026,7 +1047,7 @@ async function update_slot_status(req, res) {
         const byTrainer = actor && Number(slot.trainerId) === Number(actor.id);
         diary.ended(slot, byTrainer ? "trainer" : "admin", actor ? actor.id : null);
       } else if (status === "Cancelled" && prevStatus !== "Cancelled") {
-        diary.cancelled(slot, { auto: false, actorId: actor ? actor.id : null });
+        diary.cancelled(slot, { auto: false, actorId: actor ? actor.id : null, reason: cancelReason });
       }
     } catch (_) {}
 
@@ -1109,6 +1130,24 @@ async function update_slot_status(req, res) {
         await announceCancelled(slot, { late: false });
       } catch (e) {
         console.error("[update_slot_status] cancel notice failed:", e.message);
+      }
+      // Tell the admins when a trainer cancels (Nov 2026): push + email
+      // (helper/opsAlert.js), once per class per day, with her reason.
+      if (!isAdmin) {
+        try {
+          const { opsAlert } = require("../../helper/opsAlert");
+          const who = trainer ? `${trainer.firstName || ""} ${trainer.lastName || ""}`.trim() : "A trainer";
+          const what = (slot.type || slot.description || "class").trim();
+          const day = moment.tz("Asia/Karachi").format("YYYY-MM-DD");
+          await opsAlert(
+            `trainer-cancel:${slot.id}:${day}`,
+            "Class cancelled by trainer",
+            `${who || "A trainer"} cancelled today's ${slot.start || ""} ${what}. Reason: ${cancelReason || "not given"}.`,
+            { everyMinutes: 1440 }
+          );
+        } catch (e) {
+          console.error("[update_slot_status] admin alert failed:", e.message);
+        }
       }
     }
 

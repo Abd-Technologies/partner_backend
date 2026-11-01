@@ -16,6 +16,7 @@ module.exports = (sequelize, DataTypes) => {
       skipped: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       final: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       minutesAttended: { type: DataTypes.INTEGER, allowNull: true },
+      earlyReason: { type: DataTypes.STRING(40), allowNull: true }, // "Why did you leave early?" (Nov 2026)
       alertedAt: { type: DataTypes.DATE, allowNull: true },
     },
     {
