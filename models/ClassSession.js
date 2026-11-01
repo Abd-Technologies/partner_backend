@@ -23,6 +23,7 @@ module.exports = (sequelize, DataTypes) => {
       endedById: { type: DataTypes.INTEGER, allowNull: true },
       cancelledAt: { type: DataTypes.DATE, allowNull: true },
       cancelledById: { type: DataTypes.INTEGER, allowNull: true },
+      cancelReason: { type: DataTypes.STRING(200), allowNull: true }, // trainer's reason (Nov 2026)
       joinedCount: { type: DataTypes.INTEGER, allowNull: true }, // women who joined at all
       attendedCount: { type: DataTypes.INTEGER, allowNull: true }, // in class 10+ min
       avgMinutes: { type: DataTypes.INTEGER, allowNull: true }, // of those who attended

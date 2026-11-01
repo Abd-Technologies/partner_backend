@@ -199,12 +199,14 @@ cron.schedule(
     } catch (error) {
       console.error("Error in trial-offer-reminders job:", error);
     }
-    // Last trial day: "look what you did" push, once (Oct 2026).
+    // Trial moments (Nov 2026, helper/trialMoments.js): Day 2 missed
+    // class, Day 3, Day 4, last day, trial ended, and the offer 6 h
+    // before it ends. Replaces the old last-day push (sendTrialLastDayPushes).
     try {
-      const n = await sendTrialLastDayPushes();
-      if (n) console.log(`[trial-last-day] sent ${n}`);
+      const n = await require("./helper/trialMoments").runTrialPushes();
+      if (n) console.log(`[trial-moments] sent ${n}`);
     } catch (error) {
-      console.error("Error in trial-last-day job:", error);
+      console.error("Error in trial-moments job:", error);
     }
   },
   { timezone: CRON_TZ }

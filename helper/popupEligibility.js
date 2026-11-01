@@ -73,6 +73,12 @@ const HIDDEN_POPUPS = new Set([
   "POPUP_MEDICAL_CONCERN", // not automatic
   "POPUP_CONSULTANT_NO_SHOW", // not working
   "POPUP_PLAN_DELAYED", // low: staff escalation stays
+  // Trial moments (helper/trialMoments.js): the app's trial moment
+  // controller shows these itself (on both Homes), not this list.
+  "POPUP_TRIAL_DAY3",
+  "POPUP_TRIAL_DAY4",
+  "POPUP_TRIAL_LASTDAY",
+  "POPUP_TRIAL_ENDED",
   "POPUP_INACTIVITY_REMINDER", // low: "We miss you"
   "POPUP_DAILY_LOG_REMINDER", // low: "Don't forget to log today"
   // One weekly check-in replaces these three (helper/weeklyCheckin.js).

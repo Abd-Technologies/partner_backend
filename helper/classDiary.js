@@ -82,12 +82,13 @@ async function ended(slot, by, actorId = null) {
   }
 }
 
-async function cancelled(slot, { auto = false, actorId = null } = {}) {
+async function cancelled(slot, { auto = false, actorId = null, reason = null } = {}) {
   try {
     const row = await sessionFor(slot);
     row.status = auto ? "auto_cancelled" : "cancelled";
     row.cancelledAt = new Date();
     row.cancelledById = auto ? null : actorId;
+    if (reason) row.cancelReason = String(reason).slice(0, 200);
     await row.save();
   } catch (e) {
     console.error("[class-diary] cancelled:", e.message);

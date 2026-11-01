@@ -21,6 +21,8 @@ router.get("/me", validateToken, asyncMiddleware(trialController.getMyTrial));
 router.get("/classes", validateToken, asyncMiddleware(trialController.listClasses));
 // End-of-trial summary + offer (her country's prices).
 router.get("/summary", validateToken, asyncMiddleware(trialController.getSummary));
+router.get("/moment", validateToken, asyncMiddleware(trialController.getMoment));
+router.post("/moment/seen", validateToken, asyncMiddleware(trialController.markMomentSeen));
 router.post("/book-day", validateToken, asyncMiddleware(trialController.bookDay));
 router.post(
   "/attendance",
