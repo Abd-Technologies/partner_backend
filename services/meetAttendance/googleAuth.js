@@ -95,7 +95,17 @@ async function linkAccountInteractively() {
   return client;
 }
 
+// Nov 2026: true when a Google account has been linked on this server.
+function hasSavedToken() {
+  try {
+    return !!loadSavedToken();
+  } catch (_) {
+    return false;
+  }
+}
+
 module.exports = {
+  hasSavedToken,
   getAuthorizedClient,
   linkAccountInteractively,
   SCOPES,

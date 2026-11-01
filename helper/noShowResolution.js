@@ -28,6 +28,18 @@ const bookingPolicy = require("./bookingPolicy");
 const { queueConsultationCancelled } = require("./consultationCancelledPopup");
 
 async function resolveDietitianNoShow(appointment, { actorUserId = null } = {}) {
+  // Nov 2026 audit: the jobs load the row, then decide; if the dietitian
+  // tapped Start in between, this used to cancel a LIVE session. Read the
+  // current status first and only cancel a booking that is still waiting.
+  try {
+    await appointment.reload();
+  } catch (_) {}
+  if (!["pending", "confirmed", "canceled"].includes(appointment.status)) {
+    return appointment;
+  }
+  if (appointment.status === "canceled" && !appointment.noShowReportedAt) {
+    return appointment; // cancelled for another reason: leave it
+  }
   const alreadyResolved =
     appointment.status === "canceled" && !!appointment.noShowReportedAt;
 

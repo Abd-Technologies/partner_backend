@@ -4,7 +4,7 @@ const appointmentController = require("../../controllers/FrontSite/appointmentCo
 const consultationBookingController = require("../../controllers/FrontSite/consultationBookingController");
 const { validateToken } = require("../../middlewares/AuthorizationMW");
 const { validateAdmin } = require("../../middlewares/ValidateAdmin");
-const { selfOrStaff } = require("../../middlewares/roleGuards");
+const { selfOrStaff, requireAdmin } = require("../../middlewares/roleGuards");
 // const authenticate = require('../middleware/middlewares/authMiddleware');
 
 // // Create a new appointment (requires authentication)
@@ -23,6 +23,11 @@ const { selfOrStaff } = require("../../middlewares/roleGuards");
 // router.delete('/:id', authenticate, appointmentController.deleteAppointment);
  // Sec pass 1: a dietitian sees only her own queue; Admin may open any.
  router.get("/rescheduled/appointments/:reschedule/:dietitianId", validateToken, selfOrStaff("params.dietitianId", ["Admin"]), appointmentController.getAllRescheduledAppointments);
+
+// Consultation ratings (Nov 2026): dietitian's own (anonymous) / Admin all.
+const consultRatings = require("../../controllers/FrontSite/consultRatingsController");
+router.get("/ratings/me", validateToken, consultRatings.myRatings);
+router.get("/ratings/all", requireAdmin, consultRatings.allRatings);
 
  router.get("/status", validateToken, appointmentController.getAllAppointmentStatus);
 
@@ -53,6 +58,8 @@ const { selfOrStaff } = require("../../middlewares/roleGuards");
 // Client tapped "Join Meeting" in the app (Oct 2026): first tap time,
 // for attendance with every dietitian (Google or not). Own bookings only.
 router.post("/:id/join-tap", validateToken, consultationBookingController.recordJoinTap);
+// She came back to Fit Her after the call (Nov 2026): her leave time.
+router.post("/:id/app-return", validateToken, consultationBookingController.recordAppReturn);
 
 // Dietitian: "Client didn't join" (manual backup for the Meet attendance check).
 router.post("/:id/client-no-show", validateToken, consultationBookingController.reportClientNoShow);
@@ -74,6 +81,8 @@ router.post("/:id/client-joined", validateToken, consultationBookingController.c
  router.put("/:id", validateToken, validateAdmin, appointmentController.updateAppointment);
 
 // Route to delete an appointment
- router.delete("/:id", validateToken, validateAdmin, appointmentController.deleteAppointment);
+ // Nov 2026 audit: any staff account could delete any booking (no trace,
+ // client never told). Admin only now.
+ router.delete("/:id", requireAdmin, appointmentController.deleteAppointment);
 
 module.exports = router;

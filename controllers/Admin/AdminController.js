@@ -3123,6 +3123,12 @@ async function updateDietitionLink(req, res) {
 
   slot.dietitionLink = link;
   await slot.save();
+  // Nov 2026: upcoming bookings on this slot get the new link too.
+  try {
+    await require("../../helper/meetLinkSync").syncUpcomingLinks([slot.id], slot.dietitionLink);
+  } catch (e) {
+    console.error("[updateDietitionLink] link sync:", e.message);
+  }
 
   // userId is now optional — the dietitian link tool just updates the
   // slot template and doesn't pick a specific client. Only notify when

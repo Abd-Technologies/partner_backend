@@ -81,7 +81,15 @@ async function checkMeetAttendance() {
   });
 
   const linked = linkedDietitianIds();
-  const isLinked = (appt) => linked.length === 0 || linked.includes(Number(appt.dietitionId));
+  // Nov 2026 audit: an empty list used to mean "everyone uses Google",
+  // even when no Google account was ever linked on this server. Every
+  // check then failed, was retried every 10 minutes for ever (the same 25
+  // oldest rows), and tap attendance was never saved. Now: an empty list
+  // means Google for everyone only when a Google account IS linked;
+  // otherwise taps for everyone.
+  const googleReady = require('../services/meetAttendance/googleAuth').hasSavedToken();
+  const isLinked = (appt) =>
+    linked.length === 0 ? googleReady : linked.includes(Number(appt.dietitionId));
   let tapped = 0;
   for (const appt of candidates) {
     if (isLinked(appt)) continue;
@@ -193,6 +201,12 @@ async function checkMeetAttendance() {
       // silently given up on.
       console.error(`[checkMeetAttendance] appointment ${appt.id} failed:`, err.message || err);
       results.errors += 1;
+      // Nov 2026: still failing a day after the session: save the taps
+      // instead, so this row stops blocking the batch.
+      try {
+        const w = appointmentWindowUtc(appt);
+        if (w && moment.utc().isAfter(w.endUtc.clone().add(24, 'hours'))) await applyTaps(appt);
+      } catch (_) {}
     }
   }
 

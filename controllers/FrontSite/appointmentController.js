@@ -31,13 +31,26 @@ const USER_PRIVATE = ["password", "deviceToken"];
 exports.getAllAppointments = async (req, res) => {
   try {
     const { id } = req.params;
+    // Nov 2026 audit: any staff account (a trainer too) could read any
+    // dietitian's bookings with client emails. Own list, or Admin.
+    const me = await User.findByPk(req.user && req.user.id, { attributes: ["id", "userType"] });
+    if (!me || (Number(me.id) !== Number(id) && !isAdmin(me))) {
+      return res.json(ApiResponse("0", "You can only see your own appointments.", {}));
+    }
     const includeAll = req.query.includeAll === "true";
+    // Nov 2026: ?recentDays=N also returns every booking of the last N days
+    // (completed / cancelled too). The portal's "Did she join?" cards and
+    // join/leave times need finished calls, which this list never had.
+    const recentDays = Math.min(parseInt(req.query.recentDays, 10) || 0, 14);
+    const active = { status: { [Op.in]: ["pending", "confirmed", "In Progress"] } };
     const where = includeAll
       ? { dietitionId: id }
-      : {
+      : recentDays > 0
+      ? {
           dietitionId: id,
-          status: { [Op.in]: ["pending", "confirmed", "In Progress"] },
-        };
+          [Op.or]: [active, { date: { [Op.gte]: new Date(Date.now() - (recentDays + 1) * 86400000) } }],
+        }
+      : { dietitionId: id, ...active };
     const appointments = await Appointment.findAll({
       where,
       attributes: { exclude: ["createdAt", "updatedAt"] },
@@ -76,6 +89,12 @@ exports.getAllAppointments = async (req, res) => {
           new Date(c.date).getTime() < thisTime
       ).length;
       json.consultNumber = before + 1;
+      // Nov 2026: join / leave times (helper/consultAttendance.js).
+      try {
+        json.attendance = require("../../helper/consultAttendance").summarize(a, a.SlotDiet);
+      } catch (_) {
+        json.attendance = null;
+      }
       return json;
     });
 
@@ -164,6 +183,41 @@ exports.createAppointment = async (req, res) => {
   if (!date || !userId || !dietitionId || !timeSlotId || !userPlanId) {
     const response = ApiResponse("0", "Invalid input data", {});
     return res.status(200).json(response);
+  }
+
+  // Nov 2026 audit: check the slot before anything else. The server used to
+  // trust the app here, so a slot from another dietitian, a date on the
+  // wrong weekday, or a time that had ALREADY PASSED could be booked. A past
+  // time was then cancelled a minute later as a "dietitian no-show" and gave
+  // her 3 free days every time.
+  {
+    const dayOnly = String(date).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayOnly)) {
+      return res.json(ApiResponse("0", "Invalid date", {}));
+    }
+    const { TimeDietition } = require("../../models");
+    const slot = await SlotDiet.findByPk(timeSlotId, {
+      attributes: ["id", "start", "end", "dietitionId"],
+      include: [{ model: TimeDietition, attributes: ["id", "day"] }],
+    });
+    if (!slot || Number(slot.dietitionId) !== Number(dietitionId)) {
+      return res.json(ApiResponse("0", "This time isn't available. Please pick another time.", { code: "SLOT_INVALID" }));
+    }
+    const WD = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const [y0, m0, d0] = dayOnly.split("-").map(Number);
+    const weekday = WD[new Date(Date.UTC(y0, m0 - 1, d0)).getUTCDay()];
+    if (slot.TimeDietition && slot.TimeDietition.day && slot.TimeDietition.day !== weekday) {
+      return res.json(ApiResponse("0", "This time isn't available on that day. Please pick another time.", { code: "SLOT_INVALID" }));
+    }
+    if (bookingPolicy.tooSoonToBook(dayOnly, slot)) {
+      return res.json(
+        ApiResponse(
+          "0",
+          `This time is too soon or has passed. Please pick a time at least ${bookingPolicy.MIN_BOOK_LEAD_MINUTES} minutes from now.`,
+          { code: "SLOT_PAST" }
+        )
+      );
+    }
   }
   // Consultation-flow extension (Phase 1A): if the client supplies `kind`
   // ("initial" | "followup") we persist it. Legacy callers omit it and
@@ -494,6 +548,10 @@ const txResult = await sequelize.transaction(async (t) => {
     ownActiveAppointment.planId = userPlanId;
     // New time: the "in 15 minutes" reminder should go out again.
     ownActiveAppointment.reminderSentAt = null;
+    // Nov 2026: taps and late alerts belonged to the old time.
+    ownActiveAppointment.clientJoinTapAt = null;
+    ownActiveAppointment.dietitianStartedAt = null;
+    ownActiveAppointment.dietitianLateAlertAt = null;
     ownActiveAppointment.dietitionId = dietitionId;
     if (persistedKind) ownActiveAppointment.kind = persistedKind;
     if (userNote) ownActiveAppointment.message = userNote;
@@ -573,6 +631,18 @@ const linkNote = hasMeetLink
 
 const user = await User.findByPk(userId);
 const dietitian = await User.findByPk(dietitionId);
+// Nov 2026: HER push shows the time in her own time zone; the dietitian's
+// stays in Pakistan time (`when` above).
+let whenForClient = when;
+try {
+  const st = slotStart ? bookingPolicy.sessionStartSync({ date: dayStr }, { start: slotStart }) : null;
+  if (st) whenForClient = bookingPolicy.formatForUser(st, user && user.timeZone, true);
+} catch (_) {}
+// Nov 2026: a missing last name used to show as "undefined" in pushes.
+const fullName = (u, fallback) =>
+  (u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "") || fallback;
+const dietName = fullName(dietitian, "your dietitian");
+const clientName = fullName(user, "A client");
 
 const notify = async (deviceToken, title, body, type) => {
   if (deviceToken) {
@@ -586,8 +656,8 @@ const notify = async (deviceToken, title, body, type) => {
 
 if (wasUpdated) {
   const notifications = [
-    notify(user?.deviceToken, "Booking Updated", `Your consultation with ${dietitian?.firstName} ${dietitian?.lastName} is now on ${when}. You're all set!`, "bookingUpdated"),
-    notify(dietitian?.deviceToken, "Booking Updated", `${user?.firstName} ${user?.lastName} moved their consultation to ${when}.${linkNote}`, "bookingUpdated"),
+    notify(user?.deviceToken, "Booking Updated", `Your consultation with ${dietName} is now on ${whenForClient}. You're all set!`, "bookingUpdated"),
+    notify(dietitian?.deviceToken, "Booking Updated", `${clientName} moved their consultation to ${when}.${linkNote}`, "bookingUpdated"),
   ];
   // Rare (see comment above), but if the booking actually jumped to a
   // DIFFERENT dietitian, the old one's queue will silently lose this
@@ -596,20 +666,32 @@ if (wasUpdated) {
   if (dietitianChanged) {
     const previousDietitian = await User.findByPk(previousDietitionId);
     notifications.push(
-      notify(previousDietitian?.deviceToken, "Booking Moved", `${user?.firstName} ${user?.lastName} rebooked their consultation with a different dietitian.`, "bookingMovedAway")
+      notify(previousDietitian?.deviceToken, "Booking Moved", `${clientName} rebooked their consultation with a different dietitian.`, "bookingMovedAway")
     );
   }
   await Promise.all(notifications);
 } else {
   await Promise.all([
-    notify(user?.deviceToken, "Appointment Confirmed", `Your consultation with ${dietitian?.firstName} ${dietitian?.lastName} is confirmed for ${when}. See you there!`, "appointmentConfirmed"),
-    notify(dietitian?.deviceToken, "New Consultation Booked", `${user?.firstName} ${user?.lastName} booked a consultation for ${when}.${linkNote}`, "bookingAdded"),
+    notify(user?.deviceToken, "Appointment Confirmed", `Your consultation with ${dietName} is confirmed for ${whenForClient}. See you there!`, "appointmentConfirmed"),
+    notify(dietitian?.deviceToken, "New Consultation Booked", `${clientName} booked a consultation for ${when}.${linkNote}`, "bookingAdded"),
   ]);
 }
 
 // Small "a live class runs at the same time" note for the booked screen
 // (null when nothing overlaps or she has no workout package).
 const classClash = await findClassClash(userId, dayStr, slotStart, slotEnd);
+// Nov 2026: class times in that note in her own time zone too.
+try {
+  if (classClash && user && user.timeZone) {
+    for (const k of ["clashClass", "joinAfter", "nextClass"]) {
+      const c = classClash[k];
+      if (c && c.time) {
+        const st = bookingPolicy.sessionStartSync({ date: dayStr }, { start: c.time });
+        if (st) c.time = bookingPolicy.formatForUser(st, user.timeZone);
+      }
+    }
+  }
+} catch (_) {}
 
 const response = ApiResponse(
   "1",
@@ -654,6 +736,46 @@ exports.updateAppointment = async (req, res) => {
     const statusChanged = status != null && status !== appointment.status;
     const prevStatus = appointment.status;
 
+    // Nov 2026 audit: this accepted ANY status from ANY state, so a booking
+    // could be "completed" days before it happened (using up her
+    // consultation), set live without the time checks of /start, or moved
+    // back from completed/cancelled. Allowed now (dietitian):
+    //   pending -> confirmed
+    //   pending / confirmed / In Progress -> canceled
+    //   In Progress -> completed, or confirmed -> completed once its start
+    //   time has passed (she ran the call without tapping Start)
+    // "In Progress" only through POST /appointment/:id/start. Admin may
+    // still make any change (support fixes).
+    if (statusChanged) {
+      const VALID = ["pending", "confirmed", "In Progress", "completed", "canceled", "canceledByUser"];
+      if (!VALID.includes(status)) {
+        return res.json(ApiResponse("0", "Unknown status", {}));
+      }
+      if (!isAdmin) {
+        let ok = false;
+        if (status === "confirmed") ok = prevStatus === "pending";
+        else if (status === "canceled") ok = ["pending", "confirmed", "In Progress"].includes(prevStatus);
+        else if (status === "completed") {
+          if (prevStatus === "In Progress") ok = true;
+          else if (prevStatus === "confirmed") {
+            const st = await bookingPolicy.sessionStart(appointment);
+            ok = !!st && Date.now() >= st.getTime();
+            if (!ok) {
+              return res.json(
+                ApiResponse("0", "This consultation hasn't started yet, so it can't be marked completed.", { code: "NOT_STARTED" })
+              );
+            }
+          }
+        }
+        if (!ok) {
+          const hint = status === "In Progress" ? ' Use "Start session" instead.' : "";
+          return res.json(
+            ApiResponse("0", `This consultation is "${prevStatus}", so it can't be changed to "${status}".${hint}`, { code: "BAD_TRANSITION" })
+          );
+        }
+      }
+    }
+
     // On hold (payment not confirmed): it can't be started.
     if (statusChanged && status === "In Progress" && appointment.paymentHoldAt) {
       return res.json(
@@ -676,6 +798,11 @@ exports.updateAppointment = async (req, res) => {
     if (statusChanged) {
       appointment.completed_by = actorUserId != null ? actorUserId : appointment.dietitionId;
       appointment.status_changed_at = new Date();
+      // Nov 2026: she ended the call now.
+      if (status === "completed" && !appointment.dietitianEndedAt) {
+        appointment.dietitianEndedAt = new Date();
+        appointment.dietitianEndSource = "tap";
+      }
     }
 
     // Snapshot the slot's current Meet link onto this appointment the
@@ -757,6 +884,11 @@ exports.updateAppointment = async (req, res) => {
           { type: "appointmentConfirmed" }
         );
       }
+    }
+
+    // Nov 2026: session over → ask her to rate it (once, if she was there).
+    if (statusChanged && status === "completed") {
+      require("../../helper/consultReviewAsk").askForReview(appointment.id).catch(() => {});
     }
 
     return res.status(200).json(ApiResponse("1", "Appointment updated successfully", { appointment }));
@@ -972,6 +1104,35 @@ exports.createAppointmentReview = async (req, res) => {
       });
     }
 
+    // Nov 2026: a 1-2 star session → tell the admins right away.
+    if (ratingInt <= 2 && !existing) {
+      try {
+        const [client, diet, admins] = await Promise.all([
+          User.findByPk(appointment.userId, { attributes: ["firstName", "lastName"] }),
+          User.findByPk(appointment.dietitionId, { attributes: ["firstName", "lastName"] }),
+          User.findAll({
+            where: { userType: { [Op.like]: "admin%" }, deviceToken: { [Op.ne]: null } },
+            attributes: ["deviceToken"],
+          }),
+        ]);
+        const nm = (u, f) => (u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "") || f;
+        const tokens = admins.map((a) => a.deviceToken).filter(Boolean);
+        if (tokens.length) {
+          await sendNotification(
+            tokens,
+            {
+              title: `Low session rating: ${ratingInt} star${ratingInt === 1 ? "" : "s"}`,
+              body:
+                `${nm(client, "A client")} rated her session with ${nm(diet, "a dietitian")}` +
+                (comment ? `: "${String(comment).slice(0, 120)}"` : ".") + " Please check in with her.",
+            },
+            { type: "escalation" }
+          );
+        }
+      } catch (e) {
+        console.error("[review] low-rating alert:", e.message);
+      }
+    }
     return res.json(ApiResponse("1", "Review saved", { review }));
   } catch (error) {
     console.error("Review error:", error);

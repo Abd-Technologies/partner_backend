@@ -38,7 +38,7 @@ async function sendConsultationReminders() {
         [Op.lte]: new Date(now + 36 * 3600000),
       },
     },
-    include: [{ model: SlotDiet, attributes: ["id", "start", "end"] }],
+    include: [{ model: SlotDiet, attributes: ["id", "start", "end", "dietitionLink"] }],
   });
   const rows = candidates.filter((a) => {
     const start = sessionStartSync(a, a.SlotDiet);
@@ -65,7 +65,7 @@ async function sendConsultationReminders() {
 
       const time = formatPkTime(start);
       const [client, dietitian] = await Promise.all([
-        User.findByPk(appt.userId, { attributes: ["firstName", "lastName", "deviceToken"] }),
+        User.findByPk(appt.userId, { attributes: ["firstName", "lastName", "deviceToken", "timeZone"] }),
         User.findByPk(appt.dietitionId, { attributes: ["firstName", "lastName", "deviceToken"] }),
       ]);
       const dietFirst = (dietitian && dietitian.firstName) || "your dietitian";
@@ -80,7 +80,8 @@ async function sendConsultationReminders() {
           {
             title: "Your consultation starts in 15 minutes",
             body:
-              `Your session with ${dietFirst} starts at ${time}. Open the Diet tab ` +
+              // Nov 2026: in her own time zone.
+              `Your session with ${dietFirst} starts at ${require("./bookingPolicy").formatForUser(start, client.timeZone)}. Open the Diet tab ` +
               "now; your Join button turns green when she starts.",
           },
           data
@@ -93,7 +94,12 @@ async function sendConsultationReminders() {
             title: "Consultation in 15 minutes",
             body:
               `${clientName} at ${time}. Tap "Start session & join call" in ` +
-              "Your Consultations when it's time.",
+              "Your Consultations when it's time." +
+              // Nov 2026: no Meet link yet = she can't join. Say so now.
+              ((appt.meetLink && appt.meetLink.trim()) ||
+              (appt.SlotDiet && appt.SlotDiet.dietitionLink && appt.SlotDiet.dietitionLink.trim())
+                ? ""
+                : " This slot has no Meet link yet, please add it now."),
           },
           data
         );

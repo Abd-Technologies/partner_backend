@@ -126,6 +126,21 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Consultation rating reminder (Nov 2026): one push if she hasn't rated
+// 6 h after her session. helper/consultReviewAsk.js.
+cron.schedule(
+  "*/30 * * * *",
+  async () => {
+    try {
+      const n = await require("./helper/consultReviewAsk").remindReviews();
+      if (n) console.log(`[consult-review] reminded ${n}`);
+    } catch (error) {
+      console.error("Error in consult-review reminder job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Dietitian no-show while the client waits (Oct 2026): every minute.
 // 5 min late → "Your client is waiting" + admin alert; not started 10 min after the start time → cancelled as a dietitian
 // no-show (+3 days, client told). See helper/dietitianLateCheck.js.
@@ -872,6 +887,13 @@ db.sequelize.sync().then(async () => {
     console.log("✅ Appointment join taps checked");
   } catch (e) {
     console.error("❌ Appointment join taps FAILED:", e.message);
+  }
+  // Join / leave times from the app (Nov 2026).
+  try {
+    await require("./migrations/20261108120000-appointment-attendance-times").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    console.log("✅ Appointment attendance times checked");
+  } catch (e) {
+    console.error("❌ Appointment attendance times FAILED:", e.message);
   }
   // Trainer's reason when she cancels a class (Nov 2026, class diary).
   try {
