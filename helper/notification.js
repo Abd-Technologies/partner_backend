@@ -147,7 +147,14 @@ function getRedis() {
 const HELD_KEY = "quiet:held";
 // Pushes she asked for and is waiting on right now: sent even in her
 // quiet hours (e.g. the starter plan she requested at 11 pm, Oct 2026).
-const IGNORE_QUIET = new Set(['trialPlanReady']);
+// Nov 2026: a consultation she booked herself inside her quiet hours (e.g.
+// 11:30 PM): its "starts in 15 min", "your dietitian started, join now",
+// "running late" and "cancelled, she didn't come" pushes were DROPPED, so
+// she never knew. She chose that time, so these go out.
+const IGNORE_QUIET = new Set([
+  'trialPlanReady',
+  'consultationReminder', 'appointmentStarted', 'appointmentDietitianLate', 'appointmentNoShowCanceled',
+]);
 
 const DROP_IF_QUIET = new Set([
   "classPrep", "classStart", "upcomingClass", "classLinkAdded", "trainerLinkAdded",

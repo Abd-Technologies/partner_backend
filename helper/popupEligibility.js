@@ -1183,6 +1183,11 @@ async function evaluateUnconfirmedBookings() {
 
   for (const a of rows) {
     try {
+      // Nov 2026 audit: `date` is only the day (midnight), so a pending
+      // booking for 6 PM was expired at the START of its day. Wait for its
+      // real start time.
+      const startsAt = await require("./bookingPolicy").sessionStart(a);
+      if (startsAt && startsAt.getTime() > Date.now()) continue;
       await createEscalation({
         userId: a.userId,
         dietitianId: a.dietitionId || null,

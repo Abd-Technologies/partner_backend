@@ -51,12 +51,16 @@ async function runDietitianLateCheck() {
       if (late < LATE_ALERT_MINUTES) continue;
 
       const [client, dietitian] = await Promise.all([
-        User.findByPk(appt.userId, { attributes: ["id", "firstName", "lastName", "deviceToken"] }),
+        User.findByPk(appt.userId, { attributes: ["id", "firstName", "lastName", "deviceToken", "timeZone"] }),
         User.findByPk(appt.dietitionId, { attributes: ["id", "firstName", "lastName", "deviceToken"] }),
       ]);
       const when = bookingPolicy.formatPkTime(start);
 
       if (late >= NO_SHOW_MINUTES) {
+        // Nov 2026: cancel first; if she started it just now, stop here
+        // (no "cancelled" pushes for a session that is running).
+        await require("./noShowResolution").resolveDietitianNoShow(appt, { actorUserId: null });
+        if (!(appt.status === "canceled" && appt.noShowReportedAt)) continue;
         if (dietitian && dietitian.deviceToken) {
           await sendNotification(
             [dietitian.deviceToken],
@@ -64,7 +68,6 @@ async function runDietitianLateCheck() {
             { type: "appointmentNoShowCanceled" }
           );
         }
-        await require("./noShowResolution").resolveDietitianNoShow(appt, { actorUserId: null });
         try {
           await require("./escalation").createEscalation({
             userId: appt.userId,
@@ -100,7 +103,8 @@ async function runDietitianLateCheck() {
         }
         // Oct 2026: tell HER too (essential, never a nudge). Tap → Diet tab.
         if (client && client.deviceToken) {
-          const cutoff = bookingPolicy.formatPkTime(new Date(start.getTime() + NO_SHOW_MINUTES * 60000));
+          // Nov 2026: in her own time zone.
+          const cutoff = bookingPolicy.formatForUser(new Date(start.getTime() + NO_SHOW_MINUTES * 60000), client.timeZone);
           await sendNotification(
             [client.deviceToken],
             {

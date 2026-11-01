@@ -40,6 +40,8 @@ router.post('/', validateToken, dietController.getAllSlotsOfDay);
 // touched, so a logged-in dietitian cannot edit another dietitian's
 // slots and a logged-in user cannot bump another user's calorie counter.
 router.post('/addOrUpdateDaySlot', validateToken, dietController.addOrUpdateDaySlot);
+// Nov 2026: one Meet link for all her slots (and upcoming bookings).
+router.post('/setLinkForAllSlots', validateToken, dietController.setLinkForAllSlots);
 router.get('/getClients/:id', validateToken, dietController.getAllClients);
 router.post('/upload', validateToken, upload.single('image'), (req, res) => {
   if (!req.file) {

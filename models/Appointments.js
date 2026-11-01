@@ -146,6 +146,13 @@ module.exports = (sequelize, DataTypes) => {
         clientJoinTapAt: { type: DataTypes.DATE, allowNull: true },
         attendanceSource: { type: DataTypes.STRING(10), allowNull: true },
         attendanceFlag: { type: DataTypes.STRING(40), allowNull: true },
+        // Join / leave times from the app (Nov 2026, migration 20261108120000).
+        clientLastJoinTapAt: { type: DataTypes.DATE, allowNull: true },
+        clientJoinTapCount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+        clientReturnedAt: { type: DataTypes.DATE, allowNull: true },
+        dietitianEndedAt: { type: DataTypes.DATE, allowNull: true },
+        dietitianEndSource: { type: DataTypes.STRING(10), allowNull: true },
+        dietitianReportedMinutes: { type: DataTypes.INTEGER, allowNull: true },
 
     });
 

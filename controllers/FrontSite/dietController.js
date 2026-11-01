@@ -97,6 +97,13 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
         ApiResponse("0", `Slot[${i}] end time must be after start time.`, {})
       );
     }
+    // Nov 2026: a mistyped link means nobody can join. Must be a web link.
+    if (typeof el.dietitionLink === "string" && el.dietitionLink.trim() &&
+        !/^https?:\/\/\S+\.\S+/i.test(el.dietitionLink.trim().replace(/^(meet\.google\.com)/i, "https://$1"))) {
+      return res.json(
+        ApiResponse("0", `Slot ${i + 1}: the Meet link doesn't look right. Paste the full link, e.g. https://meet.google.com/abc-defg-hij`, {})
+      );
+    }
     parsed.push({ ...el, startMin, endMin });
   }
 
@@ -162,6 +169,44 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
     const normalizeLink = (v) =>
       typeof v === "string" && v.trim() ? v.trim() : null;
 
+    // Nov 2026: changing the TIME of a slot that has upcoming bookings used
+    // to move those clients' sessions silently (no one was told). Refuse,
+    // like deleting: cancel or move those bookings first.
+    const timeChanged = slotsList.filter((el) => {
+      const cur = el.id != null && existingSlotMap.get(el.id);
+      if (!cur) return false;
+      // Compare as minutes, so "09:00 AM" and "9:00 AM" count as the same.
+      const same = (x, y) => {
+        const mx = parseSlotTimeToMinutes(x);
+        const my = parseSlotTimeToMinutes(y);
+        return mx != null && my != null ? mx === my : String(x).trim() === String(y).trim();
+      };
+      return !same(cur.start, el.start) || !same(cur.end, el.end);
+    });
+    if (timeChanged.length > 0) {
+      const booked = await Appointment.findAll({
+        where: {
+          timeSlotId: { [Op.in]: timeChanged.map((el) => el.id) },
+          status: { [Op.in]: ["pending", "confirmed", "In Progress"] },
+          date: { [Op.gte]: new Date(Date.now() - 86400000) },
+        },
+        attributes: ["id", "timeSlotId", "status"],
+        transaction: t,
+      });
+      if (booked.length > 0) {
+        await t.rollback();
+        return res.json(
+          ApiResponse(
+            "0",
+            `Clients have booked ${booked.length} session(s) in a slot whose time you changed. ` +
+              "Keep that slot's time, or cancel those bookings first, so nobody's session moves without them knowing.",
+            { blockingAppointments: booked }
+          )
+        );
+      }
+    }
+    const linkChanged = []; // [{id, link}] → copied onto upcoming bookings
+
     for (const element of slotsList) {
       // Bug 9: == null catches both null and undefined; === null missed
       // the undefined case and silently dropped new-slot creates.
@@ -185,7 +230,11 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
         // and must not silently wipe a link already saved elsewhere
         // (e.g. via the web tool) just by editing times.
         if (element.dietitionLink !== undefined) {
-          slotToUpdate.dietitionLink = normalizeLink(element.dietitionLink);
+          const newLink = normalizeLink(element.dietitionLink);
+          if ((slotToUpdate.dietitionLink || null) !== newLink) {
+            linkChanged.push({ id: slotToUpdate.id, link: newLink });
+          }
+          slotToUpdate.dietitionLink = newLink;
         }
         await slotToUpdate.save({ transaction: t });
       }
@@ -198,6 +247,14 @@ exports.addOrUpdateDaySlot = async (req, res, next) => {
     }
 
     await t.commit();
+    // Nov 2026: upcoming bookings get the new link too.
+    for (const c of linkChanged) {
+      try {
+        await require("../../helper/meetLinkSync").syncUpcomingLinks([c.id], c.link);
+      } catch (e) {
+        console.error("[addOrUpdateDaySlot] link sync:", e.message);
+      }
+    }
     return res.json(ApiResponse("1", "Slot updated successfully", {}));
   } catch (error) {
     await t.rollback();
@@ -541,3 +598,28 @@ exports.checkNutrition = async (req, res) => {
 };
 
 
+
+
+// POST /dietTimes/setLinkForAllSlots { link } (Nov 2026)
+// The dietitian's one Meet link: saved on ALL her slots at once, and on her
+// upcoming bookings. Own slots only (from the token).
+exports.setLinkForAllSlots = async (req, res) => {
+  try {
+    const dietitionId = req.user && req.user.id;
+    if (!dietitionId) return res.json(ApiResponse("0", "User not loggedIn!", {}));
+    const link = typeof req.body.link === "string" ? req.body.link.trim() : "";
+    if (!/^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(link)) {
+      return res.json(ApiResponse("0", "Please paste a Google Meet link (https://meet.google.com/...).", {}));
+    }
+    const slots = await SlotDiet.findAll({ where: { dietitionId }, attributes: ["id"] });
+    if (!slots.length) return res.json(ApiResponse("0", "You have no time slots yet. Add your slots first.", {}));
+    await SlotDiet.update({ dietitionLink: link }, { where: { dietitionId } });
+    const bookings = await require("../../helper/meetLinkSync").syncUpcomingLinks(slots.map((s) => s.id), link);
+    return res.json(
+      ApiResponse("1", `Link saved on all ${slots.length} slots`, { slots: slots.length, upcomingBookings: bookings })
+    );
+  } catch (err) {
+    console.error("[setLinkForAllSlots]", err.message);
+    return res.json(ApiResponse("0", "Could not save the link. Please try again.", {}));
+  }
+};

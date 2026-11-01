@@ -49,7 +49,7 @@ async function autoEndExpiredAppointments() {
     if (!endUtc) continue;
 
     const cutoff = endUtc.clone().add(GRACE_MINUTES, "minutes");
-    if (nowUtc.isAfter(cutoff)) toEnd.push(appt.id);
+    if (nowUtc.isAfter(cutoff)) toEnd.push({ id: appt.id, endAt: endUtc.toDate() });
   }
 
   if (toEnd.length === 0) return [];
@@ -57,15 +57,27 @@ async function autoEndExpiredAppointments() {
   // completed_by stays NULL — that's the audit signal saying "the cron
   // did this, the dietitian never clicked End". status_changed_at is
   // set so the audit dashboard can rank events.
-  await Appointment.update(
-    {
-      status: "completed",
-      completed_by: null,
-      status_changed_at: new Date(),
-    },
-    { where: { id: { [Op.in]: toEnd } } }
-  );
-  return toEnd;
+  // Nov 2026: the dietitian forgot to end it, so the session's end time is
+  // her best-known end (marked "auto"). Only rows still In Progress.
+  const ended = [];
+  for (const row of toEnd) {
+    const [n] = await Appointment.update(
+      {
+        status: "completed",
+        completed_by: null,
+        status_changed_at: new Date(),
+        dietitianEndedAt: row.endAt,
+        dietitianEndSource: "auto",
+      },
+      { where: { id: row.id, status: "In Progress" } }
+    );
+    if (n) {
+      ended.push(row.id);
+      // Nov 2026: ask her to rate it (once, if she was there).
+      require("./consultReviewAsk").askForReview(row.id).catch(() => {});
+    }
+  }
+  return ended;
 }
 
 module.exports = { autoEndExpiredAppointments, GRACE_MINUTES };

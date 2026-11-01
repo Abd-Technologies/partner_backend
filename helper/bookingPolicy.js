@@ -17,6 +17,22 @@ const DIETITIAN_NO_SHOW_BONUS_DAYS = 3;
 // The dietitian can start a session (which turns the client's Join
 // button green) at most this many minutes before its scheduled time.
 const START_EARLY_MINUTES = 10;
+// Nov 2026: a booking must start at least this far ahead, so the dietitian
+// sees it and can prepare (and the 15-minute reminder can go out). A slot
+// starting sooner shows as not available.
+// Set CONSULT_MIN_LEAD_MINUTES in .env to change it (e.g. 5 while testing).
+const MIN_BOOK_LEAD_MINUTES = (() => {
+  const n = parseInt(process.env.CONSULT_MIN_LEAD_MINUTES, 10);
+  return Number.isInteger(n) && n >= 0 && n <= 24 * 60 ? n : 60;
+})();
+
+/** Too soon (or already past) to book this slot on this day? Only for
+ *  "h:mm AM/PM" times; old 24-hour rows are never blocked by this. */
+function tooSoonToBook(dayStr, slot) {
+  if (!slot || !/^\s*\d{1,2}:\d{2}\s*[AaPp][Mm]\s*$/.test(String(slot.start || ""))) return false;
+  const st = sessionStartSync({ date: dayStr }, slot);
+  return !!st && st.getTime() < Date.now() + MIN_BOOK_LEAD_MINUTES * 60000;
+}
 
 // IMPORTANT: Appointment.date is the session's CALENDAR DAY (stored as
 // midnight), NOT its start time. The start time lives on the slot
@@ -85,6 +101,19 @@ function formatPkTime(d) {
   }
 }
 
+// Nov 2026: a time for the CLIENT's push, in her own time zone (User.timeZone,
+// saved from her phone). Pakistan time when her zone is unknown.
+// withDay → "Tue 3 Nov, 5:00 PM", else "5:00 PM".
+function formatForUser(d, tz, withDay = false) {
+  try {
+    const moment = require("moment-timezone");
+    const zone = tz && moment.tz.zone(tz) ? tz : "Asia/Karachi";
+    return moment(d).tz(zone).format(withDay ? "ddd D MMM, h:mm A" : "h:mm A");
+  } catch (_) {
+    return formatPkTime(d);
+  }
+}
+
 async function hoursUntilStart(appt, transaction) {
   const start = await sessionStart(appt, transaction);
   if (!start) return Infinity;
@@ -122,6 +151,8 @@ const MSG = {
 };
 
 module.exports = {
+  MIN_BOOK_LEAD_MINUTES,
+  tooSoonToBook,
   LATE_CHANGE_HOURS,
   DIETITIAN_NO_SHOW_BONUS_DAYS,
   START_EARLY_MINUTES,
@@ -131,6 +162,7 @@ module.exports = {
   slotFor,
   sessionEnd,
   formatPkTime,
+  formatForUser,
   hoursUntilStart,
   isInsideLateWindow,
   planForAppointment,

@@ -129,12 +129,14 @@ exports.getDietitianAvailability = async (req, res) => {
       for (const t of templates) {
         if (!t.TimeDietition || t.TimeDietition.day !== weekdayName) continue;
         const key = `${t.id}|${isoDate}`;
+        // Nov 2026: a time that has already passed today can't be booked.
+        const past = bookingPolicy.tooSoonToBook(isoDate, t);
         out.push({
           slotDietId: t.id,
           date: isoDate,
           start: t.start,
           end: t.end,
-          available: !blockedSet.has(key) && !emergencyDays.has(isoDate),
+          available: !past && !blockedSet.has(key) && !emergencyDays.has(isoDate),
         });
       }
     }
@@ -371,6 +373,12 @@ exports.getMyCurrentAppointment = async (req, res) => {
                   attributes: ["id"],
                 }))
               : false,
+          // Nov 2026: ask her to rate it in a pop-up: over, not rated, and
+          // we know she was in it (Join tap / dietitian said yes / Google).
+          askReview:
+            appt.status === "completed" &&
+            !appt.clientNoShowAt &&
+            (!!appt.clientJoinTapAt || appt.attendanceFlag === "dietitian_confirmed" || appt.meetClientAttended === true),
           // True only for the Priority-4 fallback above: a canceled
           // appointment specifically caused by the dietitian never
           // confirming it in time (as opposed to noShow, where she DID
@@ -465,7 +473,12 @@ exports.cancelMyAppointment = async (req, res) => {
           [dietitian.deviceToken],
           {
             title: "Appointment Canceled",
-            body: `${clientName} canceled their appointment on ${toIsoDate(appt.date)}.`,
+            body: await (async () => {
+              // Nov 2026: day AND time, so she knows which session.
+              const st = await bookingPolicy.sessionStart(appt).catch(() => null);
+              return `${clientName || "A client"} canceled their consultation on ${toIsoDate(appt.date)}` +
+                (st ? ` at ${bookingPolicy.formatPkTime(st)}` : "") + ". That time is free again.";
+            })(),
           },
           { type: "appointmentCanceledByUser" }
         );
@@ -504,13 +517,90 @@ exports.recordJoinTap = async (req, res) => {
     if (["canceled", "canceledByUser"].includes(appt.status)) {
       return res.json(ApiResponse("0", "This consultation was cancelled", {}));
     }
-    if (!appt.clientJoinTapAt) {
-      appt.clientJoinTapAt = new Date();
-      await appt.save();
+    // Nov 2026: the comment above promised "only around the call", but any
+    // tap was saved, so a tap days early counted as "she joined". Saved only
+    // from 15 min before the start until the session's end.
+    {
+      const slot = await bookingPolicy.slotFor(appt);
+      const st = bookingPolicy.sessionStartSync(appt, slot);
+      const en = bookingPolicy.sessionEnd(appt, slot);
+      const now = Date.now();
+      if ((st && now < st.getTime() - 15 * 60000) || (en && now > en.getTime() + 15 * 60000)) {
+        return res.json(ApiResponse("1", "Not saved (outside the session time)", { clientJoinTapAt: appt.clientJoinTapAt }));
+      }
+    }
+    // First tap = she joined. Every tap is counted (Nov 2026): a later tap
+    // means she rejoined after dropping out.
+    const nowTap = new Date();
+    const firstTap = !appt.clientJoinTapAt;
+    if (firstTap) appt.clientJoinTapAt = nowTap;
+    appt.clientLastJoinTapAt = nowTap;
+    appt.clientJoinTapCount = (appt.clientJoinTapCount || 0) + 1;
+    await appt.save();
+    // Nov 2026: she's waiting and the dietitian hasn't started yet: tell
+    // the dietitian now (once), instead of only after 5 minutes late.
+    if (firstTap && appt.status === "confirmed") {
+      try {
+        const [client, dietitian] = await Promise.all([
+          User.findByPk(appt.userId, { attributes: ["firstName", "lastName"] }),
+          User.findByPk(appt.dietitionId, { attributes: ["deviceToken"] }),
+        ]);
+        if (dietitian && dietitian.deviceToken) {
+          const nm = (client && `${client.firstName || ""} ${client.lastName || ""}`.trim()) || "Your client";
+          const st = await bookingPolicy.sessionStart(appt).catch(() => null);
+          await sendNotification(
+            [dietitian.deviceToken],
+            {
+              title: `${nm} is waiting for you`,
+              body:
+                (st ? `Her ${bookingPolicy.formatPkTime(st)} session. ` : "") +
+                'Tap "Start session & join call" when you\'re ready.',
+            },
+            { type: "clientWaiting", appointmentId: String(appt.id) }
+          );
+        }
+      } catch (e) {
+        console.error("[recordJoinTap] waiting push:", e.message);
+      }
     }
     return res.json(ApiResponse("1", "Saved", { clientJoinTapAt: appt.clientJoinTapAt }));
   } catch (err) {
     console.error("[recordJoinTap]", err.message);
+    return res.status(500).json(ApiResponse("0", "Could not save", {}));
+  }
+};
+
+// POST /appointment/:id/app-return { at? }: she came back to Fit Her after
+// tapping Join (Nov 2026). That is our "she left the call" time. `at` is
+// when the app saw her return (sent later if the app was closed); it must
+// be after her last Join tap and not in the future. Latest return wins.
+// Ignored when she was back within a minute (the call hadn't started).
+exports.recordAppReturn = async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    const appt = await db.Appointment.findByPk(req.params.id);
+    if (!appt || Number(appt.userId) !== Number(userId)) {
+      return res.status(404).json(ApiResponse("0", "Appointment not found", {}));
+    }
+    const lastTap = appt.clientLastJoinTapAt || appt.clientJoinTapAt;
+    if (!lastTap) return res.json(ApiResponse("1", "Not saved (no Join tap)", {}));
+    const now = Date.now();
+    let at = req.body && req.body.at ? new Date(req.body.at) : new Date(now);
+    if (isNaN(at.getTime()) || at.getTime() > now + 60000) at = new Date(now);
+    const sinceTap = (at.getTime() - new Date(lastTap).getTime()) / 60000;
+    if (sinceTap < 1) return res.json(ApiResponse("1", "Not saved (too soon)", {}));
+    const slot = await bookingPolicy.slotFor(appt);
+    const end = bookingPolicy.sessionEnd(appt, slot);
+    if (end && at.getTime() > end.getTime() + 60 * 60000) {
+      return res.json(ApiResponse("1", "Not saved (long after the session)", {}));
+    }
+    if (!appt.clientReturnedAt || at > new Date(appt.clientReturnedAt)) {
+      appt.clientReturnedAt = at;
+      await appt.save();
+    }
+    return res.json(ApiResponse("1", "Saved", { clientReturnedAt: appt.clientReturnedAt }));
+  } catch (err) {
+    console.error("[recordAppReturn]", err.message);
     return res.status(500).json(ApiResponse("0", "Could not save", {}));
   }
 };
@@ -531,7 +621,14 @@ exports.confirmClientJoined = async (req, res) => {
     }
     appt.meetClientAttended = true;
     if (appt.attendanceFlag !== "tap_without_google") appt.attendanceFlag = "dietitian_confirmed";
+    // Nov 2026: "about how long?" (minutes), optional.
+    const mins = parseInt(req.body && req.body.minutes, 10);
+    if (Number.isInteger(mins) && mins > 0 && mins <= 180) appt.dietitianReportedMinutes = mins;
     await appt.save();
+    // Nov 2026: now we know she was there → ask her to rate it.
+    if (appt.status === "completed") {
+      require("../../helper/consultReviewAsk").askForReview(appt.id).catch(() => {});
+    }
     return res.json(ApiResponse("1", "Thanks, noted", { appointment: appt.toJSON() }));
   } catch (err) {
     console.error("[confirmClientJoined]", err.message);
