@@ -124,33 +124,12 @@ async function buildCycleAndPhase(userId) {
 }
 
 async function buildGoal(userRow, userId) {
-  // Streak: same query semantics as attendanceController.getMotivationStats.
+  // Streak (Nov 2026): same rule as Profile (helper/attendanceStats.js
+  // streakDays): her active days since sign-up (sign-up day = 1). A missed
+  // day pauses it, never resets it to 0.
   let streakDays = 0;
   try {
-    const rows = await ClassAttendance.findAll({
-      where: {
-        user_id: userId,
-        attended_at: {
-          [Op.gte]: addDays(new Date(), -29),
-        },
-      },
-      attributes: ["attended_at"],
-      group: ["attended_at"],
-      order: [["attended_at", "DESC"]],
-    });
-    const todayMid = new Date();
-    todayMid.setHours(0, 0, 0, 0);
-    let cursor = todayMid.getTime();
-    for (const r of rows) {
-      const d = new Date(r.attended_at);
-      d.setHours(0, 0, 0, 0);
-      if (d.getTime() === cursor) {
-        streakDays += 1;
-        cursor -= 24 * 60 * 60 * 1000;
-      } else if (d.getTime() < cursor) {
-        break;
-      }
-    }
+    streakDays = await require("../../helper/attendanceStats").streakDays(userId);
   } catch (err) {
     console.error("DashboardController.buildGoal streak:", err);
   }

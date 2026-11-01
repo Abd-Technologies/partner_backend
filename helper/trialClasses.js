@@ -217,6 +217,9 @@ async function listTrialClasses(userId) {
     const slotLevel = String(s.level || '').toLowerCase();
     classes.push({
       slotId: s.id,
+      // Today's status (Upcoming / In Progress / Completed / Cancelled), so the
+      // app's trial "next class" skips a class that ended or was cancelled.
+      status: s.status || null,
       type: type || 'Live class',
       level: s.level || null,
       description: s.description || null,
