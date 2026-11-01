@@ -873,6 +873,20 @@ db.sequelize.sync().then(async () => {
   } catch (e) {
     console.error("❌ Appointment join taps FAILED:", e.message);
   }
+  // Trainer's reason when she cancels a class (Nov 2026, class diary).
+  try {
+    await require("./migrations/20261106120000-class-session-cancel-reason").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Class cancel reason checked");
+  } catch (e) {
+    console.error("❌ Class cancel reason FAILED:", e.message);
+  }
+  // "Why did you leave early?" answer (Nov 2026, class feedback).
+  try {
+    await require("./migrations/20261107120000-class-feedback-early-reason").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Class feedback early reason checked");
+  } catch (e) {
+    console.error("❌ Class feedback early reason FAILED:", e.message);
+  }
   // Cycle learning column (Oct 2026, helper/cycleLearning.js).
   try {
     await require("./migrations/20261103120000-cycle-learning").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
