@@ -130,13 +130,16 @@ async function recentClasses(userId) {
   return [...groups.values()];
 }
 
-/** Class over for her: time is up, the trainer ended it today, or she
- *  left (in the app) during the last 15 minutes. */
+/** Class over for her: time is up, the trainer ended it today, she left
+ *  (in the app) after half the class, or left in the last 15 minutes. */
 function isOver(c, now) {
   if (now.isAfter(c.endUtc)) return true;
   if (now.isBefore(c.startUtc)) return false;
   const today = moment.tz(PKT).format("YYYY-MM-DD");
   if (c.classDate === today && c.slot.status === "Completed") return true;
+  // Nov 2026: she left (in the app) after at least half the class: it's
+  // over for her, ask right away instead of waiting for the class to end.
+  if (!c.open && c.seconds >= ratingNeedSeconds(c)) return true;
   return !c.open && now.isAfter(c.endUtc.clone().subtract(EARLY_ASK_MINUTES, "minutes"));
 }
 
