@@ -373,6 +373,19 @@ exports.getMyCurrentAppointment = async (req, res) => {
                   attributes: ["id"],
                 }))
               : false,
+          // Nov 2026: her plan was already sent after this session, so the
+          // "your plan will be delivered in 2 working days" steps are done.
+          planDelivered:
+            appt.status === "completed"
+              ? !!(await db.DietPlan.findOne({
+                  where: {
+                    userId: appt.userId,
+                    dietitianId: { [Op.ne]: null },
+                    activatedAt: { [Op.gte]: appt.status_changed_at || appt.date },
+                  },
+                  attributes: ["id"],
+                }))
+              : false,
           // Nov 2026: ask her to rate it in a pop-up: over, not rated, and
           // we know she was in it (Join tap / dietitian said yes / Google).
           askReview:

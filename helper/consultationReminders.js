@@ -68,7 +68,7 @@ async function sendConsultationReminders() {
         User.findByPk(appt.userId, { attributes: ["firstName", "lastName", "deviceToken", "timeZone"] }),
         User.findByPk(appt.dietitionId, { attributes: ["firstName", "lastName", "deviceToken"] }),
       ]);
-      const dietFirst = (dietitian && dietitian.firstName) || "your dietitian";
+      const dietFirst = require("./names").dietitianShortName(dietitian);
       const clientName =
         `${(client && client.firstName) || ""} ${(client && client.lastName) || ""}`.trim() ||
         "Your client";

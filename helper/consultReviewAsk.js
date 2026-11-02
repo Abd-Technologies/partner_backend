@@ -40,10 +40,10 @@ async function askForReview(appointmentId) {
     if (!(await claim(`consultreview:${appt.id}`))) return false;
     const [client, dietitian] = await Promise.all([
       User.findByPk(appt.userId, { attributes: ["deviceToken"] }),
-      User.findByPk(appt.dietitionId, { attributes: ["firstName"] }),
+      User.findByPk(appt.dietitionId, { attributes: ["firstName", "lastName"] }),
     ]);
     if (!client || !client.deviceToken) return false;
-    const dn = (dietitian && dietitian.firstName) || "your dietitian";
+    const dn = require("./names").dietitianShortName(dietitian);
     await sendNotification(
       [client.deviceToken],
       {
@@ -84,10 +84,10 @@ async function remindReviews() {
       if (!(await claim(`consultreview2:${appt.id}`))) continue;
       const [client, dietitian] = await Promise.all([
         User.findByPk(appt.userId, { attributes: ["deviceToken"] }),
-        User.findByPk(appt.dietitionId, { attributes: ["firstName"] }),
+        User.findByPk(appt.dietitionId, { attributes: ["firstName", "lastName"] }),
       ]);
       if (!client || !client.deviceToken) continue;
-      const dn = (dietitian && dietitian.firstName) || "your dietitian";
+      const dn = require("./names").dietitianShortName(dietitian);
       await sendNotification(
         [client.deviceToken],
         {
