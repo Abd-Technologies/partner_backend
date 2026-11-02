@@ -895,6 +895,13 @@ db.sequelize.sync().then(async () => {
   } catch (e) {
     console.error("❌ Appointment attendance times FAILED:", e.message);
   }
+  // Dietitian's note to the client on her plan (Nov 2026).
+  try {
+    await require("./migrations/20261109120000-diet-plan-client-note").up(db.sequelize.getQueryInterface(), db.Sequelize, db);
+    console.log("✅ Diet plan client note checked");
+  } catch (e) {
+    console.error("❌ Diet plan client note FAILED:", e.message);
+  }
   // Trainer's reason when she cancels a class (Nov 2026, class diary).
   try {
     await require("./migrations/20261106120000-class-session-cancel-reason").up(db.sequelize.getQueryInterface(), db.Sequelize);

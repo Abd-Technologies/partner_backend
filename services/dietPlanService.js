@@ -470,8 +470,168 @@ async function updateMealInPlan(mealId, fields, callerUserId) {
     // Re-fetch fresh rows (with the new totalCalories) to return.
     const freshMeal = await DietPlanMeal.findByPk(mealId, { transaction: t });
     const freshDay = await DietPlanDay.findByPk(day.id, { transaction: t });
-    return { meal: freshMeal, day: freshDay };
+    return { meal: freshMeal, day: freshDay, plan };
+  }).then((r) => {
+    notifyPlanChanged(r.plan);
+    return { meal: r.meal, day: r.day };
   });
+}
+
+// ── Nov 2026: more ways for the dietitian to shape the AI plan ─────────
+
+async function recomputeDayTotal(dayId, t) {
+  const sum = await DietPlanMeal.sum('calories', { where: { dietPlanDayId: dayId }, transaction: t });
+  await DietPlanDay.update({ totalCalories: sum || 0 }, { where: { id: dayId }, transaction: t });
+}
+
+function cleanMealFields(fields, { requireAll = false } = {}) {
+  const out = {};
+  const need = (k) => requireAll && (fields[k] === undefined || fields[k] === null || fields[k] === '');
+  if (need('foodName') || need('calories') || need('time') || need('mealType')) {
+    throw new Error('Food, calories, time and meal type are all needed');
+  }
+  if (fields.foodName !== undefined) {
+    if (typeof fields.foodName !== 'string' || !fields.foodName.trim()) throw new Error('Food is needed');
+    out.foodName = fields.foodName.trim().slice(0, 500);
+  }
+  if (fields.calories !== undefined) {
+    const c = Number(fields.calories);
+    if (!Number.isInteger(c) || c <= 0) throw new Error('Calories must be a whole number above 0');
+    out.calories = c;
+  }
+  if (fields.time !== undefined) {
+    if (typeof fields.time !== 'string' || !TIME_PATTERN.test(fields.time)) throw new Error('Time must look like 08:30');
+    out.time = fields.time;
+  }
+  if (fields.notes !== undefined) out.notes = fields.notes == null ? null : String(fields.notes);
+  if (fields.mealType !== undefined) {
+    if (!VALID_MEAL_TYPES.includes(fields.mealType)) {
+      throw new Error(`Meal type must be one of: ${VALID_MEAL_TYPES.join(', ')}`);
+    }
+    out.mealType = fields.mealType;
+  }
+  return out;
+}
+
+async function planForDay(dayId, t) {
+  const day = await DietPlanDay.findByPk(dayId, { include: [DietPlan], transaction: t });
+  if (!day || !day.DietPlan) throw new Error('Day not found');
+  return { day, plan: day.DietPlan };
+}
+
+/** Add a meal to one day of a draft / active plan. */
+async function addMealToDay(dayId, fields, callerUserId) {
+  const clean = cleanMealFields(fields, { requireAll: true });
+  const r = await db.sequelize.transaction(async (t) => {
+    const { day, plan } = await planForDay(dayId, t);
+    if (!EDITABLE_STATUSES.includes(plan.status)) throw new Error('Plan is closed and cannot be edited');
+    await assertCanMutate(plan, callerUserId);
+    const clash = await DietPlanMeal.findOne({ where: { dietPlanDayId: day.id, mealType: clean.mealType }, transaction: t });
+    if (clash) throw new Error(`This day already has a ${clean.mealType.replace('_', ' ')}. Edit that one instead.`);
+    const meal = await DietPlanMeal.create({ ...clean, dietPlanDayId: day.id }, { transaction: t });
+    await recomputeDayTotal(day.id, t);
+    return { meal, plan };
+  });
+  notifyPlanChanged(r.plan);
+  return { meal: r.meal };
+}
+
+/** Remove a meal. */
+async function deleteMealFromPlan(mealId, callerUserId) {
+  const plan = await db.sequelize.transaction(async (t) => {
+    const meal = await DietPlanMeal.findByPk(mealId, { transaction: t });
+    if (!meal) throw new Error('Meal not found');
+    const { plan } = await planForDay(meal.dietPlanDayId, t);
+    if (!EDITABLE_STATUSES.includes(plan.status)) throw new Error('Plan is closed and cannot be edited');
+    await assertCanMutate(plan, callerUserId);
+    const left = await DietPlanMeal.count({ where: { dietPlanDayId: meal.dietPlanDayId }, transaction: t });
+    if (left <= 1) throw new Error("A day needs at least one meal. Edit this meal instead of removing it.");
+    const dayId = meal.dietPlanDayId;
+    await meal.destroy({ transaction: t });
+    await recomputeDayTotal(dayId, t);
+    return plan;
+  });
+  notifyPlanChanged(plan);
+  return { ok: true };
+}
+
+/**
+ * Copy one meal to other days of the same plan (same meal type: replaces
+ * that day's meal of that type, or adds it). { allDays } or { dayIds }.
+ */
+async function copyMealToDays(mealId, { dayIds, allDays } = {}, callerUserId) {
+  const r = await db.sequelize.transaction(async (t) => {
+    const meal = await DietPlanMeal.findByPk(mealId, { transaction: t });
+    if (!meal) throw new Error('Meal not found');
+    const { plan } = await planForDay(meal.dietPlanDayId, t);
+    if (!EDITABLE_STATUSES.includes(plan.status)) throw new Error('Plan is closed and cannot be edited');
+    await assertCanMutate(plan, callerUserId);
+    const days = await DietPlanDay.findAll({ where: { dietPlanId: plan.id }, transaction: t });
+    const wanted = allDays
+      ? days.filter((d) => d.id !== meal.dietPlanDayId)
+      : days.filter((d) => Array.isArray(dayIds) && dayIds.map(Number).includes(d.id) && d.id !== meal.dietPlanDayId);
+    if (!wanted.length) throw new Error('Pick at least one other day');
+    const copy = { foodName: meal.foodName, calories: meal.calories, time: meal.time, notes: meal.notes, mealType: meal.mealType };
+    for (const d of wanted) {
+      const same = await DietPlanMeal.findOne({ where: { dietPlanDayId: d.id, mealType: meal.mealType }, transaction: t });
+      if (same) await same.update(copy, { transaction: t });
+      else await DietPlanMeal.create({ ...copy, dietPlanDayId: d.id }, { transaction: t });
+      await recomputeDayTotal(d.id, t);
+    }
+    return { count: wanted.length, plan };
+  });
+  notifyPlanChanged(r.plan);
+  return { copiedTo: r.count };
+}
+
+/** The dietitian's note to the client (shown at the top of her plan). */
+async function updatePlanNote(planId, clientNote, callerUserId) {
+  const plan = await DietPlan.findByPk(planId);
+  if (!plan) throw new Error('Diet plan not found');
+  if (!EDITABLE_STATUSES.includes(plan.status)) throw new Error('Plan is closed and cannot be edited');
+  await assertCanMutate(plan, callerUserId);
+  const note = clientNote == null ? null : String(clientNote).trim().slice(0, 2000) || null;
+  await plan.update({ clientNote: note });
+  notifyPlanChanged(plan);
+  return { clientNote: note };
+}
+
+/**
+ * Her LIVE plan changed: tell her, once per 2 hours (a dietitian making
+ * several edits in a row sends one push, not one per meal). Drafts: no push.
+ */
+let _redis = null;
+function redisClient() {
+  if (_redis) return _redis;
+  try {
+    const Redis = require('ioredis');
+    _redis = new Redis();
+    _redis.on('error', () => {});
+  } catch (_) {
+    _redis = null;
+  }
+  return _redis;
+}
+function notifyPlanChanged(plan) {
+  (async () => {
+    try {
+      if (!plan || plan.status !== 'active') return;
+      const r = redisClient();
+      if (r) {
+        const ok = await r.set(`planupd:${plan.id}`, '1', 'EX', 2 * 3600, 'NX');
+        if (ok !== 'OK') return;
+      }
+      const user = await User.findByPk(plan.userId, { attributes: ['deviceToken'] });
+      if (!user || !user.deviceToken) return;
+      await sendNotification(
+        [user.deviceToken],
+        { title: 'Your dietitian updated your plan', body: 'Open the Diet tab to see the changes to your meals.' },
+        { type: 'dietPlanUpdated' }
+      );
+    } catch (e) {
+      console.error('[dietPlan] change push:', e.message);
+    }
+  })();
 }
 
 /**
@@ -521,6 +681,10 @@ async function cancelDietPlan(dietPlanId, callerUserId, reason) {
 }
 
 module.exports = {
+  addMealToDay,
+  deleteMealFromPlan,
+  copyMealToDays,
+  updatePlanNote,
   saveDraftDietPlan,
   activateDietPlan,
   getActiveDietPlanForUser,

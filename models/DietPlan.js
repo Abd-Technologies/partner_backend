@@ -59,6 +59,11 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.TEXT,
         allowNull: true,
       },
+      // Nov 2026: the dietitian's note to the client (top of her plan).
+      clientNote: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
       activatedAt: {
         type: DataTypes.DATE,
         allowNull: true,

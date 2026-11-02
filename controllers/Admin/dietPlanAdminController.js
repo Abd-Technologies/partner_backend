@@ -464,7 +464,29 @@ async function resetBookingPassHandler(req, res) {
   }
 }
 
+// ── Nov 2026: add / remove / copy a meal, note for the client ────────
+const planEdits = require('../../services/dietPlanService');
+const wrap = (fn) => async (req, res) => {
+  try {
+    const data = await fn(req);
+    return res.json(ApiResponse('1', 'Saved', data));
+  } catch (err) {
+    console.error('[dietPlan edit]', err.message);
+    return res.json(ApiResponse('0', err.message, {}));
+  }
+};
+const addMealHandler = wrap((req) => planEdits.addMealToDay(parseInt(req.params.dayId, 10), req.body || {}, req.user.id));
+const deleteMealHandler = wrap((req) => planEdits.deleteMealFromPlan(parseInt(req.params.mealId, 10), req.user.id));
+const copyMealHandler = wrap((req) =>
+  planEdits.copyMealToDays(parseInt(req.params.mealId, 10), { dayIds: req.body && req.body.dayIds, allDays: !!(req.body && req.body.allDays) }, req.user.id)
+);
+const noteHandler = wrap((req) => planEdits.updatePlanNote(parseInt(req.params.id, 10), req.body && req.body.clientNote, req.user.id));
+
 module.exports = {
+  addMealHandler,
+  deleteMealHandler,
+  copyMealHandler,
+  noteHandler,
   generateDietPlanDraft,
   activateDietPlanHandler,
   getDietPlanByIdAdmin,
