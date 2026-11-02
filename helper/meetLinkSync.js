@@ -17,7 +17,9 @@ async function syncUpcomingLinks(slotIds, link) {
     {
       where: {
         timeSlotId: { [Op.in]: ids },
-        status: { [Op.in]: ["pending", "confirmed"] },
+        // Nov 2026: a session that is live right now too (she fixed a
+        // broken link mid-call: the client must get the new one).
+        status: { [Op.in]: ["pending", "confirmed", "In Progress"] },
         date: { [Op.gte]: new Date(Date.now() - 2 * 86400000) },
       },
     }
