@@ -44,6 +44,12 @@ router.patch(
   asyncMiddleware(ctrl.updateMealHandler)
 );
 
+// Nov 2026: shape the AI plan (add / remove / copy a meal, note to her).
+router.post('/day/:dayId/meal', validateAdmin, asyncMiddleware(ctrl.addMealHandler));
+router.delete('/meal/:mealId', validateAdmin, asyncMiddleware(ctrl.deleteMealHandler));
+router.post('/meal/:mealId/copy', validateAdmin, asyncMiddleware(ctrl.copyMealHandler));
+router.patch('/:id/note', validateAdmin, asyncMiddleware(ctrl.noteHandler));
+
 router.post('/generate', validateAdmin, asyncMiddleware(ctrl.generateDietPlanDraft));
 router.post('/:id/activate', validateAdmin, asyncMiddleware(ctrl.activateDietPlanHandler));
 router.post('/:id/cancel', validateAdmin, asyncMiddleware(ctrl.cancelPlanHandler));

@@ -28,6 +28,8 @@ const { selfOrStaff, requireAdmin } = require("../../middlewares/roleGuards");
 const consultRatings = require("../../controllers/FrontSite/consultRatingsController");
 router.get("/ratings/me", validateToken, consultRatings.myRatings);
 router.get("/ratings/all", requireAdmin, consultRatings.allRatings);
+// Admin: one day of consultations (Nov 2026).
+router.get("/admin/day", requireAdmin, require("../../controllers/FrontSite/consultDayController").day);
 
  router.get("/status", validateToken, appointmentController.getAllAppointmentStatus);
 
