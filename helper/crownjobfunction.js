@@ -145,7 +145,7 @@ async function sendUpcomingSlotNotificationsPerUser() {
   // Free-trial users are skipped here: helper/trialClasses.js sends them
   // their own "starts soon" + "it's live" reminders.
   try {
-    const { getClassUsers, isHerClass } = require('./classAudience');
+    const { getClassUsers, isHerClass, isChosenClass } = require('./classAudience');
     const { parseEndAsUtc } = require('./timeFormats');
     const nowUtc = moment.utc();
     const todayPkt = moment.tz('Asia/Karachi');
@@ -196,6 +196,8 @@ async function sendUpcomingSlotNotificationsPerUser() {
             type: 'classPrep',
             upcomingSlot: JSON.stringify(plain),
             trainer: JSON.stringify(trainer ?? {}),
+            // Nov 2026: her own pick / "Remind me": goes out in quiet hours.
+            ...(isChosenClass(user, slot) ? { chosen: '1' } : {}),
           },
           deviceTokens: [user.deviceToken],
         });

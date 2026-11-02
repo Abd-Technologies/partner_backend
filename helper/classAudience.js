@@ -134,10 +134,28 @@ function isHerClass(user, slot) {
   return false;
 }
 
+/**
+ * Nov 2026: did she CHOOSE this class herself (picked it, picked its time,
+ * or tapped "Remind me" for it today)? Then its reminder goes out even in
+ * her quiet hours. "All classes" (no picks) is not a choice of this class.
+ */
+function isChosenClass(user, slot) {
+  const picks = user.picks || [];
+  const times = user.times || [];
+  const id = typeof slot === "object" ? slot.id : slot;
+  if ((user.once || []).includes(Number(id))) return true;
+  if (picks.includes(Number(id))) return true;
+  if (typeof slot === "object" && times.length) {
+    const local = slotLocalTime(slot, user.timeZone);
+    if (local && times.includes(local)) return true;
+  }
+  return false;
+}
+
 /** Class users for whom this slot is one of "her classes". */
 async function getClassAudience(slot, classUsers) {
   const all = classUsers || (await getClassUsers());
   return all.filter((u) => isHerClass(u, slot));
 }
 
-module.exports = { getClassUsers, getClassAudience, isHerClass, slotLocalTime, normTime, onceToday };
+module.exports = { getClassUsers, getClassAudience, isHerClass, isChosenClass, slotLocalTime, normTime, onceToday };
