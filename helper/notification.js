@@ -359,7 +359,11 @@ async function sendNotification(deviceTokens, notification, data = {}) {
     // Quiet hours apply to EVERY push type (not only the ones with a
     // preference switch). Held, not dropped — except pushes that would be
     // out of date by morning (DROP_IF_QUIET).
-    if (!IGNORE_QUIET.has(type)) try {
+    // Nov 2026: data.chosen = '1' marks a reminder for something she chose
+    // herself (a class she picked / tapped "Remind me" for): sent even in
+    // her quiet hours.
+    const chosen = String((data && data.chosen) || '') === '1';
+    if (!IGNORE_QUIET.has(type) && !chosen) try {
       const q = await filterQuietHours(eligibleTokens);
       eligibleTokens = q.now;
       if (q.held.length) {

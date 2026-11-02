@@ -393,6 +393,8 @@ async function sendTrialClassReminders() {
         type: 'trialClassReminder',
         slotId: String(upcoming.s.id),
         kind,
+        // Nov 2026: her own pick / "Remind me": goes out in quiet hours.
+        ...(require('./classAudience').isChosenClass(her, upcoming.s) ? { chosen: '1' } : {}),
       });
       sent++;
     } catch (e) {
