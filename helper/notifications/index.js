@@ -14,6 +14,7 @@
  *   09:15 PKT daily  — trialJourneyChurned     (completed 3 days, never bought)
  *   10:00 PKT daily  — lifecycle               (paid plan mid/post-churn)
  *   19:00 PKT Sunday — weeklyCheckin           (active users, log weekly metrics)
+ *   20:00 HER time   — lunaDaily               (paid + trial: log today's insights)
  *
  * Shared utilities:
  * getPhase, hasEverSent, recentlySent, buildBody, getPaidPlanUserIds, getTrialJourneyUserIds
@@ -30,6 +31,7 @@ const { sendTrialJourneyNudges }        = require('./trialJourney');
 const { sendTrialJourneyChurnedNudges } = require('./trialJourneyChurned');
 const { sendLifecycleNudges }           = require('./lifecycle');
 const { sendWeeklyCheckinReminders }    = require('./weeklyCheckin');
+const { sendLunaDailyNudges }           = require('./lunaDaily');
 
 module.exports = {
   sendDownloadedUserNudges,
@@ -38,4 +40,5 @@ module.exports = {
   sendTrialJourneyChurnedNudges,
   sendLifecycleNudges,
   sendWeeklyCheckinReminders,
+  sendLunaDailyNudges,
 };
