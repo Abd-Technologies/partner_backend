@@ -74,6 +74,7 @@ const {
   sendTrialJourneyChurnedNudges,
   sendLifecycleNudges,
   sendWeeklyCheckinReminders,
+  sendLunaDailyNudges,
 } = require('./helper/notifications');
 
 
@@ -711,6 +712,20 @@ cron.schedule(
       await sendTrialJourneyNudges();
     } catch (error) {
       console.error('[cron] trial-journey nudge failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Luna daily (Nov 2026): 8 PM in each woman's own time zone, paid + live
+// trial, "log today's insights". Every 5 min; once a day per woman.
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      await sendLunaDailyNudges();
+    } catch (error) {
+      console.error('[cron] luna daily failed:', error);
     }
   },
   { timezone: CRON_TZ }

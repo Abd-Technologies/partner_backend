@@ -154,6 +154,8 @@ const HELD_KEY = "quiet:held";
 const IGNORE_QUIET = new Set([
   'trialPlanReady',
   'consultationReminder', 'appointmentStarted', 'appointmentDietitianLate', 'appointmentNoShowCanceled',
+  // Nov 2026: Luna's 8 PM check-in is essential (her own evening, daily).
+  'lunaDaily',
 ]);
 
 const DROP_IF_QUIET = new Set([
