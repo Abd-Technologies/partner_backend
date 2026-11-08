@@ -51,6 +51,11 @@ async function expireFreeTrial(userId, userPlanId, planId) {
     where: { id: userPlanId },
   });
 
+  // Tell the CRM her trial ended without a purchase (Nov 2026).
+  await require('./crmEvents').emit('trial_ended', userId,
+    { user_plan_id: userPlanId, plan_id: planId || null, outcome: 'expired' },
+    { key: `trial-end-${userPlanId}` });
+
   // Destroy FreeTrailUsers preferences + slot records (may not exist if admin
   // assigned the plan via assignFreePlan without calling createFreeTrialUser).
   const freeTrail = await FreeTrailUsers.findOne({

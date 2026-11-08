@@ -772,6 +772,173 @@ exports.list = wrap(async (req) => {
   return { key, ...LISTS[key], people: await buildList(key) };
 });
 
+// ── User journey: one row per woman, day by day ──────────────────────
+//   GET /admin/growth/journey?from=2026-11-01&to=2026-11-09&stage=all&q=&page=1
+// Every woman who signed up in the range (Pakistan days, max 93 days), how
+// far she got (sign-up form, trial, classes) and whether she paid, with the
+// stage where she stopped. Admin only, read-only.
+const JOURNEY_STAGES = {
+  no_form: "Sign-up form not finished",
+  no_trial: "Form done, no trial",
+  trial_no_class: "Trial, no class yet",
+  trial_active: "Trial in progress",
+  trial_ended: "Trial ended, not paid",
+  paid: "Paid",
+};
+const ONBOARDING_STEPS = 6;
+const PROFILE_FLAG_SINCE = new Date("2026-10-22"); // onboardingDoneAt exists from here
+
+exports.journey = wrap(async (req) => {
+  const { User, TrialJourney, PlanPurchase, UserPlan, Plan } = M();
+  const today = moment().tz(PKT);
+  let to = req.query.to ? moment.tz(String(req.query.to), "YYYY-MM-DD", true, PKT) : today.clone();
+  let from = req.query.from ? moment.tz(String(req.query.from), "YYYY-MM-DD", true, PKT) : to.clone().subtract(13, "days");
+  if (!from.isValid() || !to.isValid()) throw new Error("Use dates like 2026-11-09");
+  if (from.isAfter(to)) [from, to] = [to, from];
+  if (to.diff(from, "days") > 92) from = to.clone().subtract(92, "days");
+  const fromD = from.clone().startOf("day").toDate();
+  const toD = to.clone().endOf("day").toDate();
+
+  const users = await User.findAll({
+    where: { userType: "User", createdAt: { [Op.between]: [fromD, toD] } },
+    attributes: ["id", "firstName", "lastName", "email", "phone", "createdAt", "signupMethod", "signupSource",
+      "onboardingStep", "onboardingDoneAt", "mainGoal", "age", "usedFreeTrial", "lastLoginAt"],
+    order: [["createdAt", "DESC"]],
+  });
+  const ids = users.map((u) => u.id);
+  const none = ids.length === 0;
+
+  const journeys = none ? [] : await TrialJourney.findAll({
+    where: { userId: { [Op.in]: ids } },
+    attributes: ["userId", "startedAt", "createdAt", "day1AttendedAt", "day2AttendedAt", "day3AttendedAt"],
+  });
+  const jBy = new Map(journeys.map((j) => [j.userId, j]));
+
+  // Payments: the purchase ledger first; paid UserPlans as a fallback for the
+  // older paths that didn't write the ledger. Trial plans are never "paid".
+  const pay = new Map(); // userId -> { first, total, count }
+  const addPay = (userId, at, plan, amount, method) => {
+    const cur = pay.get(userId) || { first: null, total: 0, count: 0 };
+    cur.count += 1;
+    cur.total += Number(amount) || 0;
+    if (!cur.first || new Date(at) < new Date(cur.first.at)) cur.first = { at, plan, amount: Number(amount) || null, method };
+    pay.set(userId, cur);
+  };
+  if (!none) {
+    try {
+      const pp = await PlanPurchase.findAll({ where: { userId: { [Op.in]: ids } }, attributes: ["userId", "purchasedAt", "planTitle", "amount", "method"] });
+      for (const p of pp) addPay(p.userId, p.purchasedAt, p.planTitle, p.amount, p.method);
+    } catch (_) {}
+    const trialPlans = await Plan.findAll({ where: { title: "Free Trial" }, attributes: ["id"] });
+    const freeIds = trialPlans.map((p) => p.id);
+    const ups = await UserPlan.findAll({
+      where: {
+        userId: { [Op.in]: ids.filter((id) => !pay.has(id)) },
+        [Op.or]: [{ isTrial: null }, { isTrial: false }],
+        ...(freeIds.length ? { PlanId: { [Op.notIn]: freeIds } } : {}),
+      },
+      attributes: ["userId", "buyingDate", "createdAt", "price", "PlanId"],
+    });
+    const titles = new Map();
+    if (ups.length) {
+      const ps = await Plan.findAll({ where: { id: { [Op.in]: [...new Set(ups.map((u) => u.PlanId).filter(Boolean))] } }, attributes: ["id", "title"] });
+      for (const p of ps) titles.set(p.id, p.title);
+    }
+    for (const up of ups) {
+      if (!(Number(up.price) > 0)) continue;
+      addPay(up.userId, up.buyingDate || up.createdAt, titles.get(up.PlanId) || null, up.price, "plan");
+    }
+  }
+
+  const trialDays = require("../../helper/trialDaysSetting").adminTrialDays();
+  const now = Date.now();
+  const all = users.map((u) => {
+    const j = jBy.get(u.id);
+    const formDone = !!u.onboardingDoneAt || (!!u.mainGoal && !!u.age && new Date(u.createdAt) < PROFILE_FLAG_SINCE);
+    const trialStart = j ? (j.startedAt || j.createdAt) : null;
+    const trialStarted = !!j || !!u.usedFreeTrial;
+    const trialEnds = trialStart ? new Date(new Date(trialStart).getTime() + trialDays * DAY) : null;
+    const trialEnded = trialEnds ? now > trialEnds.getTime() : (trialStarted && !j); // legacy trial, date unknown
+    const classes = j ? [j.day1AttendedAt, j.day2AttendedAt, j.day3AttendedAt].filter(Boolean).length : 0;
+    const p = pay.get(u.id);
+    const stage = p ? "paid"
+      : !formDone ? "no_form"
+      : !trialStarted ? "no_trial"
+      : trialEnded ? "trial_ended"
+      : classes === 0 ? "trial_no_class"
+      : "trial_active";
+    return {
+      id: u.id,
+      name: [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || null,
+      email: u.email || null,
+      phone: u.phone || null,
+      signedUpAt: u.createdAt,
+      signupDay: moment(u.createdAt).tz(PKT).format("YYYY-MM-DD"),
+      method: u.signupMethod || null,
+      source: u.signupSource || null,
+      form: { done: formDone, step: formDone ? ONBOARDING_STEPS : Math.min(u.onboardingStep || 0, ONBOARDING_STEPS), total: ONBOARDING_STEPS, doneAt: u.onboardingDoneAt || null },
+      trial: {
+        started: trialStarted,
+        startedAt: trialStart,
+        endsAt: trialEnds,
+        ended: trialEnded,
+        day: trialStart && !trialEnded ? Math.min(trialDays, Math.floor((now - new Date(trialStart).getTime()) / DAY) + 1) : null,
+        days: trialDays,
+        classes,
+      },
+      paid: p ? { yes: true, firstAt: p.first.at, plan: p.first.plan, amount: p.first.amount, method: p.first.method, total: p.total, count: p.count } : { yes: false },
+      lastLoginAt: u.lastLoginAt || null,
+      stage,
+      stageLabel: JOURNEY_STAGES[stage],
+    };
+  });
+
+  // Counts for the whole range (before the stage / search filter).
+  const counts = { all: all.length };
+  for (const k of Object.keys(JOURNEY_STAGES)) counts[k] = 0;
+  for (const r of all) counts[r.stage] += 1;
+  const funnel = {
+    signedUp: all.length,
+    formDone: all.filter((r) => r.form.done).length,
+    trialStarted: all.filter((r) => r.trial.started).length,
+    attendedClass: all.filter((r) => r.trial.classes > 0).length,
+    paid: all.filter((r) => r.paid.yes).length,
+  };
+  const dayMap = new Map();
+  for (const r of all) {
+    const d = dayMap.get(r.signupDay) || { day: r.signupDay, signedUp: 0, formDone: 0, trialStarted: 0, paid: 0 };
+    d.signedUp += 1;
+    if (r.form.done) d.formDone += 1;
+    if (r.trial.started) d.trialStarted += 1;
+    if (r.paid.yes) d.paid += 1;
+    dayMap.set(r.signupDay, d);
+  }
+  const byDay = [...dayMap.values()].sort((a, b) => b.day.localeCompare(a.day));
+
+  const stage = JOURNEY_STAGES[req.query.stage] ? req.query.stage : "all";
+  const q = String(req.query.q || "").trim().toLowerCase();
+  let rows = stage === "all" ? all : all.filter((r) => r.stage === stage);
+  if (q) rows = rows.filter((r) => `${r.name || ""} ${r.email || ""} ${r.phone || ""}`.toLowerCase().includes(q));
+  const PAGE = 100;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const page = Math.min(Math.max(parseInt(req.query.page, 10) || 1, 1), pages);
+
+  return {
+    from: from.format("YYYY-MM-DD"),
+    to: to.format("YYYY-MM-DD"),
+    trialDays,
+    stages: JOURNEY_STAGES,
+    counts,
+    funnel,
+    byDay,
+    stage,
+    total: rows.length,
+    page,
+    pages,
+    rows: rows.slice((page - 1) * PAGE, page * PAGE),
+  };
+});
+
 // ── day-by-day numbers for the dashboard charts ──────────────────────
 //   GET /admin/growth/trends?days=30
 // One value per Pakistan day (oldest first) + revenue per week by kind.

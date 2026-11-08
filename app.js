@@ -112,6 +112,29 @@ const popupEligibility = require("./helper/popupEligibility");
 // host's local time (UTC on most VPS deployments) which is +5h off.
 const CRON_TZ = "Asia/Karachi";
 
+// CRM sync (Nov 2026): signups, payments, trials and plan changes are saved
+// to the CrmOutbox table by model hooks (helper/crmEvents.js), then sent to
+// the CRM every 30 s with retries (helper/crmOutboxSender.js). Off unless
+// CRM_WEBHOOK_URL + APP_WEBHOOK_SECRET are set. CRM_EVENTS_ENABLED=false
+// turns it off without removing anything.
+require("./helper/crmEvents").registerHooks(db);
+cron.schedule(
+  "*/30 * * * * *",
+  () => require("./helper/crmOutboxSender").runOnce(),
+  { timezone: CRON_TZ }
+);
+cron.schedule(
+  "40 4 * * *",
+  () => require("./helper/crmOutboxSender").cleanup(),
+  { timezone: CRON_TZ }
+);
+// Women who stopped before the end of the sign-up questions (20 h – 7 days).
+cron.schedule(
+  "15 * * * *",
+  () => require("./helper/crmEvents").reportStalledSignups(),
+  { timezone: CRON_TZ }
+);
+
 // Dietitian emergency day (Oct 2026): every minute, apply requests whose
 // 2-minute undo window has passed. See helper/emergencyDay.js.
 cron.schedule(

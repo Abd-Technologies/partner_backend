@@ -2449,6 +2449,7 @@ async function assignFreePlan(req, res) {
         user.usedFreeTrial = 1;
         await userPlan.save();
         await user.save();
+        require("../../helper/crmEvents").trialPlanStarted(userPlan);
         const response = ApiResponse(
           "1",
           `Free plan activated`,
@@ -2628,6 +2629,7 @@ async function addUser(req, res) {
         userPlan.price = pl.price;
         userPlan.status = 1;
         await userPlan.save();
+        require("../../helper/crmEvents").planStarted(userPlan, "admin_added_user");
       }
     }
 
@@ -4099,6 +4101,7 @@ async function payment_success_admin(req, res) {
     userPlan.dietitianId =
       planData.dietitianId != null ? planData.dietitianId : dietitianId;
     await userPlan.save();
+    require("../../helper/crmEvents").planStarted(userPlan, "admin_payment", { amount: amount || null });
 
     // Generate response (never send the password hash / push token)
     const safeUser = await User.findOne({ where: { id: userId }, attributes: SAFE_USER });

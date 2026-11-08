@@ -46,6 +46,7 @@ async function stripe_payment(req, res) {
     userPlan.status = true;
     userPlan.subscriptionId = paymentIntent.id;
     userPlan.save().then(async dat => {
+      require("../../helper/crmEvents").planStarted(dat, "stripe");
 
 
       const wallet = new Wallet();

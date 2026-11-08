@@ -601,6 +601,7 @@ router.get("/growth/revenue", validateToken, growth.revenue);
 router.get("/growth/retention", validateToken, growth.retention);
 router.get("/growth/list/:key", validateToken, growth.list);
 router.get("/growth/trends", validateToken, growth.trends);
+router.get("/growth/journey", validateToken, growth.journey); // user journey, day by day
 // Symptom check results for staff (dietitian client profile / admin).
 router.get("/healthScreening/:userId", validateAdmin, require("../../helper/dietitianScope").ownClientOnly("userId"), asyncMiddleware(require("../../controllers/FrontSite/userController").staff_health_screening));
 router.get('/trainerClass/:slotId', validateToken, asyncMiddleware(classLinkController.trainerClass));
