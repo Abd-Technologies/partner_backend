@@ -349,6 +349,13 @@ async function redeemLink(req, res) {
       approvalReason = "Slip check failed — admin review";
     }
 
+    // CRM link (Nov 2026): this link was made for a CRM lead, so the woman
+    // paying through it IS that lead. Saved before the purchase, so the
+    // payment event already carries crm_lead_id.
+    if (link.crmLeadId && (userId || link.UserId)) {
+      await require('../../helper/crmLink').linkUserToLead(userId || link.UserId, link.crmLeadId, 'magic_link');
+    }
+
     // Create the PlanImage row (status reflects auto vs manual review)
     const planImage = await PlanImage.create({
       PlanId:             link.PlanId,

@@ -853,6 +853,14 @@ app.use("/public", privateFiles.publicGuard, express.static("./public"));
 
 // Initializing Server along with creating all the tables that exist in the models folder
 db.sequelize.sync().then(async () => {
+  // CRM link backfill (idempotent): women who paid through a rep's magic
+  // link before CrmLinks existed. helper/crmLink.js.
+  try {
+    const n = await require("./helper/crmLink").backfillFromMagicLinks();
+    if (n) console.log(`✅ CRM links backfilled: ${n}`);
+  } catch (e) {
+    console.error("❌ CRM link backfill FAILED:", e.message);
+  }
   // Must run first: the Slot model is paranoid (needs Slots.deletedAt).
   try {
     await require("./migrations/20261026120000-slot-delete-announcement-text").up(db.sequelize.getQueryInterface(), db.Sequelize);

@@ -224,6 +224,17 @@ exports.startTrial = async (req, res) => {
       });
     }
 
+    // CRM link (Nov 2026): a rep's trial link made for a CRM lead links her
+    // to that lead, before the trial is created (so trial_started carries it).
+    if (tokenRow) {
+      try {
+        const forLead = await require("../../models").TrialTokenCrmLead.findOne({ where: { trialTokenId: tokenRow.id }, transaction });
+        if (forLead) await require("../../helper/crmLink").linkUserToLead(userId, forLead.crmLeadId, "trial_link", { transaction });
+      } catch (e) {
+        console.error("[trial] crm link skipped:", e.message);
+      }
+    }
+
     if (!journey) {
       // Cross-system check. This is the current, live-in-app trial system,
       // but the legacy FreeTrailUsers/assignFreePlan system is still fully

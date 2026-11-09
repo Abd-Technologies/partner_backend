@@ -70,8 +70,6 @@ function identity(user) {
     signup_source: u.signupSource || null,
     signup_campaign: u.signupCampaign || null,
   };
-  // Step 3 of the roadmap adds Users.crmLeadId; sent automatically once it exists.
-  if (u.crmLeadId !== undefined) out.crm_lead_id = u.crmLeadId || null;
   return out;
 }
 
@@ -101,6 +99,10 @@ async function emit(eventType, userOrId, data = {}, opts = {}) {
     const occurredAt = opts.occurredAt ? new Date(opts.occurredAt) : new Date();
     const eventId = opts.key ? `${eventType}:${opts.key}` : `${eventType}:${crypto.randomUUID()}`;
     const payload = { ...identity(user), ...data, occurred_at: occurredAt.toISOString() };
+    // Which CRM lead she is, once a rep's payment / trial link linked her
+    // (helper/crmLink.js). The CRM matches on this first.
+    const crmLeadId = await require("./crmLink").crmLeadIdFor(Number(payload.app_user_id), { transaction });
+    if (crmLeadId) payload.crm_lead_id = crmLeadId;
 
     await CrmOutbox.create(
       {

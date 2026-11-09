@@ -113,6 +113,15 @@ async function createTrialToken(req, res) {
       status:          'issued',
     });
 
+    // CRM lead this link is for (sent by the CRM's "Send trial link").
+    const crmLeadId = parseInt(req.body.crmLeadId, 10);
+    if (crmLeadId) {
+      try {
+        await require('../../models').TrialTokenCrmLead.create({ trialTokenId: row.id, crmLeadId });
+      } catch (e) {
+        console.error('[trial-token] crm lead not saved:', e.message);
+      }
+    }
     console.log(`[trial-token] created token=${token} by rep=${repId} for phone=${phone}`);
 
     return res.json(ApiResponse('1', 'Trial link created', serializeToken(row)));
