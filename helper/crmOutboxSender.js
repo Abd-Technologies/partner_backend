@@ -39,9 +39,19 @@ function sign(secret, ts, raw) {
 async function deliver(row) {
   const url = process.env.CRM_WEBHOOK_URL;
   const secret = process.env.APP_WEBHOOK_SECRET;
+  // MariaDB stores JSON columns as text, so the payload can come back as a
+  // string. Always send the object, never a JSON string inside JSON.
+  let payload = row.payload;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch (_) {
+      return { ok: false, permanent: true, status: null, error: "payload is not valid JSON" };
+    }
+  }
   const raw = JSON.stringify({
     event_type: row.eventType,
-    payload: row.payload,
+    payload,
     external_event_id: row.eventId,
   });
   const ts = Math.floor(Date.now() / 1000);
