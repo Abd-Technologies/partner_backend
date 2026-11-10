@@ -594,6 +594,8 @@ const growth = require("../../controllers/Admin/growthController");
   router.get("/payment-checks", validateToken, asyncMiddleware(pcc.list));
   router.post("/payment-checks/:id", validateToken, asyncMiddleware(pcc.decide));
 }
+// Engagement (Nov 2026): insights, period, weekly progress, community. Cached 10 min.
+router.get("/engagement", validateToken, require("../../controllers/Admin/engagementController").engagement);
 router.get("/growth/overview", validateToken, growth.overview);
 router.get("/growth/signup", validateToken, growth.signup);
 router.get("/growth/workout", validateToken, growth.workout);
