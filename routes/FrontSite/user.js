@@ -27,6 +27,9 @@ router.post('/forget_password',otpLimit,asyncMiddleware(userController.forget_pa
 // (Oct 2026 audit: /verify_email_check and /verify_email removed — their
 // handlers don't exist, so every call crashed; the app doesn't use them.)
 router.post('/change_password',validateToken,asyncMiddleware(userController.change_password));
+// Fiza chat (Nov 2026): member <-> Fiza / coach, stored in the CRM.
+router.get('/fiza-chat', validateToken, asyncMiddleware(require('../../controllers/FrontSite/fizaChatController').history));
+router.post('/fiza-chat', validateToken, asyncMiddleware(require('../../controllers/FrontSite/fizaChatController').send));
 router.post('/resend_otp',otpLimit,asyncMiddleware(userController.resend_otp));
 router.post('/verify_otp',otpLimit,asyncMiddleware(userController.verify_otp));
 router.post('/change_password_after_otp',otpLimit,asyncMiddleware(userController.change_password_after_otp));

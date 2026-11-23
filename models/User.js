@@ -297,6 +297,11 @@ User.hasMany(User, {
 
   };
 
+  // CRM events (Nov 2026): sign-up, finished sign-up questions, name /
+  // email / phone change → the Fit Her CRM. helper/crmHooks.js.
+  User.addHook("afterCreate", (u, o) => { try { require("../helper/crmHooks").userCreated(u, o); } catch (_) {} });
+  User.addHook("afterUpdate", (u, o) => { try { require("../helper/crmHooks").userUpdated(u, o); } catch (_) {} });
+
   return User;
 };
 

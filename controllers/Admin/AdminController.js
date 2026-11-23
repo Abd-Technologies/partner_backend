@@ -2600,6 +2600,10 @@ async function addUser(req, res) {
     if (status) user.onboardingDoneAt = new Date();
     // Growth analytics: how and where she signed up (add-on, no flow change).
     Object.assign(user, require("../../helper/growthTracking").signupInfo(req.body));
+    // CRM (Nov 2026): she signed up from a rep's link — pass its signed ref
+    // to the CRM so she lands on her WhatsApp lead (helper/crmHooks.js).
+    // Not saved; the CRM checks the signature.
+    if (req.body && typeof req.body.crmRef === "string") user._crmRef = req.body.crmRef.slice(0, 120);
     await user.save();
     require("../../helper/growthTracking").activeDay(user.id);
     // Initialize UserPlan variables

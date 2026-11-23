@@ -63,24 +63,18 @@ function publicUrl(filename) {
   return `${base}/public/issueUploads/${filename}`;
 }
 
-// Signed webhook to the CRM. Best effort: never throws.
+// Ticket events to the CRM (Nov 2026): through the CRM outbox
+// (helper/crmEvents.js), so a CRM outage no longer loses a ticket, and the
+// event id goes where the CRM reads it (it ignores repeats). Returns true
+// once the event is safely queued. Never throws.
 async function sendToCrm(eventType, payload) {
-  const crmUrl = process.env.CRM_WEBHOOK_URL;
-  const secret = process.env.APP_WEBHOOK_SECRET;
-  if (!crmUrl || !secret) {
-    console.error("[supportTickets] CRM_WEBHOOK_URL or APP_WEBHOOK_SECRET not configured");
-    return false;
-  }
   try {
-    const raw = JSON.stringify({ event_type: eventType, payload });
-    const signature = "sha256=" + crypto.createHmac("sha256", secret).update(raw).digest("hex");
-    await axios.post(crmUrl, raw, {
-      headers: { "Content-Type": "application/json", "x-webhook-signature": signature },
-      timeout: 15000,
-    });
-    return true;
+    const { external_event_id, ...rest } = payload || {};
+    const id = external_event_id || `${eventType}_${rest.ticket_id || "x"}_${Date.now()}`;
+    const row = await require("./crmEvents").emit(eventType, rest, id);
+    return !!row;
   } catch (err) {
-    console.error("[supportTickets] CRM send failed:", err.response?.data || err.message);
+    console.error("[supportTickets] CRM queue failed:", err.message);
     return false;
   }
 }

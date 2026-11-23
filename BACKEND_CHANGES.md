@@ -37,6 +37,71 @@ something changes; git (push / pull) carries this file to the VM.
 
 ## History
 
+### 2026-11-11 · "Ask Fiza" chat for members (web now, mobile app can use the same API)
+- Files: new `controllers/FrontSite/fizaChatController.js`, `helper/crmApi.js`;
+  `routes/FrontSite/user.js` (backup `*.bak_fizaweb`)
+- What: `GET /users/fiza-chat` (her chat) and `POST /users/fiza-chat { message?, handoff? }`.
+  The app backend signs and forwards to the CRM (`/api/app/fiza/*`), which stores the chat
+  (channel 'app') and decides who answers: Fiza (same AI as WhatsApp), or her coach when she
+  asks / Fiza flags health or emotions (rep task "chat_handoff", due 15 min). Coach replies
+  from the CRM come back into this chat (+ push).
+- Why: members who come to the app/web get answers there, without moving to WhatsApp.
+- VM steps: pull + restart. `.env`: `CRM_BASE_URL` (or it uses the CRM_WEBHOOK_URL origin).
+  Deploy with the CRM and the web app (`/app/chat`).
+- Commit: (not yet)   Status: on laptop
+
+### 2026-11-11 · One woman = one lead: signup ref, customers list, CRM payment links
+- Files: `controllers/Admin/AdminController.js` (addUser), `helper/crmHooks.js`,
+  `helper/crmSignature.js`, `routes/internal.js` (backups: `*.bak_signupref`, `*.bak_paylink`)
+- What: `addUser` accepts `crmRef` (signed by the CRM, from a coach's app signup link;
+  not stored) and `user_signup` carries it as `crm_ref`, so she lands on her WhatsApp
+  lead whatever phone she types. New signed CRM routes: `GET /internal/crm/customers`
+  (duplicate / missing-lead report), `GET /internal/crm/plans`, `POST /internal/crm/magic-links`
+  (Pay link from the CRM works for every rep login; credited to the rep's partner id when known).
+- Why: matching by typed phone made duplicates and wrong merges; Pay link broke because
+  `/admin/get_plans` now needs a login.
+- Goes with: CRM migration `036_identity_rules.sql`, web app signup page (`?ref=` + "Your
+  active WhatsApp number"). Mobile app: signup link deep link not handled yet.
+- VM steps: pull + restart. Deploy with the CRM and the web app.
+- Commit: (not yet)   Status: on laptop
+
+### 2026-11-11 · CRM events: sign-ups, purchases, plan changes reach the CRM; reps work support tickets
+- Files: new `helper/crmEvents.js`, `helper/crmHooks.js`, `models/CrmOutbox.js`;
+  changed `models/User.js`, `models/UserPlan.js`, `helper/purchaseLedger.js`,
+  `helper/supportTickets.js`, `app.js`, `controllers/Admin/supportTicketAdminController.js`,
+  `routes/Admin/supportTickets.js` (backups: `*.bak_crmevents`)
+- What: the CRM now hears about user_signup, onboarding_completed, profile_updated
+  (name / email / phone), subscription_started (every approved purchase, with kind
+  new/renewal/upgrade/switch), payment_failed (slip rejected), subscription_frozen /
+  unfrozen / expired (or cancelled; not sent if she still has another paid plan),
+  trial_started / trial_ended. Sent from model hooks + the purchase ledger, so every
+  path is covered, and only after the DB transaction commits. Each event is saved in
+  the new `CrmOutbox` table, sent timestamp-signed with a unique event id, and
+  retried by a minute cron if the CRM is down (400 = bad event, not retried).
+  Support tickets now go through the same queue (were fire-and-forget).
+  Sales reps (Customer_Support_Representative) can list, open and reply to support
+  tickets via `/admin/support-tickets` (used by the CRM dashboard); only Admin
+  changes status / resolves, and a rep opening a ticket doesn't clear Admin's unread.
+- Why: only support tickets reached the CRM; reps couldn't see sign-ups, payments,
+  freezes or expiries, and couldn't help with tickets.
+- VM steps: pull + restart (`CrmOutbox` table is created by `sequelize.sync()` on
+  start). `.env` needs `CRM_WEBHOOK_URL=https://crm.backend.thefither.com/api/webhooks/app/event`
+  and `APP_WEBHOOK_SECRET` = the CRM's `APP_WEBHOOK_SECRET`. No CRM_WEBHOOK_URL = off.
+  Deploy together with the CRM (needs its token + read-API changes of 2026-11-11).
+- Fixes after the local end-to-end test (same day):
+  - `CrmOutbox` is now set up by `migrations/20261111120000-crm-outbox.js` on start
+    (no indexes in the model: sync() adding them crashed the server). An OLD unused
+    CrmOutbox layout (required unique `eventId`) is renamed to `CrmOutbox_legacy`
+    (rows kept) and a clean table created — it silently blocked every event after
+    the first. Check the VM for the same leftover table; the migration handles it.
+  - Queued events are stored 1 s in the past (MySQL drops milliseconds and could
+    round up, delaying the first send to the next minute).
+  - New signed CRM routes in `routes/internal.js` (helper `crmSignature.js`):
+    `GET /internal/crm/support-tickets`, `GET …/:id`, `POST …/:id/reply`
+    (the CRM tickets panel, works for every rep login) and `GET /internal/crm/outbox`
+    (queue status + last rows, for checking delivery).
+- Commit: (not yet)   Status: on laptop
+
 ### 2026-11-01 · Trial class list sends each class's status
 - Files: `helper/trialClasses.js` (backup: `*.bak_trialnext`)
 - What: each class in `/trial/classes` now has `status` (Upcoming / In Progress /
@@ -133,3 +198,11 @@ Nothing below has been changed. Move an item into History when it's done.
    key is replaced (`node scripts/test_push.js <userId>` to test).
 6. **Dead code.** `routes/FrontSite/avalibilityRoutes.js` (unprotected PUT/DELETE)
    is not mounted; safe to delete.
+
+## Nov 12, 2026 — Luna chat in the mobile app + tickets from the chat
+- `controllers/FrontSite/appIssueController.js`: ticket creation moved into `createTicketFor(userId, {message, category, imageUrl, source})` (same behaviour for the Report-an-issue form; also used by the chat). Backup: `.bak_lunachat`.
+- `controllers/FrontSite/fizaChatController.js` (`/users/fiza-chat`):
+  - `assistant: "luna"` from the mobile app → the CRM tells the AI its name is Luna there (web stays Fiza).
+  - `ticket: true` (+ `message`, optional `category`) → opens a support ticket from the chat and adds her message + "I've opened ticket #N" to the chat.
+  - When the assistant escalates `app_bug_complex` or `complaint`, a ticket is opened automatically (category APP_ISSUE / OTHER) and confirmed in the chat.
+  - Needs the CRM's new signed `POST /api/app/fiza/note` (deploy CRM together).

@@ -5,8 +5,10 @@ const { validateAdmin } = require("../../middlewares/ValidateAdmin");
 const asyncMiddleware = require("../../middlewares/async");
 const ctrl = require("../../controllers/Admin/supportTicketAdminController");
 
-// Support tickets from "Report an issue". userType "Admin" only (checked in
-// the controller, since validateAdmin lets every staff type through).
+// Support tickets from "Report an issue". Admin: everything. Sales reps
+// (Customer_Support_Representative, from the Fit Her CRM): list, view,
+// reply — not status changes. Checked in the controller, since
+// validateAdmin lets every staff type through.
 //
 // GET  /admin/support-tickets              list (status, category, q, page)
 // GET  /admin/support-tickets/counts       counts for menu badges
