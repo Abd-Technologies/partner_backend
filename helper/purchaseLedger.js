@@ -58,6 +58,7 @@ async function decide(planImageId, status, adminId = null) {
 async function slipRejected(img, adminId) {
   try {
     if (img) await decide(img.id, "rejected", adminId);
+    if (img) require("./crmHooks").paymentRejected(img, adminId);
   } catch (e) {
     console.error("[ledger] slipRejected:", e.message);
   }
@@ -122,6 +123,8 @@ async function purchased({ planImage, userPlanId = null, approvedBy = "admin", a
       purchasedAt: new Date(),
     });
     await decide(img.id, "approved", approvedById);
+    // CRM event (Nov 2026): the sales rep sees the purchase. helper/crmHooks.js.
+    require("./crmHooks").purchased(row, img);
     require("./mixpanelServer").track(img.UserId, "Purchase", {
       insert_key: `img${img.id}`,
       plan_type: planType,

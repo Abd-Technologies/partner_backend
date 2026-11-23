@@ -12,10 +12,16 @@ const {
 } = require("../../helper/supportTickets");
 
 // validateAdmin lets every staff type through (dietitians, trainers...).
-// Support tickets are for userType "Admin" only.
+// Support tickets: Admin has full access. Sales reps
+// (Customer_Support_Representative, Nov 2026 — they work tickets from the
+// Fit Her CRM) can see every ticket and reply, but only Admin resolves.
 function isAdmin(req) {
   return !!req.user && String(req.user.userType || "").trim().toLowerCase() === "admin";
 }
+function isSalesRep(req) {
+  return !!req.user && String(req.user.userType || "").trim().toLowerCase() === "customer_support_representative";
+}
+const canSeeTickets = (req) => isAdmin(req) || isSalesRep(req);
 
 /**
  * GET /admin/support-tickets
@@ -24,7 +30,7 @@ function isAdmin(req) {
  * Open tickets come oldest first so nothing gets missed; resolved newest first.
  */
 exports.listTickets = async (req, res) => {
-  if (!isAdmin(req)) return res.json(ApiResponse("0", "Only Admin can see support tickets", {}));
+  if (!canSeeTickets(req)) return res.json(ApiResponse("0", "Only Admin and sales reps can see support tickets", {}));
 
   const status = String(req.query.status || "open");
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -105,16 +111,18 @@ async function counts() {
 
 // GET /admin/support-tickets/counts — for a badge on the admin menu.
 exports.getCounts = async (req, res) => {
-  if (!isAdmin(req)) return res.json(ApiResponse("0", "Only Admin can see support tickets", {}));
+  if (!canSeeTickets(req)) return res.json(ApiResponse("0", "Only Admin and sales reps can see support tickets", {}));
   return res.json(ApiResponse("1", "Counts", { counts: await counts() }));
 };
 
 // GET /admin/support-tickets/:id — ticket, user details, plan and full thread.
 exports.getTicket = async (req, res) => {
-  if (!isAdmin(req)) return res.json(ApiResponse("0", "Only Admin can see support tickets", {}));
+  if (!canSeeTickets(req)) return res.json(ApiResponse("0", "Only Admin and sales reps can see support tickets", {}));
   const ticket = await SupportTicket.findByPk(parseInt(req.params.id, 10));
   if (!ticket) return res.json(ApiResponse("0", "Ticket not found", {}));
-  if (ticket.adminUnread) {
+  // Only Admin opening it counts as "read": a sales rep looking must not
+  // hide a new ticket from the admin queue.
+  if (ticket.adminUnread && isAdmin(req)) {
     ticket.adminUnread = false;
     await ticket.save();
   }
@@ -129,12 +137,20 @@ exports.getTicket = async (req, res) => {
 // POST /admin/support-tickets/:id/reply  { message, status? }
 // Sends the reply to the user (push + shows in the app) and tells the CRM.
 exports.replyTicket = async (req, res) => {
-  if (!isAdmin(req)) return res.json(ApiResponse("0", "Only Admin can reply", {}));
+  if (!canSeeTickets(req)) return res.json(ApiResponse("0", "Only Admin and sales reps can reply", {}));
+  // Sales reps reply (status moves to "in review" on its own); only Admin
+  // resolves or changes the status.
+  if (!isAdmin(req) && req.body && req.body.status) {
+    return res.json(ApiResponse("0", "Only Admin can change a ticket's status", {}));
+  }
   const ticket = await SupportTicket.findByPk(parseInt(req.params.id, 10));
   if (!ticket) return res.json(ApiResponse("0", "Ticket not found", {}));
 
-  const me = await User.findByPk(req.user.id, { attributes: ["id", "firstName", "lastName"] });
-  const first = me && me.firstName ? String(me.firstName).trim() : "";
+  const me = req.user.id ? await User.findByPk(req.user.id, { attributes: ["id", "firstName", "lastName"] }) : null;
+  // From the CRM (signed /internal call): the rep's name comes with the reply.
+  const first = req.user.crmAgentName
+    ? String(req.user.crmAgentName).trim().split(/\s+/)[0]
+    : me && me.firstName ? String(me.firstName).trim() : "";
   const senderName = first ? `${first}, FitHer Support` : "FitHer Support";
 
   const out = await applyStaffReply(ticket, {
@@ -151,7 +167,7 @@ exports.replyTicket = async (req, res) => {
     app_user_id: String(ticket.userId),
     message: (req.body && req.body.message) || null,
     status: ticket.status,
-    agent_name: fullName(me),
+    agent_name: req.user.crmAgentName || fullName(me),
     external_event_id: `ticket_${ticket.id}_admin_${Date.now()}`,
   });
 

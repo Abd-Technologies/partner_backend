@@ -514,6 +514,21 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// CRM events (Nov 2026): resend queued CRM events that are due (the CRM
+// was down, or a first send failed). helper/crmEvents.js, models/CrmOutbox.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const n = await require("./helper/crmEvents").flush();
+      if (n) console.log(`[crm-events] delivered ${n}`);
+    } catch (error) {
+      console.error("Error in crm-events job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Subscription expiry: hourly sweep that flags UserPlan rows whose
 // expireDate has passed via planStatus = 'expired'. Nothing previously
 // set this server-side — the app derived "expired" itself from the
@@ -830,6 +845,14 @@ app.use("/public", privateFiles.publicGuard, express.static("./public"));
 
 // Initializing Server along with creating all the tables that exist in the models folder
 db.sequelize.sync().then(async () => {
+  // CRM outbox table + indexes (Nov 2026). Idempotent. Failing here only
+  // delays CRM events (helper/crmEvents.js keeps retrying), never the app.
+  try {
+    await require("./migrations/20261111120000-crm-outbox").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ CRM outbox table checked");
+  } catch (e) {
+    console.error("❌ CRM outbox table check FAILED — CRM events wait until fixed:", e.message);
+  }
   // Must run first: the Slot model is paranoid (needs Slots.deletedAt).
   try {
     await require("./migrations/20261026120000-slot-delete-announcement-text").up(db.sequelize.getQueryInterface(), db.Sequelize);

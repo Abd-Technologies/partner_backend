@@ -189,5 +189,10 @@ durationIdPlan: {
 
     };
 
+    // CRM events (Nov 2026): trial started, plan frozen / unfrozen,
+    // expired / cancelled → the Fit Her CRM. helper/crmHooks.js.
+    UserPlan.addHook("afterCreate", (p, o) => { try { require("../helper/crmHooks").planCreated(p, o); } catch (_) {} });
+    UserPlan.addHook("afterUpdate", (p, o) => { try { require("../helper/crmHooks").planUpdated(p, o); } catch (_) {} });
+
     return UserPlan;
 };
