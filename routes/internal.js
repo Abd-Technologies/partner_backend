@@ -81,4 +81,15 @@ router.get("/crm/outbox", verifyCrmSigned, asyncMiddleware(async (req, res) => {
   res.json(require("../helper/ApiResponse")("1", "CRM outbox", data));
 }));
 
+// Old (no-expiry) app logins, for the CRM admin page (signed).
+//   GET  /internal/crm/legacy-tokens         who still uses them, cutoff, days left
+//   POST /internal/crm/legacy-tokens/notify  push "please update the app" to them
+router.get("/crm/legacy-tokens", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  res.json(require("../helper/ApiResponse")("1", "Legacy token users", await require("../helper/legacyTokens").list()));
+}));
+router.post("/crm/legacy-tokens/notify", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  const data = await require("../helper/legacyTokens").notify();
+  res.json(require("../helper/ApiResponse")("1", `Update reminder sent to ${data.sent} user(s)`, data));
+}));
+
 module.exports = router;
