@@ -101,6 +101,9 @@ async function verifyAccess(token) {
   if (!user) throw new AuthError("NO_USER");
   const tv = payload.tv == null ? 0 : Number(payload.tv);
   if ((Number(user.tokenVersion) || 0) !== tv) throw new AuthError("REVOKED");
+  // Old no-expiry token still in use: remember who, so an admin can ask them
+  // to update the app before LEGACY_TOKEN_UNTIL (helper/legacyTokens.js).
+  if (payload.exp == null) require("./legacyTokens").note(user.id);
   return { payload, user };
 }
 

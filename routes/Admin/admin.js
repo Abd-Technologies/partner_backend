@@ -306,6 +306,16 @@ router.get("/server-time", asyncMiddleware(adminController.serverTime));
 router.post("/app-version", validateToken, asyncMiddleware(require("../../controllers/appVersionController").setAppVersion));
 router.get("/app-version/audience", validateToken, asyncMiddleware(require("../../controllers/appVersionController").appUpdateAudience));
 router.post("/app-version/notify", validateToken, asyncMiddleware(require("../../controllers/appVersionController").notifyAppUpdate));
+// Users still on an old no-expiry login token (logged out after
+// LEGACY_TOKEN_UNTIL, default 31 Dec 2026). See helper/legacyTokens.js.
+router.get("/legacy-tokens", validateToken, requireAdmin, asyncMiddleware(async (req, res) => {
+  const data = await require("../../helper/legacyTokens").list();
+  res.json(require("../../helper/ApiResponse")("1", "Legacy token users", data));
+}));
+router.post("/legacy-tokens/notify", validateToken, requireAdmin, asyncMiddleware(async (req, res) => {
+  const data = await require("../../helper/legacyTokens").notify();
+  res.json(require("../../helper/ApiResponse")("1", `Update reminder sent to ${data.sent} user(s)`, data));
+}));
 router.post(
   "/updateLink",
   validateToken,
