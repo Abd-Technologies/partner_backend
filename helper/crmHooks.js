@@ -205,4 +205,39 @@ async function paymentRejected(img, adminId) {
   }
 }
 
-module.exports = { userCreated, userUpdated, planCreated, planUpdated, purchased, paymentRejected };
+// ── She used the app today (once a day per woman) ─────────────
+// Called on every signed-in app request (helper/authToken.js verifyAccess),
+// so it must be cheap and never throw. Sends "user_login" to the CRM at most
+// once per woman per Pakistan day: an in-memory note stops repeats in this
+// process, and the outbox key user-<id>-active-<day> stops repeats across
+// processes. The CRM records her as active and, if it has never heard of her
+// (an app user from before the CRM), creates her lead.
+const seenToday = new Map(); // userId -> "YYYY-MM-DD" (PKT)
+const pktDay = () => new Date(Date.now() + 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+function dailyActive(user) {
+  try {
+    if (!user || !isCustomer(user)) return;
+    const day = pktDay();
+    const key = String(user.id);
+    if (seenToday.get(key) === day) return;
+    seenToday.set(key, day);
+    if (seenToday.size > 50000) for (const [k, d] of seenToday) if (d !== day) seenToday.delete(k);
+    setImmediate(async () => {
+      try {
+        const { User } = require("../models");
+        const u = await User.findOne({
+          where: { id: user.id },
+          attributes: ["id", "email", "phone", "firstName", "lastName", "timeZone", "userType"],
+          raw: true,
+        });
+        if (!u) return;
+        await crm().emit("user_login", { ...who(u), timezone: u.timeZone || null, active_day: day }, `user-${u.id}-active-${day}`);
+      } catch (e) {
+        console.warn("[crmHooks] dailyActive:", e.message);
+      }
+    });
+  } catch (_) { /* never break a request over this */ }
+}
+
+module.exports = { userCreated, userUpdated, planCreated, planUpdated, purchased, paymentRejected, dailyActive };

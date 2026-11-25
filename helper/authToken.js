@@ -104,6 +104,8 @@ async function verifyAccess(token) {
   // Old no-expiry token still in use: remember who, so an admin can ask them
   // to update the app before LEGACY_TOKEN_UNTIL (helper/legacyTokens.js).
   if (payload.exp == null) require("./legacyTokens").note(user.id);
+  // She's using the app: tell the CRM once a day (helper/crmHooks.js).
+  if (clientOf(payload) === "app") require("./crmHooks").dailyActive(user);
   return { payload, user };
 }
 
