@@ -68,6 +68,13 @@ router.get("/crm/customers", verifyCrmSigned, asyncMiddleware(async (req, res) =
   }));
 }));
 
+// GET /internal/crm/subscriptions?limit=&offset= — every customer's current
+// plan state (signed), for the CRM's nightly sync. helper/subscriptionState.js
+router.get("/crm/subscriptions", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  const data = await require("../helper/subscriptionState").page({ limit: req.query.limit, offset: req.query.offset });
+  res.json(require("../helper/ApiResponse")("1", "Subscriptions", data));
+}));
+
 // GET /internal/crm/outbox?limit=20 — CRM event queue status (signed).
 router.get("/crm/outbox", verifyCrmSigned, asyncMiddleware(async (req, res) => {
   const data = await require("../helper/crmEvents").recent(parseInt(req.query.limit, 10) || 20);
