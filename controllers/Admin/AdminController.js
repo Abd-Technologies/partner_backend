@@ -3903,6 +3903,12 @@ async function getGuest(req, res) {
 async function payment(req, res) {
   const { planId, amount } = req.body;
   let planData = await Plan.findOne({ where: { id: planId } });
+  // The charge must be one of this plan's own prices, never a number the
+  // client chose (this used to charge whatever `amount` was sent).
+  if (!planData) return res.json(ApiResponse("0", "Plan not found", {}));
+  const planPrices = await Price.findAll({ where: { planId } });
+  const matchedPrice = planPrices.find((p) => Number(p.priceAmount) === Number(amount));
+  if (!matchedPrice) return res.json(ApiResponse("0", "That price doesn't match this plan", {}));
   // return res.json(planData);
   try {
     const session = await stripe.checkout.sessions.create({
@@ -3914,7 +3920,7 @@ async function payment(req, res) {
             product_data: {
               name: planData.title,
             },
-            unit_amount: parseInt(amount) * 100,
+            unit_amount: Math.round(Number(matchedPrice.priceAmount) * 100),
           },
           quantity: 1,
         },
@@ -4119,7 +4125,16 @@ async function payment_success_admin(req, res) {
 
 async function addImage(req, res) {
   try {
-    const { planId, userId, durationId, price } = req.body;
+    const { planId, durationId, price } = req.body;
+    // A member files a payment slip for HER OWN account. Only staff may file
+    // one for someone else — the body's userId used to be trusted from anyone.
+    const roles = require("../../helper/roles");
+    const caller = req.user && req.user.id
+      ? await User.findByPk(req.user.id, { attributes: ["id", "userType"] })
+      : null;
+    const userId = caller && roles.isStaff(caller) && req.body.userId
+      ? req.body.userId
+      : (req.user && req.user.id);
     const uploadedImage = req.file;
 
     // Validate required fields

@@ -781,7 +781,31 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
-app.use(cors());
+// CORS (Nov 2026): when CORS_ORIGINS is set (comma-separated, e.g.
+// "https://thefither.com,https://analytics.thefither.com"), browsers may call
+// this API only from those sites. The mobile app and server-to-server calls
+// send no Origin header and are not affected. Unset = any site (old behaviour).
+const CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
+  .split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean);
+if (!CORS_ORIGINS.length) {
+  console.warn("[security] CORS_ORIGINS not set: any website can call this API from a browser");
+}
+app.use(cors(CORS_ORIGINS.length
+  ? { origin: (origin, cb) => cb(null, !origin || CORS_ORIGINS.includes(origin)) }
+  : {}));
+
+// Basic security headers, without adding a dependency.
+app.disable("x-powered-by");
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  if (req.secure || req.headers["x-forwarded-proto"] === "https") {
+    res.setHeader("Strict-Transport-Security", "max-age=15552000");
+  }
+  next();
+});
+
 app.use(express.json());
 
 //for form data and multipart data
