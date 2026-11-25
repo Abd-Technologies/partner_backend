@@ -1,16 +1,18 @@
 const express = require("express");
 const router = express.Router();
 const ctrl = require("../controllers/FrontSite/appNotifyController");
+const { verifyCrmInternal } = require("../helper/crmSignature");
 
-// Server-to-server endpoints (CRM → app backend). Auth is via the shared
-// x-internal-secret header inside each controller, NOT a user token.
+// Server-to-server endpoints (CRM → app backend), NOT user tokens. All are
+// HMAC-signed by the CRM (helper/crmSignature.js). The two below also accept
+// the old x-internal-secret header until ALLOW_LEGACY_INTERNAL_SECRET=false.
 
 // POST /internal/app-notify — push a message to a user's device (e.g. issue resolved)
-router.post("/app-notify", ctrl.appNotify);
+router.post("/app-notify", verifyCrmInternal, ctrl.appNotify);
 
 // POST /internal/support-ticket-update — CRM replies to / resolves a support ticket
 const supportCrm = require("../controllers/FrontSite/supportCrmController");
-router.post("/support-ticket-update", supportCrm.supportTicketUpdate);
+router.post("/support-ticket-update", verifyCrmInternal, supportCrm.supportTicketUpdate);
 
 // Support tickets for the CRM's sales reps (Nov 2026). HMAC-signed by the
 // CRM (helper/crmSignature.js); acts as a sales rep: list, view, reply.
@@ -33,16 +35,37 @@ router.post("/crm/magic-links", verifyCrmSigned, asyncMiddleware(require("../con
 
 // GET /internal/crm/customers — every customer account (id, phone, email,
 // signed-up date), for the CRM's duplicate / missing-lead report (signed).
+//
+// Optional ?limit=&offset= (Nov 2026). Both default to "everything", so every
+// existing caller is unaffected. The CRM's one-time backfill walks the list in
+// pages rather than asking for the whole table in a single response.
 router.get("/crm/customers", verifyCrmSigned, asyncMiddleware(async (req, res) => {
   const { User } = require("../models");
   const { Op } = require("sequelize");
-  const rows = await User.findAll({
+
+  const rawLimit = parseInt(req.query.limit, 10);
+  const rawOffset = parseInt(req.query.offset, 10);
+  const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 2000) : null;
+  const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+
+  const query = {
     where: { userType: { [Op.in]: ["User", "user"] } },
     attributes: ["id", "phone", "email", "firstName", "lastName", "createdAt"],
     order: [["id", "ASC"]],
     raw: true,
-  });
-  res.json(require("../helper/ApiResponse")("1", "Customers", { count: rows.length, customers: rows }));
+  };
+  if (limit !== null) {
+    query.limit = limit;
+    query.offset = offset;
+  }
+
+  const rows = await User.findAll(query);
+  res.json(require("../helper/ApiResponse")("1", "Customers", {
+    count: rows.length,
+    offset,
+    limit: limit,
+    customers: rows,
+  }));
 }));
 
 // GET /internal/crm/outbox?limit=20 — CRM event queue status (signed).
