@@ -16,6 +16,7 @@ const { Op } = require("sequelize");
 const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
 
 const normEmail = (e) => String(e || "").trim().toLowerCase();
+const starting = new Set(); // slip ids being started right now (this process)
 
 async function claimFor(user) {
   const tail = last10(user && user.phone);
@@ -24,36 +25,60 @@ async function claimFor(user) {
   const { MagicPaymentLink, PlanImage } = require("../models");
   const links = await MagicPaymentLink.findAll({
     where: {
-      UserId: null,
       status: "redeemed",
       redeemedPlanImageId: { [Op.ne]: null },
-      [Op.or]: [{ phone: { [Op.ne]: null } }, { email: { [Op.ne]: null } }],
+      [Op.or]: [
+        // Not claimed yet: hers if the request's phone OR email matches.
+        { UserId: null, [Op.or]: [{ phone: { [Op.ne]: null } }, { email: { [Op.ne]: null } }] },
+        // Already hers but the plan may not have started (recovery).
+        { UserId: user.id },
+      ],
     },
     order: [["redeemedAt", "ASC"]],
   });
-  // Hers if the payment request's phone OR email matches the account.
   const isHers = (l) =>
+    Number(l.UserId) === Number(user.id) ||
     (tail.length === 10 && last10(l.phone) === tail) ||
     (email.includes("@") && normEmail(l.email) === email);
   let claimed = 0;
   let started = 0;
   for (const link of links.filter(isHers)) {
-    const img = await PlanImage.findOne({ where: { id: link.redeemedPlanImageId, UserId: null } });
+    const img = await PlanImage.findOne({
+      where: { id: link.redeemedPlanImageId, [Op.or]: [{ UserId: null }, { UserId: user.id }] },
+    });
     if (!img) continue;
-    // Claim it (once): another process may be doing the same right now.
-    const [n] = await PlanImage.update({ UserId: user.id }, { where: { id: img.id, UserId: null } });
-    if (!n) continue;
-    claimed++;
-    link.UserId = user.id;
-    await link.save();
-    img.UserId = user.id;
+    if (!img.UserId) {
+      // Claim it (once): another process may be doing the same right now.
+      const [n] = await PlanImage.update({ UserId: user.id }, { where: { id: img.id, UserId: null } });
+      if (!n) continue;
+      claimed++;
+      img.UserId = user.id;
+    }
+    if (!link.UserId) { link.UserId = user.id; await link.save(); }
+
     const d = img.ocrData && typeof img.ocrData === "object" ? img.ocrData : {};
-    if (img.status === true && d.waitingForSignup === true) {
-      const { applyPlanApproval } = require("./applyPlanApproval");
-      const r = await applyPlanApproval(img, { approvalSource: d.approvedByAdmin ? "admin" : "auto" });
-      if (r.ok) started++;
-      else console.error(`[paymentClaims] slip ${img.id} for user ${user.id}: ${r.error}`);
-    } else if (img.status === true) {
+    if (img.status === true && d.waitingForSignup === true && !d.planStartedAt) {
+      // One start per slip: starting twice would EXTEND her plan twice.
+      if (starting.has(img.id)) continue;
+      starting.add(img.id);
+      try {
+        const fresh = await PlanImage.findByPk(img.id);
+        const fd = fresh && fresh.ocrData && typeof fresh.ocrData === "object" ? fresh.ocrData : {};
+        if (!fresh || fd.planStartedAt || fd.waitingForSignup !== true) continue;
+        const { applyPlanApproval } = require("./applyPlanApproval");
+        const r = await applyPlanApproval(fresh, { approvalSource: fd.approvedByAdmin ? "admin" : "auto" });
+        if (r.ok) {
+          started++;
+          fresh.ocrData = { ...fd, waitingForSignup: false, planStartedAt: new Date().toISOString() };
+          fresh.changed("ocrData", true);
+          await fresh.save();
+        } else {
+          console.error(`[paymentClaims] slip ${img.id} for user ${user.id}: ${r.error}`);
+        }
+      } finally {
+        starting.delete(img.id);
+      }
+    } else if (claimed && img.status === true && !d.planStartedAt && d.waitingForSignup !== true) {
       // Still waiting for an admin: now it has a name on it.
       require("./paymentVerify").notifySlipForReview(img, "She just signed up — slip waiting for approval").catch(() => {});
     }

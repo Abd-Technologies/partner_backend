@@ -42,6 +42,45 @@ router.post("/crm/payment-slips", verifyCrmSigned, asyncMiddleware(require("../c
 // Optional ?limit=&offset= (Nov 2026). Both default to "everything", so every
 // existing caller is unaffected. The CRM's one-time backfill walks the list in
 // pages rather than asking for the whole table in a single response.
+// GET  /internal/crm/payment-claims?app_user_id=&phone=&email=  — WhatsApp
+//      payments for her: link + slip state (why didn't her plan start?).
+// POST /internal/crm/payment-claims/run { app_user_id } — attach her waiting
+//      slips and start the plan now (same code as signup); returns the result.
+router.get("/crm/payment-claims", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  const { MagicPaymentLink, PlanImage } = require("../models");
+  const { Op } = require("sequelize");
+  const tail = String(req.query.phone || "").replace(/\D/g, "").slice(-10);
+  const email = String(req.query.email || "").trim().toLowerCase();
+  const uid = parseInt(req.query.app_user_id, 10) || null;
+  const or = [];
+  if (uid) or.push({ UserId: uid });
+  if (tail.length === 10) or.push({ phone: { [Op.like]: `%${tail}` } });
+  if (email.includes("@")) or.push({ email });
+  if (!or.length) return res.json(require("../helper/ApiResponse")("0", "app_user_id, phone or email required", {}));
+  const links = await MagicPaymentLink.findAll({ where: { [Op.or]: or }, order: [["id", "DESC"]], limit: 20 });
+  const out = [];
+  for (const l of links) {
+    const img = l.redeemedPlanImageId ? await PlanImage.findByPk(l.redeemedPlanImageId) : null;
+    const d = img && img.ocrData && typeof img.ocrData === "object" ? img.ocrData : {};
+    out.push({
+      link_id: l.id, status: l.status, phone: l.phone, email: l.email || null, link_user: l.UserId, paid: l.paidAmount,
+      slip: img ? {
+        id: img.id, user: img.UserId, status: img.status, waitingForSignup: d.waitingForSignup ?? null,
+        planStartedAt: d.planStartedAt || null, autoApproved: d.autoApproved ?? null, reason: d.approvalReason || null,
+        ocrDataType: typeof img.getDataValue("ocrData"),
+      } : null,
+    });
+  }
+  res.json(require("../helper/ApiResponse")("1", "Payment claims", { links: out }));
+}));
+router.post("/crm/payment-claims/run", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  const { User } = require("../models");
+  const u = await User.findOne({ where: { id: parseInt(req.body?.app_user_id, 10) || 0 }, attributes: ["id", "phone", "email", "userType"], raw: true });
+  if (!u) return res.json(require("../helper/ApiResponse")("0", "App user not found", {}));
+  const r = await require("../helper/paymentClaims").claimFor(u);
+  res.json(require("../helper/ApiResponse")("1", r.started ? "Plan started" : r.claimed ? "Slip attached" : "Nothing to start", r));
+}));
+
 router.get("/crm/customers", verifyCrmSigned, asyncMiddleware(async (req, res) => {
   const { User } = require("../models");
   const { Op } = require("sequelize");
