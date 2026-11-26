@@ -187,6 +187,78 @@ router.get("/crm/subscriptions", verifyCrmSigned, asyncMiddleware(async (req, re
   res.json(require("../helper/ApiResponse")("1", "Subscriptions", data));
 }));
 
+// POST /internal/crm/subscription-lookup (signed, Nov 2026)
+//   { contacts: [{ key, phone?, email? }] }  (max 200)
+// For campaign imports: is this woman an app customer, and is her plan live
+// right now? Phone matches on the last 10 digits, email case-insensitively.
+// Several accounts for one woman: the one with a live paid plan wins, then
+// the newest. Same plan rules as the nightly sync (helper/subscriptionState).
+//   → { results: { <key>: null | { app_user_id, phone, email, name,
+//         status, plan_title, expires_at, matched_by } } }
+router.post("/crm/subscription-lookup", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  const R = require("../helper/ApiResponse");
+  const { Op, fn, col, where: sqWhere } = require("sequelize");
+  const { User, UserPlan, Plan } = require("../models");
+  const { stateFor, extrasFor } = require("../helper/subscriptionState");
+
+  const contacts = Array.isArray(req.body?.contacts) ? req.body.contacts.slice(0, 200) : [];
+  if (!contacts.length) return res.json(R("0", "contacts required", {}));
+  const tailOf = (p) => { const d = String(p || "").replace(/\D/g, ""); return d.length >= 10 ? d.slice(-10) : null; };
+  const emailOf = (e) => { const v = String(e || "").trim().toLowerCase(); return v.includes("@") ? v : null; };
+
+  const tails = [...new Set(contacts.map((c) => tailOf(c.phone)).filter(Boolean))];
+  const emails = [...new Set(contacts.map((c) => emailOf(c.email)).filter(Boolean))];
+  const or = [];
+  for (const t of tails) or.push({ phone: { [Op.like]: `%${t}` } });
+  if (emails.length) or.push(sqWhere(fn("LOWER", col("email")), { [Op.in]: emails }));
+  if (!or.length) return res.json(R("1", "Subscription lookup", { results: {} }));
+
+  const users = await User.findAll({
+    where: { userType: { [Op.in]: ["User", "user"] }, [Op.or]: or },
+    attributes: ["id", "phone", "email", "firstName", "lastName"],
+    raw: true,
+  });
+  const ids = users.map((u) => u.id);
+  const plans = ids.length
+    ? await UserPlan.findAll({
+        where: { userId: { [Op.in]: ids } },
+        attributes: ["id", "userId", "PlanId", "isTrial", "status", "planStatus", "expireDate", "frozenAt", "cancelledAt", "buyingDate"],
+        raw: true,
+      })
+    : [];
+  const planIds = [...new Set(plans.map((p) => p.PlanId).filter(Boolean))];
+  const titles = new Map(
+    (planIds.length ? await Plan.findAll({ where: { id: { [Op.in]: planIds } }, attributes: ["id", "title"], raw: true }) : [])
+      .map((p) => [p.id, p.title])
+  );
+  const now = new Date();
+  const extras = await extrasFor(ids, plans, now);
+  const enriched = users.map((u) => {
+    const st = stateFor(plans.filter((p) => p.userId === u.id), titles, now);
+    return {
+      app_user_id: String(u.id), phone: u.phone || null, email: u.email || null,
+      name: [u.firstName, u.lastName].filter(Boolean).join(" ") || null,
+      ...st, ...(extras.get(u.id) || {}), _tail: tailOf(u.phone), _email: emailOf(u.email),
+    };
+  });
+  const rank = (u) => (u.status === "active" || u.status === "frozen" ? 3 : u.status === "trial" ? 2 : u.status === "none" ? 0 : 1);
+  const best = (list) => list.sort((a, b) => rank(b) - rank(a) || Number(b.app_user_id) - Number(a.app_user_id))[0] || null;
+
+  const results = {};
+  for (const c of contacts) {
+    const key = String(c.key ?? "");
+    if (!key) continue;
+    const t = tailOf(c.phone), e = emailOf(c.email);
+    let hit = t ? best(enriched.filter((u) => u._tail === t)) : null;
+    let by = hit ? "phone" : null;
+    if (!hit && e) { hit = best(enriched.filter((u) => u._email === e)); by = hit ? "email" : null; }
+    if (!hit) { results[key] = null; continue; }
+    const { _tail, _email, ...out } = hit;
+    results[key] = { ...out, matched_by: by };
+  }
+  res.json(R("1", "Subscription lookup", { results }));
+}));
+
 // GET /internal/crm/outbox?limit=20 — CRM event queue status (signed).
 router.get("/crm/outbox", verifyCrmSigned, asyncMiddleware(async (req, res) => {
   const data = await require("../helper/crmEvents").recent(parseInt(req.query.limit, 10) || 20);

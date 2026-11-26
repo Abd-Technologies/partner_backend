@@ -1,0 +1,56 @@
+{
+  "_help": "Campaign offer pages: https://backend.thefither.com/offer/<key>. Edit and save; the page picks changes up within a minute, no restart. offers: package length in MONTHS -> offer price (a number, e.g. 6000) or a percent off the app price (e.g. \"25%\"). The 'was' price always comes live from the app's Prices table. heroImage: a photo URL or server path (e.g. public/images/hero.jpg) for the top of the page; leave \"\" to show the next live class instead. goals: the chips under the headline. endsAt: when the timer runs out (Pakistan time). After that the page shows normal prices. planIds: [] = every active plan that has a price for these lengths; or list plan ids to show only those. features: [icon, title, text]; icon is one of class, diet, consult, progress, cycle, community (or any emoji).",
+  "reactivation": {
+    "active": true,
+    "title": "Our best rate is back",
+    "subtitle": "Women-only live classes, your own diet plan and everything in the Fit Her app, at our lowest price this year.",
+    "endsAt": "2026-12-26T23:59:00+05:00",
+    "country": "Pakistan",
+    "planIds": [],
+    "offers": {
+      "3": 6000,
+      "6": 8000
+    },
+    "highlight": "6",
+    "goals": [
+      "PCOS",
+      "Postpartum",
+      "Weight loss",
+      "Hormonal balance"
+    ],
+    "heroImage": "",
+    "whatsapp": "923263827075",
+    "features": [
+      [
+        "class",
+        "Live women-only classes",
+        "Join real women trainers live, from home, every day."
+      ],
+      [
+        "diet",
+        "Your personalised diet plan",
+        "Built around your goal, your routine and your cycle."
+      ],
+      [
+        "consult",
+        "Diet consult with a dietitian",
+        "One-to-one onboarding call after you join."
+      ],
+      [
+        "progress",
+        "Progress tracking",
+        "Weight, inches and photos, so you can see the change."
+      ],
+      [
+        "cycle",
+        "Cycle and water tracking",
+        "Stay on top of your period and hydration in one app."
+      ],
+      [
+        "community",
+        "A community of women",
+        "Support and motivation from women on the same journey."
+      ]
+    ]
+  }
+}

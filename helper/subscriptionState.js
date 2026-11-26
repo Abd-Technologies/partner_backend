@@ -35,6 +35,65 @@ function stateFor(plans, titles, now = new Date()) {
   return { status: "none", plan_title: null, expires_at: null };
 }
 
+/**
+ * extrasFor(userIds, plans) — what makes her personal to the CRM (Nov 2026):
+ *   trial_started_at, trial_expires_at, trial_classes_attended (0–3),
+ *   frozen_at (her live paid plan is frozen since), classes_total (days she
+ *   attended a class, same 5-minute rule as trial attendance), last_class_at.
+ * → Map(userId → extras). `plans` = her UserPlan rows (already loaded).
+ */
+async function extrasFor(ids, plans, now = new Date()) {
+  const out = new Map(ids.map((id) => [id, {
+    trial_started_at: null, trial_expires_at: null, trial_classes_attended: 0,
+    frozen_at: null, classes_total: 0, last_class_at: null,
+  }]));
+  if (!ids.length) return out;
+  const { TrialJourney, sequelize } = require("../models");
+
+  // Trial dates: her journey's start, else her newest trial plan.
+  const byExpiry = (a, b) => new Date(b.expireDate || 0) - new Date(a.expireDate || 0);
+  for (const id of ids) {
+    const mine = plans.filter((p) => p.userId === id);
+    const trial = mine.filter((p) => p.isTrial).sort(byExpiry)[0];
+    const o = out.get(id);
+    if (trial) { o.trial_started_at = trial.buyingDate || null; o.trial_expires_at = trial.expireDate || null; }
+    const liveFrozen = mine.filter((p) => !p.isTrial && p.frozenAt && isLive(p, now)).sort(byExpiry)[0];
+    if (liveFrozen) o.frozen_at = liveFrozen.frozenAt;
+  }
+  try {
+    const journeys = await TrialJourney.findAll({
+      where: { userId: { [Op.in]: ids } },
+      attributes: ["userId", "startedAt", "day1AttendedAt", "day2AttendedAt", "day3AttendedAt"],
+      raw: true,
+    });
+    for (const j of journeys) {
+      const o = out.get(j.userId);
+      if (!o) continue;
+      if (j.startedAt) o.trial_started_at = j.startedAt;
+      o.trial_classes_attended = ["day1AttendedAt", "day2AttendedAt", "day3AttendedAt"].filter((k) => j[k]).length;
+    }
+  } catch (e) { console.warn("[subscriptionState] trial journeys:", e.message); }
+
+  // Classes: a day counts when her time in class that day reaches the rule.
+  try {
+    const min = require("./trialAttendance").minTrialAttendanceSeconds();
+    const [rows] = await sequelize.query(
+      `SELECT userId, COUNT(*) AS n, MAX(last_at) AS last_at FROM (
+         SELECT userId, DATE(joinedAt) AS d, SUM(durationSeconds) AS secs, MAX(COALESCE(leftAt, joinedAt)) AS last_at
+           FROM ClassPresences WHERE userId IN (:ids)
+          GROUP BY userId, DATE(joinedAt)
+         HAVING secs >= :min) x
+       GROUP BY userId`,
+      { replacements: { ids, min } }
+    );
+    for (const r of rows) {
+      const o = out.get(Number(r.userId));
+      if (o) { o.classes_total = Number(r.n) || 0; o.last_class_at = r.last_at || null; }
+    }
+  } catch (e) { console.warn("[subscriptionState] classes:", e.message); }
+  return out;
+}
+
 async function page({ limit = 500, offset = 0 } = {}) {
   const { User, UserPlan, Plan } = require("../models");
   const lim = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 2000);
@@ -47,7 +106,7 @@ async function page({ limit = 500, offset = 0 } = {}) {
   const plans = ids.length
     ? await UserPlan.findAll({
         where: { userId: { [Op.in]: ids } },
-        attributes: ["id", "userId", "PlanId", "isTrial", "status", "planStatus", "expireDate", "frozenAt", "cancelledAt"],
+        attributes: ["id", "userId", "PlanId", "isTrial", "status", "planStatus", "expireDate", "frozenAt", "cancelledAt", "buyingDate"],
         raw: true,
       })
     : [];
@@ -59,10 +118,11 @@ async function page({ limit = 500, offset = 0 } = {}) {
   const byUser = new Map(ids.map((id) => [id, []]));
   for (const p of plans) byUser.get(p.userId)?.push(p);
   const now = new Date();
+  const extras = await extrasFor(ids, plans, now);
   return {
     count: users.length, offset: off, limit: lim,
-    subscriptions: ids.map((id) => ({ app_user_id: String(id), ...stateFor(byUser.get(id), titles, now) })),
+    subscriptions: ids.map((id) => ({ app_user_id: String(id), ...stateFor(byUser.get(id), titles, now), ...extras.get(id) })),
   };
 }
 
-module.exports = { page, stateFor, isLive };
+module.exports = { page, stateFor, isLive, extrasFor };

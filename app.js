@@ -184,6 +184,8 @@ app.use('/admin/escalations', escalationAdminRoutes);
 app.use('/admin/support-tickets', supportTicketAdminRoutes);
 app.use('/admin/metrics', metricsAdminRoutes);
 app.use('/trial', trialRoutes);
+// Campaign offer pages (Nov 2026) — public, read-only. config/offers.json.
+app.use('/offer', require('./routes/FrontSite/offer'));
 app.use('/admin/diet-plan', dietPlanAdminRoutes);
 app.use('/users/diet-plan', dietPlanUserRoutes);
 
