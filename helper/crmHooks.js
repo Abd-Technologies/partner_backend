@@ -64,13 +64,18 @@ function userUpdated(user, options) {
   }
   // Name / email / phone changed: a phone added later lets the CRM match
   // her to her WhatsApp conversation.
-  const keys = ["firstName", "lastName", "email", "phone", "timeZone"].filter((k) => user.changed(k));
+  // mainGoal too (Nov 2026): the goal she picks in the app is her goal in the
+  // CRM, so a change made after sign-up (e.g. the home screen's "Set goal")
+  // must reach it.
+  const keys = ["firstName", "lastName", "email", "phone", "timeZone", "mainGoal"].filter((k) => user.changed(k));
   if (keys.length) {
     const p = { app_user_id: user.id };
     if (keys.includes("firstName") || keys.includes("lastName")) p.name = fullName(user);
     if (keys.includes("email") && user.email) p.email = user.email;
     if (keys.includes("phone") && user.phone) p.phone = user.phone;
     if (keys.includes("timeZone") && user.timeZone) p.timezone = user.timeZone;
+    // Sent only after sign-up; during it, onboarding_completed carries the goal.
+    if (keys.includes("mainGoal") && user.mainGoal && user.onboardingDoneAt) p.mainGoal = user.mainGoal;
     if (Object.keys(p).length > 1) {
       afterCommit(options, () => crm().emit("profile_updated", p, `user-${user.id}-profile-${Date.now()}`));
     }
@@ -205,4 +210,69 @@ async function paymentRejected(img, adminId) {
   }
 }
 
-module.exports = { userCreated, userUpdated, planCreated, planUpdated, purchased, paymentRejected };
+// ── She attended a class (Nov 2026) ───────────────────────────
+// Called when she leaves a class (classPresenceController). Counts once per
+// woman, per class, per Pakistan day, and only past the attendance rule
+// (TRIAL_ATTENDANCE_MIN_SECONDS, 5 min by default), the same rule the app
+// uses for trial attendance. The CRM keeps her class count, last class and,
+// during a trial, how many trial classes she has done.
+function classAttended({ userId, slotId = null, attendedAt = new Date(), seconds = 0, trialDay = null, journey = null }) {
+  setImmediate(async () => {
+    try {
+      const { User } = models();
+      const u = await User.findOne({ where: { id: userId }, attributes: ["id", "email", "phone", "firstName", "lastName", "userType"], raw: true });
+      if (!u || !isCustomer(u)) return;
+      const trialDone = journey ? ["day1AttendedAt", "day2AttendedAt", "day3AttendedAt"].filter((k) => journey[k]).length : null;
+      const day = new Date(ms(attendedAt) + 5 * 3600 * 1000).toISOString().slice(0, 10);
+      await crm().emit("class_attended", {
+        ...who(u),
+        attended_at: attendedAt,
+        minutes: Math.ceil((Number(seconds) || 0) / 60),
+        slot_id: slotId,
+        trial_day: trialDay,
+        trial_classes_attended: trialDone,
+      }, `class-${u.id}-${slotId || 0}-${day}`);
+    } catch (e) {
+      console.warn("[crmHooks] classAttended:", e.message);
+    }
+  });
+}
+
+// ── She used the app today (once a day per woman) ─────────────
+// Called on every signed-in app request (helper/authToken.js verifyAccess),
+// so it must be cheap and never throw. Sends "user_login" to the CRM at most
+// once per woman per Pakistan day: an in-memory note stops repeats in this
+// process, and the outbox key user-<id>-active-<day> stops repeats across
+// processes. The CRM records her as active and, if it has never heard of her
+// (an app user from before the CRM), creates her lead.
+const seenToday = new Map(); // userId -> "YYYY-MM-DD" (PKT)
+const pktDay = () => new Date(Date.now() + 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+function dailyActive(user) {
+  try {
+    if (!user || !isCustomer(user)) return;
+    const day = pktDay();
+    const key = String(user.id);
+    if (seenToday.get(key) === day) return;
+    seenToday.set(key, day);
+    if (seenToday.size > 50000) for (const [k, d] of seenToday) if (d !== day) seenToday.delete(k);
+    setImmediate(async () => {
+      try {
+        const { User } = require("../models");
+        const u = await User.findOne({
+          where: { id: user.id },
+          attributes: ["id", "email", "phone", "firstName", "lastName", "timeZone", "userType"],
+          raw: true,
+        });
+        if (!u) return;
+        // An existing app user who paid on WhatsApp: attach + start her plan.
+        await require("./paymentClaims").claimFor(u).catch((e) => console.warn("[crmHooks] claim:", e.message));
+        await crm().emit("user_login", { ...who(u), timezone: u.timeZone || null, active_day: day }, `user-${u.id}-active-${day}`);
+      } catch (e) {
+        console.warn("[crmHooks] dailyActive:", e.message);
+      }
+    });
+  } catch (_) { /* never break a request over this */ }
+}
+
+module.exports = { userCreated, userUpdated, planCreated, planUpdated, purchased, paymentRejected, dailyActive, classAttended };

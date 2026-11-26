@@ -240,6 +240,15 @@ exports.leave = async (req, res) => {
 
     await presence.save();
 
+    // Tell the CRM she attended (once per class per day; it ignores repeats).
+    if (totalSeconds >= minTrialAttendanceSeconds()) {
+      require("../../helper/crmHooks").classAttended({
+        userId, slotId, attendedAt: presence.leftAt, seconds: totalSeconds,
+        trialDay: trialResult.marked ? trialResult.day : null,
+        journey: trialResult.journey || null,
+      });
+    }
+
     console.log(
       `[class-analytics] USER_LEFT_CLASS: userId=${userId} slotId=${slotId} durationMinutes=${Math.round(durationSeconds / 60)} durationSeconds=${durationSeconds} leftAt="${now.toISOString()}" trialAttendanceMarked=${trialResult.marked}`
     );

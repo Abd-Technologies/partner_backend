@@ -24,7 +24,18 @@ module.exports = (sequelize, DataTypes) => {
       magicPaymentLinkId: { type: DataTypes.INTEGER, allowNull: true },
       payerName:          { type: DataTypes.STRING(120), allowNull: true },
       payerRelationship:  { type: DataTypes.STRING(40),  allowNull: true },
-      ocrData:            { type: DataTypes.JSON,        allowNull: true },
+      // MariaDB keeps JSON as text and the driver can hand it back as a string:
+      // always give callers an object (Nov 2026 — a string here hid
+      // waitingForSignup, so a WhatsApp-paid plan never started at signup).
+      ocrData:            {
+        type: DataTypes.JSON,
+        allowNull: true,
+        get() {
+          const v = this.getDataValue("ocrData");
+          if (typeof v === "string") { try { return JSON.parse(v); } catch (_) { return null; } }
+          return v;
+        },
+      },
       ocrConfidence:      { type: DataTypes.DECIMAL(4, 3), allowNull: true },
 
       // OCR-extracted details promoted to top-level columns (added in migration 20260512000002)

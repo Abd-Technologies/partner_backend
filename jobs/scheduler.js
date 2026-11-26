@@ -1,69 +1,16 @@
-require("dotenv").config();
-const { init,getIO } = require("./socket");
-const express = require("express");
-const app = express();
+// jobs/scheduler.js — every scheduled job of the app backend (Nov 2026).
+//
+// Moved here from app.js unchanged, except that `cron` is
+// helper/jobRunner.js lockedCron(): each job takes a database lock (runs in
+// one process at a time), records a heartbeat (GET /admin/health) and logs
+// failures. start({ mode }) decides which jobs run in this process:
+//   all    (default) everything — exactly as before
+//   web    only the jobs that push live socket updates (app.js, RUN_JOBS=web)
+//   worker everything else (worker.js)
+//   none   nothing
 
-const bodyParser = require("body-parser");
-const cors = require("cors");
-const http = require("http");
-const server = http.createServer(app); // Create HTTP server
-
-const io = init(server); 
-
-
-io.on("connection", (socket) => {
-  console.log(`🔌 User connected: ${socket.id}`);  
-});
-
-//const serverPort=3001;
-//server.listen(serverPort, () => {
-//  console.log("🚀 Server running on http://localhost:3000");
-//});
-
-
-
-
-const db = require("./models");
-const error = require("./middlewares/error");
-const userRoute = require("./routes/FrontSite/user");
-const AdminRoute = require("./routes/Admin/admin");
-const contriesRoute = require('./routes/FrontSite/coutrieRotes')
-const priceDurationRoutes = require('./routes/FrontSite/durationpriceroutes')
-const priceingRoutes = require('./routes/FrontSite/priceingRoutes')
-const appoinmentRoutes=require('./routes/FrontSite/appointmentRoutes')
-const dietRoutes = require('./routes/FrontSite/dietRoutes')
-const appointmentRoutes = require('./routes/FrontSite/appointmentRoutes')
-const attendanceRoutes=require('./routes/FrontSite/attendanceRoutes')
-const postsRoutes=require('./routes/FrontSite/postsRoutes.js')
-const directPayRoutes=require('./routes/FrontSite/directPay.js')
-const waterRoutes = require('./routes/FrontSite/water')
-const dashboardRoutes = require('./routes/FrontSite/dashboard')
-const progressRoutes = require('./routes/FrontSite/progress')
-const preConsultationRoutes = require('./routes/FrontSite/preConsultation')
-const preConsultationAdminRoutes = require('./routes/Admin/preConsultation')
-const popupStateRoutes = require('./routes/FrontSite/popupState')
-const mealLogRoutes = require('./routes/FrontSite/mealLog')
-const day7ReviewRoutes = require('./routes/FrontSite/day7Review')
-const day7ReviewAdminRoutes = require('./routes/Admin/day7Review')
-const progressSubmissionRoutes = require('./routes/FrontSite/progressSubmission')
-const progressSubmissionAdminRoutes = require('./routes/Admin/progressSubmission')
-const consultationBookingRoutes = require('./routes/FrontSite/consultationBooking')
-const escalationRoutes = require('./routes/FrontSite/escalation')
-const appIssueRoutes = require('./routes/FrontSite/appIssue')
-const internalRoutes = require('./routes/internal')
-const escalationAdminRoutes = require('./routes/Admin/escalation')
-const metricsAdminRoutes = require('./routes/Admin/metrics')
-const trialRoutes = require('./routes/FrontSite/trial')
-const dietPlanAdminRoutes = require('./routes/Admin/dietPlan')
-const magicLinkRoutes = require('./routes/FrontSite/magicLink')
-const dietPlanUserRoutes = require('./routes/FrontSite/dietPlan')
-
-
-
-const { Server } = require("socket.io"); // FIX: Import Server from socket.io
-
-const { sendUpcomingSlotNotificationsPerUser } = require('./helper/crownjobfunction');
-const { runFreeTrialExpiryBatch } = require('./helper/freeTrialExpiry');
+const { sendUpcomingSlotNotificationsPerUser } = require('../helper/crownjobfunction');
+const { runFreeTrialExpiryBatch } = require('../helper/freeTrialExpiry');
 const {
   sendDownloadedUserNudges,
   sendTrialChurnedNudges,
@@ -71,7 +18,8 @@ const {
   sendTrialJourneyChurnedNudges,
   sendLifecycleNudges,
   sendWeeklyCheckinReminders,
-} = require('./helper/notifications');
+  sendLunaDailyNudges,
+} = require('../helper/notifications');
 
 
 
@@ -84,22 +32,23 @@ const {
   Plan,
   DietTime,
   Diet,
-} = require("./models");
-const cron = require("node-cron");
-const sendNotification = require("./helper/notification");
+} = require("../models");
+const sendNotification = require("../helper/notification");
 const moment = require("moment");
-const { autoEndExpiredSessions, GRACE_MINUTES } = require("./helper/autoEndSessions");
-const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("./helper/autoEndExpiredAppointments");
-const { checkMeetAttendance } = require("./helper/checkMeetAttendance");
-const { autoUnfreezeExpiredPlans } = require("./helper/autoUnfreezeExpiredPlans");
-const { sendPlanDeliveryReminders } = require("./helper/planDeliveryReminders");
-const { sendTrialClassReminders } = require("./helper/trialClasses");
-const { sendTrialOfferReminders } = require("./helper/trialOffer");
-const { sendPostpartumReadyReminders, sendDueDateCheckIns } = require("./helper/lifeStage");
-const { autoExpireUserPlans } = require("./helper/autoExpireUserPlans");
-const { sendMissedSessionRecovery } = require("./helper/missedSessionRecovery");
-const popupEligibility = require("./helper/popupEligibility");
+const { autoEndExpiredSessions, GRACE_MINUTES } = require("../helper/autoEndSessions");
+const { autoEndExpiredAppointments, GRACE_MINUTES: APPT_GRACE_MINUTES } = require("../helper/autoEndExpiredAppointments");
+const { checkMeetAttendance } = require("../helper/checkMeetAttendance");
+const { autoUnfreezeExpiredPlans } = require("../helper/autoUnfreezeExpiredPlans");
+const { sendPlanDeliveryReminders } = require("../helper/planDeliveryReminders");
+const { sendTrialClassReminders } = require("../helper/trialClasses");
+const { sendTrialOfferReminders, sendTrialLastDayPushes } = require("../helper/trialOffer");
+const { sendPostpartumReadyReminders, sendDueDateCheckIns } = require("../helper/lifeStage");
+const { autoExpireUserPlans } = require("../helper/autoExpireUserPlans");
+const { sendMissedSessionRecovery } = require("../helper/missedSessionRecovery");
+const popupEligibility = require("../helper/popupEligibility");
 
+function start({ mode = "all" } = {}) {
+const cron = require("../helper/jobRunner").lockedCron(require("node-cron"), mode);
 
 // All workout-flow crons run on PKT — slot wall-clocks are stored as
 // AM/PM PKT, so anchoring the schedules to PKT is the only way the
@@ -107,6 +56,52 @@ const popupEligibility = require("./helper/popupEligibility");
 // with what users actually see. Without this, the cron runs at the
 // host's local time (UTC on most VPS deployments) which is +5h off.
 const CRON_TZ = "Asia/Karachi";
+
+// Dietitian emergency day (Oct 2026): every minute, apply requests whose
+// 2-minute undo window has passed. See helper/emergencyDay.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const n = await require("../helper/emergencyDay").applyDue();
+      if (n) console.log(`[emergency-day] applied ${n}`);
+    } catch (error) {
+      console.error("Error in emergency-day job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Consultation rating reminder (Nov 2026): one push if she hasn't rated
+// 6 h after her session. helper/consultReviewAsk.js.
+cron.schedule(
+  "*/30 * * * *",
+  async () => {
+    try {
+      const n = await require("../helper/consultReviewAsk").remindReviews();
+      if (n) console.log(`[consult-review] reminded ${n}`);
+    } catch (error) {
+      console.error("Error in consult-review reminder job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Dietitian no-show while the client waits (Oct 2026): every minute.
+// 5 min late → "Your client is waiting" + admin alert; not started 10 min after the start time → cancelled as a dietitian
+// no-show (+3 days, client told). See helper/dietitianLateCheck.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const r = await require("../helper/dietitianLateCheck").runDietitianLateCheck();
+      if (r.alerted || r.cancelled) console.log(`[dietitian-late] alerted ${r.alerted}, cancelled ${r.cancelled}`);
+    } catch (error) {
+      console.error("Error in dietitian-late job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
 
 // Notification cron — every 3 minutes, PKT-anchored.
 cron.schedule(
@@ -121,12 +116,12 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
-// Missed-session recovery. Runs hourly and sends at most one nudge per
-// user/local day after their final scheduled class has been over for 30
-// minutes and no attendance was recorded. Preference-gated by
+// Missed-session recovery. Every 10 min: one nudge per class day, 30 min
+// after HER last class ends (same evening), or 9 AM–noon next morning if
+// that fell in quiet hours. See helper/missedSessionRecovery.js. Preference-gated by
 // NotificationPreference.missedRecovery in helper/notification.js.
 cron.schedule(
-  "17 * * * *",
+  "*/10 * * * *",
   async () => {
     try {
       const sent = await sendMissedSessionRecovery();
@@ -147,7 +142,8 @@ cron.schedule(
   "*/5 * * * *",
   async () => {
     try {
-      await sendTrialClassReminders();
+      const n = await sendTrialClassReminders();
+      if (n) console.log(`[trial-class-reminder] sent ${n}`);
     } catch (error) {
       console.error("Error in trial-class-reminders job:", error);
     }
@@ -163,6 +159,31 @@ cron.schedule(
       await sendTrialOfferReminders();
     } catch (error) {
       console.error("Error in trial-offer-reminders job:", error);
+    }
+    // Trial moments (Nov 2026, helper/trialMoments.js): Day 2 missed
+    // class, Day 3, Day 4, last day, trial ended, and the offer 6 h
+    // before it ends. Replaces the old last-day push (sendTrialLastDayPushes).
+    try {
+      const n = await require("../helper/trialMoments").runTrialPushes();
+      if (n) console.log(`[trial-moments] sent ${n}`);
+    } catch (error) {
+      console.error("Error in trial-moments job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Trial starter plans the AI couldn't make in time (or a restart lost):
+// try again quietly every 5 minutes (Oct 2026).
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const { retryPendingTrialPlans } = require("../controllers/FrontSite/trialDietPlanController");
+      const n = await retryPendingTrialPlans();
+      if (n) console.log(`[trial-plan] retrying ${n} plan(s)`);
+    } catch (error) {
+      console.error("Error in trial-plan retry job:", error);
     }
   },
   { timezone: CRON_TZ }
@@ -215,6 +236,155 @@ cron.schedule(
       }
     } catch (error) {
       console.error("Error in auto-end-sessions job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Trainer safety nets: "starts in 10 min, tap Start" + "your class is
+// waiting" at +3 (every minute), and a 07:00 PKT check for classes whose
+// trainer has no Zoom room. See helper/trainerClassReminders.js.
+const { sendTrainerStartReminders, morningRoomCheck } = require("../helper/trainerClassReminders");
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const n = await sendTrainerStartReminders();
+      if (n) console.log(`[trainer-reminder] sent ${n}`);
+    } catch (error) {
+      console.error("[trainer-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+cron.schedule(
+  "0 7 * * *",
+  async () => {
+    try {
+      await morningRoomCheck();
+    } catch (error) {
+      console.error("[room-check]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Quiet hours (Oct 2026): pushes held during her quiet hours go out when
+// they end. Checked every 5 minutes.
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const n = await require("../helper/notification").releaseHeldPushes();
+      if (n) console.log(`[quiet-hours] sent ${n} held push(es)`);
+    } catch (error) {
+      console.error("Error in quiet-hours release job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Auto-cancel a class the trainer hasn't started 10 min after its time,
+// with an apology push + in-app popup pointing to the next class.
+const { autoCancelLateClasses, retireOldClassCancelledPopups, LATE_START_MINUTES } = require("../helper/autoCancelLateClasses");
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const ids = await autoCancelLateClasses();
+      if (ids.length) console.log(`[auto-cancel-class] cancelled ${ids.length} class(es) not started ${LATE_START_MINUTES}m after start: ${ids.join(", ")}`);
+      await retireOldClassCancelledPopups();
+      await require("../helper/consultationCancelledPopup").retireOldConsultationCancelledPopups();
+    } catch (error) {
+      console.error("Error in auto-cancel-class job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// "Finish your health form" push (day 1 / 3 / 7 while it's still open),
+// for paid clients who don't open the app. helper/preConsultFormReminders.js
+const { sendPreConsultFormReminders } = require("../helper/preConsultFormReminders");
+cron.schedule(
+  "13 11 * * *",
+  async () => {
+    try {
+      const n = await sendPreConsultFormReminders();
+      if (n) console.log(`[preconsult-reminder] sent ${n}`);
+    } catch (error) {
+      console.error("[preconsult-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Monthly "check your PCOS signs" push for paid women who track a
+// condition (only when due, max once a month). helper/healthScreeningActions.js
+cron.schedule(
+  "31 11 * * *",
+  async () => {
+    try {
+      const n = await require("../helper/healthScreeningActions").sendMonthlyReminders();
+      if (n) console.log(`[screening-reminder] sent ${n}`);
+    } catch (error) {
+      console.error("[screening-reminder]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// AI-approved payments: admin reminders at 24 h / 40 h, pause at 48 h.
+cron.schedule(
+  "17 * * * *",
+  async () => {
+    try {
+      const r = await require("../helper/paymentVerify").runChecks();
+      if (r.reminded || r.held) console.log(`[payment-verify] reminded ${r.reminded}, paused ${r.held}`);
+    } catch (error) {
+      console.error("[payment-verify]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Sign-up questions left unfinished: one "finish setting up" push, 7:10 PM.
+cron.schedule(
+  "10 19 * * *",
+  async () => {
+    try {
+      const n = await require("../helper/onboardingReminder").sendFinishSignupReminders();
+      if (n) console.log(`[finish-signup] sent ${n}`);
+    } catch (error) {
+      console.error("[finish-signup]", error.message);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Time zone from phone country code for users whose (old) app never sent
+// one. Daily 03:20 PKT + once on start. helper/timezoneFromPhone.js
+const { backfillTimezonesFromPhone } = require("../helper/timezoneFromPhone");
+const runTzBackfill = async () => {
+  try {
+    const n = await backfillTimezonesFromPhone();
+    if (n) console.log(`[tz-backfill] set time zone for ${n} user(s) from phone code`);
+  } catch (error) {
+    console.error("[tz-backfill]", error.message);
+  }
+};
+cron.schedule("20 3 * * *", runTzBackfill, { timezone: CRON_TZ });
+if (cron.runsNonSocket) setTimeout(runTzBackfill, 30 * 1000);
+
+// "Consultation in 15 minutes" push to client + dietitian (once per session).
+const { sendConsultationReminders } = require("../helper/consultationReminders");
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const n = await sendConsultationReminders();
+      if (n > 0) console.log(`[consult-reminder] sent ${n} reminder(s)`);
+    } catch (error) {
+      console.error("Error in consultation-reminder job:", error);
     }
   },
   { timezone: CRON_TZ }
@@ -289,6 +459,21 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// CRM events (Nov 2026): resend queued CRM events that are due (the CRM
+// was down, or a first send failed). helper/crmEvents.js, models/CrmOutbox.js.
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const n = await require("../helper/crmEvents").flush();
+      if (n) console.log(`[crm-events] delivered ${n}`);
+    } catch (error) {
+      console.error("Error in crm-events job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // Subscription expiry: hourly sweep that flags UserPlan rows whose
 // expireDate has passed via planStatus = 'expired'. Nothing previously
 // set this server-side — the app derived "expired" itself from the
@@ -313,14 +498,11 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
-// Consultation-flow: per-minute consultant-no-show check. Looks for
-// confirmed appointments whose scheduled time + 10 min grace has passed
-// without the dietitian flipping status to "In Progress". Marks the user
-// eligible for POPUP_CONSULTANT_NO_SHOW so the dashboard surfaces the
-// "report no-show" prompt next time the user opens the app. The actual
-// CONSULT_NO_SHOW escalation only fires when the user taps "report" via
-// POST /appointment/:id/no-show — we don't auto-escalate here because a
-// dietitian could still join after grace.
+// Consultation-flow: per-minute consultant-no-show check.
+// (Oct 2026) No client prompt any more: confirmed sessions nobody
+// started are resolved by the server (Meet attendance sweep, or the
+// 24h fallback inside evaluateConsultantNoShows), which cancels the
+// session, adds the free days and notifies her.
 cron.schedule(
   "* * * * *",
   async () => {
@@ -365,6 +547,21 @@ cron.schedule(
       await popupEligibility.evaluateAllActiveUsers();
     } catch (error) {
       console.error("Error in popup-eligibility hourly job:", error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
+// Class diary: count joined / attended / minutes for today's classes
+// before the 00:01 reset (helper/classDiary.js). Analytics only.
+cron.schedule(
+  "55 23 * * *",
+  async () => {
+    try {
+      const n = await require("../helper/classDiary").countDay();
+      console.log(`[class-diary] counted ${n} class(es)`);
+    } catch (e) {
+      console.error("[class-diary] count failed:", e.message);
     }
   },
   { timezone: CRON_TZ }
@@ -480,6 +677,20 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
+// Luna daily (Nov 2026): 8 PM in each woman's own time zone, paid + live
+// trial, "log today's insights". Every 5 min; once a day per woman.
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      await sendLunaDailyNudges();
+    } catch (error) {
+      console.error('[cron] luna daily failed:', error);
+    }
+  },
+  { timezone: CRON_TZ }
+);
+
 // TrialJourneyChurned nudge at 09:15 PKT daily.
 // Targets users who completed all 3 trial days (day3AttendedAt set) but never
 // converted to a paid plan. Highest-intent segment — attended 3 classes, didn't buy.
@@ -515,58 +726,7 @@ cron.schedule(
   { timezone: CRON_TZ }
 );
 
-app.use(cors());
-app.use(express.json());
+console.log(`⏰ [jobs] scheduler started (mode: ${mode})`);
+}
 
-//for form data and multipart data
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// app.use(upload.array());
-
-app.use("/users", userRoute);
-app.use("/admin", AdminRoute);
-// Magic payment links — registers /admin/magic-links (rep-only) and
-// /magic-links/:token (+/redeem) public endpoints. Routes file mounts
-// at the root so it can expose both /admin/* and /magic-links/* paths.
-app.use("/", magicLinkRoutes);
-app.use("/country", contriesRoute);
-app.use('/duration/create', priceDurationRoutes);
-app.use('/api/priceingRoutes', priceingRoutes);
-app.use('/appointment', appointmentRoutes);
-app.use('/dietTimes', dietRoutes);
-app.use("/attendance", attendanceRoutes);
-app.use("/posts", postsRoutes);
-app.use("/pay", directPayRoutes);
-app.use('/users', waterRoutes);
-app.use('/users/home', dashboardRoutes);
-app.use('/users/progress', progressRoutes);
-app.use('/users/pre-consultation', preConsultationRoutes);
-app.use('/admin/pre-consultation', preConsultationAdminRoutes);
-app.use('/users/popup', popupStateRoutes);
-app.use('/users/meal-logs', mealLogRoutes);
-app.use('/users/day7-review', day7ReviewRoutes);
-app.use('/admin/day7-reviews', day7ReviewAdminRoutes);
-app.use('/users/progress', progressSubmissionRoutes);
-app.use('/admin/users', progressSubmissionAdminRoutes);
-app.use('/users', consultationBookingRoutes);
-app.use('/users/escalations', escalationRoutes);
-app.use('/users/app-issue', appIssueRoutes);
-app.use('/internal', internalRoutes);
-app.use('/admin/escalations', escalationAdminRoutes);
-app.use('/admin/metrics', metricsAdminRoutes);
-app.use('/trial', trialRoutes);
-app.use('/admin/diet-plan', dietPlanAdminRoutes);
-app.use('/users/diet-plan', dietPlanUserRoutes);
-
-// Error middleware : To show any error if promise fails
-app.use(error);
-// To make the folder Public
-app.use("/public", express.static("./public"));
-
-// Initializing Server along with creating all the tables that exist in the models folder
-db.sequelize.sync().then(() => {
-  const serverPort = process.env.PORT || 3001;
-  server.listen(serverPort,"0.0.0.0", () => {
-    console.log(`🚀 Server + Socket running on http://localhost:${serverPort}`);
-  });
-});
+module.exports = { start };

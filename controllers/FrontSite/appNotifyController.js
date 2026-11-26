@@ -25,9 +25,8 @@ if (!admin.apps.length) {
  */
 exports.appNotify = async (req, res) => {
   try {
-    const secret = process.env.APP_WEBHOOK_SECRET;
-    const provided = req.headers["x-internal-secret"];
-    if (!secret || provided !== secret) {
+    // Checked by verifyCrmInternal (routes/internal.js): signed by the CRM.
+    if (!req.crmVerified) {
       return res.status(403).json(ApiResponse("0", "Forbidden", {}));
     }
 

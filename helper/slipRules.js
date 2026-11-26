@@ -5,9 +5,11 @@
 //   2. A transaction / reference number was found (and never used before:
 //      checked by the caller).
 //   3. The slip date is within the last MAX_SLIP_AGE_DAYS days (PKT).
-//   (Oct 2026: the amount is NOT checked any more — discounts and offers
-//   make the price vary. It is still read and shown to the admin, and the
-//   admin confirms the money arrived within 48 h.)
+//   4. Nov 2026: the amount is checked again, against a price the SERVER
+//      knows (the rep's payment request / link, or the plan's real price or
+//      her trial-offer price for an in-app upload — never a number the phone
+//      sends). Up to AMOUNT_TOLERANCE_PKR short is fine; more short, or an
+//      amount that can't be read, waits for the admin ("Paid 2,000 of 4,500").
 const moment = require("moment-timezone");
 const { listActive, matchAccount, digitsOnly } = require("./paymentAccounts");
 
@@ -73,6 +75,11 @@ async function decideSlip(ocr, expectedAmount) {
   checks.amount = amt > 0 && amt >= expectedAmount - AMOUNT_TOLERANCE_PKR;
 
   const problems = [];
+  const expected = Number(expectedAmount) || 0;
+  if (expected > 0) {
+    if (!(amt > 0)) problems.push("Amount not read");
+    else if (amt < expected - AMOUNT_TOLERANCE_PKR) problems.push(`Paid Rs ${amt} of Rs ${expected}`);
+  }
   if (!checks.account) {
     problems.push(
       ocr.receiver && !ocr.receiverVerified
@@ -83,7 +90,6 @@ async function decideSlip(ocr, expectedAmount) {
   if (!checks.reference) problems.push("No transaction / reference number found");
   if (!date) problems.push("Slip date not found");
   else if (!checks.date) problems.push(`Slip date ${date.format("D MMM YYYY")} is older than ${MAX_SLIP_AGE_DAYS} days`);
-  // Amount: recorded in checks.amount for the admin, never blocks.
 
   const slipDate = date ? date.format("YYYY-MM-DD") : null;
   if (problems.length) {
@@ -99,4 +105,32 @@ async function decideSlip(ocr, expectedAmount) {
   };
 }
 
-module.exports = { decideSlip, parseSlipDate, MAX_SLIP_AGE_DAYS, AMOUNT_TOLERANCE_PKR };
+/**
+ * The amount an in-app slip must show, from the server's own prices:
+ * this plan + duration's prices (and her live trial-offer price, if any).
+ * The price the phone sent is used only if it is one of those; otherwise the
+ * lowest real price is expected. null = no price known (amount not checked).
+ */
+async function expectedPriceFor({ userId, planId, durationId, clientPrice }) {
+  const { Price, TrialOffer } = require("../models");
+  const where = { planId };
+  if (durationId) where.durationId = durationId;
+  let allowed = (await Price.findAll({ where, attributes: ["priceAmount"], raw: true }))
+    .map((p) => Number(String(p.priceAmount).replace(/[^0-9.]/g, "")))
+    .filter((n) => n > 0);
+  try {
+    const offer = userId ? await TrialOffer.findOne({ where: { userId, redeemedAt: null } }) : null;
+    if (offer && new Date(offer.expiresAt) > new Date()) {
+      const items = typeof offer.items === "string" ? JSON.parse(offer.items) : offer.items;
+      for (const i of items || []) {
+        if (Number(i.planId) === Number(planId) && (!durationId || Number(i.durationId) === Number(durationId))) allowed.push(Number(i.offerPrice));
+      }
+    }
+  } catch (_) { /* no offers table: plan prices only */ }
+  allowed = allowed.filter((n) => n > 0);
+  if (!allowed.length) return null;
+  const client = Number(clientPrice);
+  return allowed.includes(client) ? client : Math.min(...allowed);
+}
+
+module.exports = { decideSlip, parseSlipDate, expectedPriceFor, MAX_SLIP_AGE_DAYS, AMOUNT_TOLERANCE_PKR };

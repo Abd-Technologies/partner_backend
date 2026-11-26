@@ -2,10 +2,12 @@
 //
 // The AI reads the slip and starts her plan at once, but a slip can be
 // edited, so a person must confirm the money really arrived:
-//   • Admin gets reminders at 24 h and 40 h ("Confirm payments" list).
+//   • Admin gets reminders at 24 h and 40 h, then once a day ("Confirm payments" list).
 //   • Admin taps Received → done (and un-paused if it was paused).
 //   • Admin taps Not received → paused at once.
-//   • Not confirmed within 48 h → paused automatically.
+//   • Nov 2026: NO automatic pause. She is never paused because the team
+//     hadn't checked yet; only "Not received" pauses her. (HOLD_AFTER_HOURS
+//     stays exported for old callers; it no longer pauses anyone.)
 // Paused = the days this slip paid for are taken off (a renewal keeps her
 // earlier paid days; a new plan is switched off). She sees the free app
 // with a red banner and can send proof. Received gives everything back,
@@ -142,7 +144,7 @@ async function releaseAppointments(plan) {
   }
 }
 
-/** Pause what this slip paid for. reason: 'held' (48 h) | 'not_received'. */
+/** Pause what this slip paid for. reason: 'not_received' (admin) — the old 48 h 'held' no longer runs. */
 async function hold(image, reason) {
   const { UserPlan } = M();
   if (image.heldAt) {
@@ -248,7 +250,7 @@ async function notifySlipForReview(image, reason) {
   );
 }
 
-/** Hourly: reminders at 24 h / 40 h, pause at 48 h. */
+/** Hourly: reminders at 24 h, 40 h, then every 24 h until an admin decides. */
 async function runChecks() {
   const { PlanImage } = M();
   const rows = await PlanImage.findAll({ where: { verifyStatus: "pending", verifyStartedAt: { [Op.ne]: null } } });
@@ -258,31 +260,23 @@ async function runChecks() {
   const due = [];
   for (const img of rows) {
     const hours = (now - new Date(img.verifyStartedAt).getTime()) / HOUR;
-    if (hours >= HOLD_AFTER_HOURS) {
-      try {
-        await hold(img, "held");
-        held++;
-      } catch (e) {
-        console.error("[payment-verify] hold", img.id, e.message);
-      }
-      continue;
-    }
-    const stage = REMINDERS_AT_HOURS.filter((h) => hours >= h).length;
+    const last = REMINDERS_AT_HOURS[REMINDERS_AT_HOURS.length - 1];
+    const daily = hours > last + 24 ? Math.floor((hours - last) / 24) : 0;
+    const stage = REMINDERS_AT_HOURS.filter((h) => hours >= h).length + daily;
     if (stage > (img.verifyReminders || 0)) {
       img.verifyReminders = stage;
       await img.save();
-      due.push(Math.max(1, Math.round(HOLD_AFTER_HOURS - hours)));
+      due.push(Math.round(hours));
       reminded++;
     }
   }
   if (due.length) {
-    const soonest = Math.min(...due);
+    const oldest = Math.max(...due);
     await pushAdmins(
       `${due.length} payment${due.length === 1 ? "" : "s"} to confirm`,
-      `Check your JazzCash / EasyPaisa / bank app. Plans pause in ${soonest} h if not confirmed.`
+      `Check your JazzCash / EasyPaisa / bank app and tap Received or Not received. Oldest is ${oldest} h old.`
     );
   }
-  if (held) await pushAdmins("Plans paused", `${held} AI-approved payment${held === 1 ? " was" : "s were"} not confirmed in 48 h.`);
   return { reminded, held };
 }
 

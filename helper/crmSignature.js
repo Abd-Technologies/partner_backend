@@ -11,14 +11,19 @@ const ApiResponse = require("./ApiResponse");
 
 const MAX_SKEW_SEC = 300;
 
-function verifyCrmSigned(req, res, next) {
-  const secret = process.env.APP_WEBHOOK_SECRET;
-  if (!secret) return res.status(503).json(ApiResponse("0", "Not configured", {}));
+// CRM_TO_APP_SECRET gives CRM → app calls their own key (set the same value
+// on both servers); until it is set, the shared APP_WEBHOOK_SECRET is used.
+const crmSecret = () => process.env.CRM_TO_APP_SECRET || process.env.APP_WEBHOOK_SECRET;
+
+// Checks the signature only. { ok: true } or { status, message }.
+function checkCrmSignature(req) {
+  const secret = crmSecret();
+  if (!secret) return { status: 503, message: "Not configured" };
   const ts = req.headers["x-webhook-timestamp"];
   const sig = String(req.headers["x-webhook-signature"] || "").replace(/^sha256=/, "");
-  if (!ts || !sig) return res.status(403).json(ApiResponse("0", "Missing signature", {}));
+  if (!ts || !sig) return { status: 403, message: "Missing signature" };
   if (!Number.isFinite(Number(ts)) || Math.abs(Date.now() / 1000 - Number(ts)) > MAX_SKEW_SEC) {
-    return res.status(403).json(ApiResponse("0", "Signature expired", {}));
+    return { status: 403, message: "Signature expired" };
   }
   const hasBody = req.method !== "GET" && req.body && Object.keys(req.body).length > 0;
   const body = hasBody ? JSON.stringify(req.body) : "";
@@ -28,8 +33,15 @@ function verifyCrmSigned(req, res, next) {
   const a = Buffer.from(expected, "hex");
   const b = Buffer.from(sig, "hex");
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(403).json(ApiResponse("0", "Bad signature", {}));
+    return { status: 403, message: "Bad signature" };
   }
+  return { ok: true };
+}
+
+function verifyCrmSigned(req, res, next) {
+  const check = checkCrmSignature(req);
+  if (!check.ok) return res.status(check.status).json(ApiResponse("0", check.message, {}));
+  const hasBody = req.method !== "GET" && req.body && Object.keys(req.body).length > 0;
   const agent = hasBody && req.body.agent_name ? String(req.body.agent_name).slice(0, 60) : null;
   // The rep's own partner user id, when the CRM knows it (signed, so trusted):
   // e.g. a payment link is then credited to her, as from the admin portal.
@@ -38,4 +50,32 @@ function verifyCrmSigned(req, res, next) {
   next();
 }
 
-module.exports = { verifyCrmSigned };
+/**
+ * verifyCrmInternal — for /internal/app-notify and /internal/support-ticket-update.
+ * Accepts a signed request (as above). During the switch-over it also accepts
+ * the old raw `x-internal-secret` header from CRM builds that don't sign yet,
+ * compared timing-safe; set ALLOW_LEGACY_INTERNAL_SECRET=false once the CRM is
+ * updated to turn that off. Sets req.crmVerified = true.
+ */
+function verifyCrmInternal(req, res, next) {
+  if (req.headers["x-webhook-signature"]) {
+    const check = checkCrmSignature(req);
+    if (!check.ok) return res.status(check.status).json(ApiResponse("0", check.message, {}));
+    req.crmVerified = true;
+    return next();
+  }
+  if (process.env.ALLOW_LEGACY_INTERNAL_SECRET !== "false") {
+    const secret = process.env.APP_WEBHOOK_SECRET || "";
+    const provided = String(req.headers["x-internal-secret"] || "");
+    const a = Buffer.from(provided);
+    const b = Buffer.from(secret);
+    if (secret && a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      console.warn(`[crmInternal] ${req.originalUrl}: legacy x-internal-secret used — update the CRM to signed calls`);
+      req.crmVerified = true;
+      return next();
+    }
+  }
+  return res.status(403).json(ApiResponse("0", "Forbidden", {}));
+}
+
+module.exports = { verifyCrmSigned, verifyCrmInternal, checkCrmSignature };

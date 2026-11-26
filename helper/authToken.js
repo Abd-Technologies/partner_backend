@@ -101,6 +101,11 @@ async function verifyAccess(token) {
   if (!user) throw new AuthError("NO_USER");
   const tv = payload.tv == null ? 0 : Number(payload.tv);
   if ((Number(user.tokenVersion) || 0) !== tv) throw new AuthError("REVOKED");
+  // Old no-expiry token still in use: remember who, so an admin can ask them
+  // to update the app before LEGACY_TOKEN_UNTIL (helper/legacyTokens.js).
+  if (payload.exp == null) require("./legacyTokens").note(user.id);
+  // She's using the app: tell the CRM once a day (helper/crmHooks.js).
+  if (clientOf(payload) === "app") require("./crmHooks").dailyActive(user);
   return { payload, user };
 }
 
