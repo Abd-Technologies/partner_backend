@@ -232,6 +232,8 @@ function dailyActive(user) {
           raw: true,
         });
         if (!u) return;
+        // An existing app user who paid on WhatsApp: attach + start her plan.
+        await require("./paymentClaims").claimFor(u).catch((e) => console.warn("[crmHooks] claim:", e.message));
         await crm().emit("user_login", { ...who(u), timezone: u.timeZone || null, active_day: day }, `user-${u.id}-active-${day}`);
       } catch (e) {
         console.warn("[crmHooks] dailyActive:", e.message);

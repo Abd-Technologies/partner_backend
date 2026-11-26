@@ -1092,7 +1092,12 @@ async function addImage(req, res) {
     let approvalReason = null;
     // Slip rules (helper/slipRules.js): our account + reference + date
     // within 3 days + amount. Anything else waits for the admin, with why.
-    const expectedAmount = parseInt(price, 10);
+    // Expected amount from the server's prices, not the phone's number.
+    let expectedAmount = parseInt(price, 10);
+    try {
+      const real = await require("../../../helper/slipRules").expectedPriceFor({ userId, planId, durationId, clientPrice: price });
+      if (real != null) expectedAmount = real;
+    } catch (e) { console.warn("[addImage] expected price:", e.message); }
     let slipDecision = null;
     try {
       slipDecision = await require("../../../helper/slipRules").decideSlip(ocrResult, expectedAmount);
@@ -1275,6 +1280,17 @@ try {
     image.status = null;
     image.verifyStatus = "rejected";
     await image.save();
+    // Nov 2026: a rejected payment-link / WhatsApp slip reopens its request,
+    // so she can send a correct slip without the rep making a new one.
+    if (image.magicPaymentLinkId) {
+      try {
+        const { MagicPaymentLink } = require("../../../models");
+        await MagicPaymentLink.update(
+          { status: "opened", redeemedAt: null, redeemedPlanImageId: null },
+          { where: { id: image.magicPaymentLinkId, redeemedPlanImageId: image.id } }
+        );
+      } catch (e) { console.warn("[approvedImage] reopen link:", e.message); }
+    }
 
     if (user?.deviceToken) {
       let rejectionNotification = {
@@ -1290,6 +1306,22 @@ try {
     }
 
     return res.json(ApiResponse("1", "Plan image rejected and notification sent to User", {}));
+  }
+  if (!image) return res.json(ApiResponse("0", "Slip not found", {}));
+  // Nov 2026: a slip paid before she signed up has no account yet. Approving
+  // it used to create a plan for nobody. It starts by itself when she signs
+  // up with the phone the rep used (helper/paymentClaims.js).
+  if (!image.UserId) {
+    const d = image.ocrData && typeof image.ocrData === "object" ? image.ocrData : {};
+    if (d.waitingForSignup !== true) {
+      d.waitingForSignup = true;
+      d.approvedByAdminAt = new Date().toISOString();
+      d.approvedByAdmin = req.user ? req.user.id : null;
+      image.ocrData = { ...d };
+      image.changed("ocrData", true);
+      await image.save();
+    }
+    return res.json(ApiResponse("1", `Approved. Her plan starts when she signs up with ${d.payerPhone || "the phone the rep used"}.`, { waitingForSignup: true }));
   }
   const str = image?.PriceDuration?.duration || "30 days";
   const newPlanDays = parseInt(str.match(/\d+/)[0], 10);

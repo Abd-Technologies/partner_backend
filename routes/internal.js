@@ -32,6 +32,9 @@ router.post("/crm/support-tickets/:id/reply", verifyCrmSigned, asyncMiddleware(t
 // POST /internal/crm/magic-links   { PlanId, PriceDurationId, phone, crmLeadId, ..., partner_user_id? }
 router.get("/crm/plans", verifyCrmSigned, asyncMiddleware(require("../controllers/Admin/AdminController").get_plans_admin));
 router.post("/crm/magic-links", verifyCrmSigned, asyncMiddleware(require("../controllers/FrontSite/magicLinkController").createLink));
+// POST /internal/crm/payment-slips  { token, image_base64, mime?, app_user_id? }
+// She sent the slip on WhatsApp: check it against the rep's payment request.
+router.post("/crm/payment-slips", verifyCrmSigned, asyncMiddleware(require("../controllers/FrontSite/magicLinkController").redeemFromCrm));
 
 // GET /internal/crm/customers — every customer account (id, phone, email,
 // signed-up date), for the CRM's duplicate / missing-lead report (signed).

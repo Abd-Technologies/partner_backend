@@ -32,10 +32,7 @@ const { extractSlipData } = require('../../helper/visionOCR');
 const { applyPlanApproval } = require('../../helper/applyPlanApproval');
 const { Op } = require('sequelize');
 
-// Auto-approval thresholds
-const AUTO_APPROVE_MIN_CONFIDENCE = 0.75;   // OCR confidence must be at least this
-const AMOUNT_TOLERANCE_PKR        = 50;     // ±50 PKR considered "exact match"
-const MAX_SLIP_AGE_DAYS           = 14;     // Slips older than this need admin
+// Approval rules live in helper/slipRules.js (account, reference, date, amount).
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -267,193 +264,225 @@ async function getLink(req, res) {
   }
 }
 
-// ─── 3. Redeem link with slip upload (public, multipart) ──────────
+// ─── 3. Redeem: one slip against one link (shared) ────────────────
+//
+// Used by the public link page (redeemLink) and by the CRM when she sends
+// the slip on WhatsApp (redeemFromCrm). Nov 2026:
+//   - userId is only ever a TRUSTED id (a verified login, or the CRM's signed
+//     call), never a number typed into the form.
+//   - A slip that passes every check while she has no app account yet is kept
+//     as "approved, waiting for her signup"; helper/paymentClaims.js starts
+//     her plan the moment she signs up with that phone.
+//   - The amount is checked against the link's amount (slipRules).
 
+const fail = (code, message, data = {}) => ({ ok: false, code, message, data });
+
+async function linkUsable(link) {
+  if (!link) return fail(404, 'Link not found');
+  if (link.status === 'redeemed') return fail(200, 'Link has already been redeemed');
+  if (link.status === 'cancelled') return fail(200, 'Link has been cancelled');
+  if (new Date(link.expiresAt) < new Date()) {
+    link.status = 'expired';
+    await link.save();
+    return fail(200, 'Link has expired');
+  }
+  return null;
+}
+
+async function redeemWithSlip(link, { imagePath, userId = null, payerName = null, payerRelationship = null }) {
+  const bad = await linkUsable(link);
+  if (bad) return bad;
+  if (payerRelationship && !ALLOWED_RELATIONSHIPS.includes(String(payerRelationship).toLowerCase())) {
+    return fail(200, `payerRelationship must be one of: ${ALLOWED_RELATIONSHIPS.join(', ')}`);
+  }
+  const ownerId = userId || link.UserId || null;
+
+  let ocrResult = null;
+  try {
+    ocrResult = await extractSlipData(imagePath, { amount: link.paidAmount });
+  } catch (err) {
+    console.warn('OCR failed (non-fatal):', err.message);
+  }
+
+  // Same transaction / reference used before?
+  if (ocrResult?.refNumber) {
+    const dup = await PlanImage.findOne({
+      attributes: ['id', 'UserId', 'createdAt', 'verifyStatus'],
+      where: { ocrTransactionId: ocrResult.refNumber },
+    });
+    if (dup && dup.verifyStatus === 'rejected') {
+      return fail(200, 'This payment slip was not approved before, so it can\'t be used again. Please contact support.', { duplicateOf: dup.id, rejected: true });
+    }
+    if (dup) {
+      console.warn(`⚠️ Duplicate transaction ID: ${ocrResult.refNumber} already used by PlanImage id=${dup.id}`);
+      return fail(200, 'This payment slip has already been used. Each transaction can only be redeemed once. Contact support if you believe this is an error.', { duplicateOf: dup.id });
+    }
+  }
+
+  let passed = false;
+  let approvalReason = null;
+  let slipDecision = null;
+  try {
+    slipDecision = await require('../../helper/slipRules').decideSlip(ocrResult, link.paidAmount);
+    passed = slipDecision.autoApproved;
+    approvalReason = slipDecision.reason;
+  } catch (e) {
+    console.error('[slipRules] decide failed:', e.message);
+    approvalReason = 'Slip check failed — admin review';
+  }
+  const waitingForSignup = passed && !ownerId;
+
+  const planImage = await PlanImage.create({
+    PlanId:             link.PlanId,
+    UserId:             ownerId,
+    PriceDurationId:    link.PriceDurationId,
+    image:              imagePath,
+    price:              link.paidAmount,
+    status:             true,
+    listPrice:          link.listPrice,
+    paidAmount:         ocrResult?.amount && passed ? ocrResult.amount : link.paidAmount,
+    discountAmount:     link.discountAmount,
+    discountReason:     link.discountReason,
+    uploadedByRepId:    link.createdByRepId,
+    uploadSource:       'magic_link',
+    magicPaymentLinkId: link.id,
+    payerName:          payerName || link.payerName || null,
+    payerRelationship:  (payerRelationship || link.payerRelationship || null)
+                          ? String(payerRelationship || link.payerRelationship).toLowerCase() : null,
+    ocrData: {
+      ...(ocrResult ? {
+        amount: ocrResult.amount, amounts: ocrResult.amounts, date: ocrResult.date, bank: ocrResult.bank,
+        sender: ocrResult.sender, receiver: ocrResult.receiver, receiverVerified: ocrResult.receiverVerified,
+        refNumber: ocrResult.refNumber, rawText: ocrResult.rawText?.slice(0, 1000),
+      } : {}),
+      autoApproved: passed,
+      approvalReason: waitingForSignup ? `${approvalReason} — plan starts when she signs up` : approvalReason,
+      waitingForSignup,
+      payerPhone: link.phone || null,
+      crmLeadId: link.crmLeadId || null,
+      account: slipDecision?.account || null,
+      slipDate: slipDecision?.slipDate || null,
+      checks: slipDecision?.checks || null,
+    },
+    ocrConfidence:    ocrResult?.confidence || null,
+    ocrAmount:        ocrResult?.amount     || null,
+    ocrBank:          ocrResult?.bank       || null,
+    ocrDate:          ocrResult?.date       || null,
+    ocrSender:        ocrResult?.sender     || null,
+    ocrReceiver:      ocrResult?.receiver   || null,
+    ocrTransactionId: ocrResult?.refNumber  || null,
+  });
+
+  // Her account exists and the slip passed: start the plan now.
+  let activation = null;
+  let autoApproved = false;
+  if (passed && ownerId && planImage.PlanId) {
+    try {
+      activation = await applyPlanApproval(planImage, { approvalSource: 'auto' });
+      autoApproved = !!activation.ok;
+      if (!activation.ok) approvalReason = `Auto-approve failed: ${activation.error} — admin review required`;
+    } catch (err) {
+      console.error('Auto-activation error:', err);
+      approvalReason = 'Auto-approve failed — admin review required';
+    }
+  }
+  if (!autoApproved && !waitingForSignup) {
+    require('../../helper/paymentVerify').notifySlipForReview(planImage, approvalReason).catch(() => {});
+  }
+
+  link.status = 'redeemed';
+  link.redeemedAt = new Date();
+  link.redeemedPlanImageId = planImage.id;
+  if (ownerId && !link.UserId) link.UserId = ownerId;
+  await link.save();
+
+  const verificationStatus = autoApproved ? 'verified' : waitingForSignup ? 'verified_waiting_signup' : 'pending_review';
+  const message = autoApproved
+    ? 'Payment verified — your plan is now active!'
+    : waitingForSignup
+      ? 'Payment verified — sign up in the Fit Her app with this number and your plan starts.'
+      : 'Payment slip received. Our team is verifying and you will be notified shortly.';
+  return {
+    ok: true,
+    message,
+    data: {
+      planImageId: planImage.id,
+      linkStatus: link.status,
+      autoApproved,
+      verificationStatus,
+      reason: approvalReason,
+      userPlanActivated: !!activation?.ok,
+      userPlanId: activation?.userPlanId || null,
+      ocrSummary: ocrResult ? {
+        confidence: ocrResult.confidence, amount: ocrResult.amount, bank: ocrResult.bank, date: ocrResult.date,
+        receiver: ocrResult.receiver, receiverVerified: ocrResult.receiverVerified, refNumber: ocrResult.refNumber,
+      } : null,
+    },
+  };
+}
+
+/** Who is signed in on this request, if anyone (a verified app token only). */
+async function trustedUserId(req) {
+  const h = String(req.headers.authorization || '');
+  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+  if (!token) return null;
+  try {
+    const { user } = await require('../../helper/authToken').verifyAccess(token);
+    return user ? user.id : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Public page / in-app screen (multipart, field "slip").
 async function redeemLink(req, res) {
   try {
-    const { token } = req.params;
-    const { userId, payerName, payerRelationship } = req.body;
-    const slipFile = req.file;
-
-    const link = await MagicPaymentLink.findOne({ where: { token } });
-    if (!link) {
-      return res.status(404).json(ApiResponse('0', 'Link not found', {}));
-    }
-    if (link.status === 'redeemed') {
-      return res.status(200).json(ApiResponse('0', 'Link has already been redeemed', {}));
-    }
-    if (link.status === 'cancelled') {
-      return res.status(200).json(ApiResponse('0', 'Link has been cancelled', {}));
-    }
-    if (new Date(link.expiresAt) < new Date()) {
-      link.status = 'expired';
-      await link.save();
-      return res.status(200).json(ApiResponse('0', 'Link has expired', {}));
-    }
-    if (!slipFile) {
+    const link = await MagicPaymentLink.findOne({ where: { token: req.params.token } });
+    if (!req.file) {
+      const bad = await linkUsable(link);
+      if (bad) return res.status(bad.code).json(ApiResponse('0', bad.message, bad.data));
       return res.status(200).json(ApiResponse('0', 'Payment slip image is required', {}));
     }
-    if (payerRelationship && !ALLOWED_RELATIONSHIPS.includes(String(payerRelationship).toLowerCase())) {
-      return res.status(200).json(ApiResponse('0',
-        `payerRelationship must be one of: ${ALLOWED_RELATIONSHIPS.join(', ')}`, {}));
-    }
-
-    const imagePath = slipFile.path.replace(/\\/g, '/');
-
-    // ─── Run OCR (fire-and-await — gives instant verification when possible) ───
-    // We pass the expected amount so confidence scoring can include a match check.
-    let ocrResult = null;
-    try {
-      ocrResult = await extractSlipData(imagePath, { amount: link.paidAmount });
-    } catch (err) {
-      console.warn('OCR failed (non-fatal):', err.message);
-    }
-
-    // ─── Duplicate detection — indexed lookup on ocrTransactionId column ───
-    let duplicateOf = null;
-    if (ocrResult?.refNumber) {
-      const dup = await PlanImage.findOne({
-        attributes: ['id', 'UserId', 'createdAt', 'verifyStatus'],
-        where: { ocrTransactionId: ocrResult.refNumber },
-      });
-      // Oct 2026: a slip the admin rejected can't be sent again.
-      if (dup && dup.verifyStatus === 'rejected') {
-        return res.status(200).json(ApiResponse('0',
-          'This payment slip was not approved before, so it can\'t be used again. Please contact support.',
-          { duplicateOf: dup.id, rejected: true }
-        ));
-      }
-      if (dup) duplicateOf = dup.id;
-    }
-
-    if (duplicateOf) {
-      console.warn(`⚠️ Duplicate transaction ID detected: ${ocrResult.refNumber} already used by PlanImage id=${duplicateOf}`);
-      return res.status(200).json(ApiResponse('0',
-        'This payment slip has already been used. Each transaction can only be redeemed once. Contact support if you believe this is an error.',
-        { duplicateOf }
-      ));
-    }
-
-    // ─── Decide auto-approve vs admin queue based on OCR ───
-    let autoApproved = false;
-    let approvalReason = null;
-    // Slip rules (helper/slipRules.js): our account + reference + date
-    // within 3 days + amount. Anything else waits for the admin, with why.
-    let slipDecision = null;
-    try {
-      slipDecision = await require("../../helper/slipRules").decideSlip(ocrResult, link.paidAmount);
-      autoApproved = slipDecision.autoApproved;
-      approvalReason = slipDecision.reason;
-    } catch (e) {
-      console.error("[slipRules] decide failed:", e.message);
-      approvalReason = "Slip check failed — admin review";
-    }
-
-    // Create the PlanImage row (status reflects auto vs manual review)
-    const planImage = await PlanImage.create({
-      PlanId:             link.PlanId,
-      UserId:             userId || link.UserId || null,
-      PriceDurationId:    link.PriceDurationId,
-      image:              imagePath,
-      price:              link.paidAmount,
-      status:             true,
-      // Extended fields
-      listPrice:          link.listPrice,
-      paidAmount:         ocrResult?.amount && autoApproved ? ocrResult.amount : link.paidAmount,
-      discountAmount:     link.discountAmount,
-      discountReason:     link.discountReason,
-      uploadedByRepId:    link.createdByRepId,
-      uploadSource:       'magic_link',
-      magicPaymentLinkId: link.id,
-      payerName:          payerName     || link.payerName     || null,
-      payerRelationship:  (payerRelationship || link.payerRelationship || null) ?
-                            String(payerRelationship || link.payerRelationship).toLowerCase() : null,
-      ocrData:            ocrResult ? {
-                            amount:           ocrResult.amount,
-                            amounts:          ocrResult.amounts,
-                            date:             ocrResult.date,
-                            bank:             ocrResult.bank,
-                            sender:           ocrResult.sender,
-                            receiver:         ocrResult.receiver,
-                            receiverVerified: ocrResult.receiverVerified,
-                            refNumber:        ocrResult.refNumber,
-                            rawText:          ocrResult.rawText?.slice(0, 1000),
-                            autoApproved,
-                            approvalReason,
-                            account:  slipDecision?.account || null,
-                            slipDate: slipDecision?.slipDate || null,
-                            checks:   slipDecision?.checks || null,
-                          } : null,
-      ocrConfidence:      ocrResult?.confidence || null,
-      // Top-level OCR columns — easier to query, index, and display
-      ocrAmount:          ocrResult?.amount     || null,
-      ocrBank:            ocrResult?.bank       || null,
-      ocrDate:            ocrResult?.date       || null,
-      ocrSender:          ocrResult?.sender     || null,
-      ocrReceiver:        ocrResult?.receiver   || null,
-      ocrTransactionId:   ocrResult?.refNumber  || null,
+    // userId from the form is NOT trusted any more: only a verified login.
+    if (req.body.userId) console.warn(`[magic-link] ignoring userId=${req.body.userId} from the form; using the login instead`);
+    const out = await redeemWithSlip(link, {
+      imagePath: req.file.path.replace(/\\/g, '/'),
+      userId: await trustedUserId(req),
+      payerName: req.body.payerName,
+      payerRelationship: req.body.payerRelationship,
     });
-
-    // ─── Auto-activate the plan if OCR auto-approved it ───
-    // Mirrors the existing admin approvedImage logic so behavior matches.
-    let activationResult = null;
-    if (autoApproved && planImage.UserId && planImage.PlanId) {
-      try {
-        activationResult = await applyPlanApproval(planImage, { approvalSource: 'auto' });
-        if (!activationResult.ok) {
-          // Activation failed (missing user, plan, or duration) — fall back to admin review.
-          console.warn('Auto-activation failed, falling back to admin queue:', activationResult.error);
-          autoApproved = false;
-          approvalReason = `Auto-approve failed: ${activationResult.error} — admin review required`;
-        }
-      } catch (err) {
-        console.error('Auto-activation error:', err);
-        autoApproved = false;
-      }
-    } else if (autoApproved && (!planImage.UserId || !planImage.PlanId)) {
-      // Can't activate without a user + plan — needs admin to link them up
-      console.warn('Auto-approve flag set but missing UserId/PlanId — admin review required');
-      autoApproved = false;
-      approvalReason = 'OCR passed but link not associated with user/plan — admin review required';
-    }
-
-    // Oct 2026: payment-link slips that need a person now alert admins too.
-    if (!autoApproved) {
-      require('../../helper/paymentVerify').notifySlipForReview(planImage, approvalReason).catch(() => {});
-    }
-
-    // Update the link
-    link.status = 'redeemed';
-    link.redeemedAt = new Date();
-    link.redeemedPlanImageId = planImage.id;
-    if (userId && !link.UserId) link.UserId = userId;
-    await link.save();
-
-    // Different user-facing message based on auto-approve outcome
-    const userMessage = autoApproved
-      ? 'Payment verified — your plan is now active!'
-      : 'Payment slip received. Our team is verifying and you will be notified shortly.';
-
-    return res.json(ApiResponse('1', userMessage, {
-      planImageId:   planImage.id,
-      linkStatus:    link.status,
-      autoApproved,
-      verificationStatus: autoApproved ? 'verified' : 'pending_review',
-      userPlanActivated: !!activationResult?.ok,
-      userPlanId:        activationResult?.userPlanId || null,
-      // Hint for the app UI — show different post-upload screens
-      ocrSummary: ocrResult ? {
-        confidence:       ocrResult.confidence,
-        amount:           ocrResult.amount,
-        bank:             ocrResult.bank,
-        date:             ocrResult.date,
-        receiver:         ocrResult.receiver,
-        receiverVerified: ocrResult.receiverVerified,
-        refNumber:        ocrResult.refNumber,
-      } : null,
-    }));
+    if (!out.ok) return res.status(out.code).json(ApiResponse('0', out.message, out.data));
+    return res.json(ApiResponse('1', out.message, out.data));
   } catch (err) {
     console.error('redeemLink error:', err);
+    return res.status(500).json(ApiResponse('0', err.message, {}));
+  }
+}
+
+// The CRM, signed (routes/internal.js): she sent the slip on WhatsApp.
+//   { token, image_base64, mime?, app_user_id? }
+const MIME_EXT = { 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/heic': '.heic', 'image/heif': '.heif' };
+async function redeemFromCrm(req, res) {
+  try {
+    const { token, image_base64: b64, mime = 'image/jpeg', app_user_id: appUserId } = req.body || {};
+    if (!token || !b64) return res.status(400).json(ApiResponse('0', 'token and image_base64 are required', {}));
+    const ext = MIME_EXT[String(mime).toLowerCase()];
+    if (!ext) return res.status(400).json(ApiResponse('0', `Not an image: ${mime}`, {}));
+    const buf = Buffer.from(String(b64), 'base64');
+    if (!buf.length || buf.length > 8 * 1024 * 1024) return res.status(400).json(ApiResponse('0', 'Image is empty or bigger than 8 MB', {}));
+    const link = await MagicPaymentLink.findOne({ where: { token: String(token) } });
+    const file = path.join(slipUploadDir, `slip-wa-${Date.now()}-${Math.floor(Math.random() * 1e9)}${ext}`);
+    fs.writeFileSync(file, buf);
+    let userId = null;
+    if (appUserId) {
+      const u = await User.findOne({ where: { id: appUserId }, attributes: ['id'] });
+      userId = u ? u.id : null;
+    }
+    const out = await redeemWithSlip(link, { imagePath: file.replace(/\\/g, '/'), userId });
+    if (!out.ok) return res.status(out.code === 404 ? 404 : 200).json(ApiResponse('0', out.message, out.data));
+    return res.json(ApiResponse('1', out.message, out.data));
+  } catch (err) {
+    console.error('redeemFromCrm error:', err);
     return res.status(500).json(ApiResponse('0', err.message, {}));
   }
 }
@@ -462,5 +491,7 @@ module.exports = {
   createLink,
   getLink,
   redeemLink,
+  redeemFromCrm,
+  redeemWithSlip,
   slipUpload,
 };

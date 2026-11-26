@@ -138,6 +138,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// Slip photos from the CRM come as base64 (up to 8 MB image → ~11 MB JSON).
+// Only this route gets the bigger limit; everything else keeps the default.
+app.use("/internal/crm/payment-slips", express.json({ limit: "12mb" }));
 app.use(express.json());
 
 //for form data and multipart data

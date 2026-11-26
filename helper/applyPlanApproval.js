@@ -95,7 +95,7 @@ async function applyPlanApproval(planImage, opts = {}) {
 
     // Mark this slip as processed
     image.status = 0;
-    // AI-approved: admin must confirm the money arrived within 48 h
+    // AI-approved: admin confirms the money arrived (reminders until they do; no auto-pause)
     // (helper/paymentVerify.js), otherwise this plan is paused.
     if (opts.approvalSource === 'auto') {
       image.verifyStatus = 'pending';
