@@ -51,8 +51,18 @@ router.get("/crm/customers", verifyCrmSigned, asyncMiddleware(async (req, res) =
   const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 2000) : null;
   const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
 
+  // Optional lookup (Nov 2026): ?phone= matches the last 10 digits, ?email=
+  // matches case-insensitively; both given → either one matches.
+  const where = { userType: { [Op.in]: ["User", "user"] } };
+  const phone10 = String(req.query.phone || "").replace(/\D/g, "").slice(-10);
+  const email = String(req.query.email || "").trim().toLowerCase();
+  const either = [];
+  if (phone10.length === 10) either.push({ phone: { [Op.like]: `%${phone10}` } });
+  if (email.includes("@")) either.push(require("sequelize").where(require("sequelize").fn("LOWER", require("sequelize").col("email")), email));
+  if (either.length) where[Op.or] = either;
+
   const query = {
-    where: { userType: { [Op.in]: ["User", "user"] } },
+    where,
     attributes: ["id", "phone", "email", "firstName", "lastName", "createdAt"],
     order: [["id", "ASC"]],
     raw: true,

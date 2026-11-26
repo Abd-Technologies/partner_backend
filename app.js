@@ -213,6 +213,13 @@ db.sequelize.sync().then(async () => {
   } catch (e) {
     console.error("❌ CRM outbox table check FAILED — CRM events wait until fixed:", e.message);
   }
+  // Optional email on payment links (Nov 2026). Idempotent.
+  try {
+    await require("./migrations/20261126120000-magic-link-email").up(db.sequelize.getQueryInterface(), db.Sequelize);
+    console.log("✅ Payment link email column checked");
+  } catch (e) {
+    console.error("❌ Payment link email column check FAILED:", e.message);
+  }
   // Must run first: the Slot model is paranoid (needs Slots.deletedAt).
   try {
     await require("./migrations/20261026120000-slot-delete-announcement-text").up(db.sequelize.getQueryInterface(), db.Sequelize);

@@ -118,6 +118,7 @@ async function createLink(req, res) {
       PlanId,
       PriceDurationId,
       phone,
+      email,
       crmLeadId,
       listPrice,
       paidAmount,
@@ -180,6 +181,10 @@ async function createLink(req, res) {
       PlanId: PlanId || null,
       PriceDurationId: PriceDurationId || null,
       phone: phone || null,
+      // Optional: her signup email, so the plan also finds her by email.
+      email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim())
+        ? String(email).trim().toLowerCase().slice(0, 160)
+        : null,
       crmLeadId: crmLeadId || null,
       listPrice: parseInt(listPrice, 10),
       paidAmount: parseInt(paidAmount, 10),
@@ -477,6 +482,11 @@ async function redeemFromCrm(req, res) {
     if (appUserId) {
       const u = await User.findOne({ where: { id: appUserId }, attributes: ['id'] });
       userId = u ? u.id : null;
+    }
+    if (!userId) {
+      // Not linked in the CRM yet — she may still have an account: the link's
+      // phone (last 10 digits) or email. Only an unambiguous single match.
+      userId = await require('../../helper/paymentClaims').findAccountFor(link);
     }
     const out = await redeemWithSlip(link, { imagePath: file.replace(/\\/g, '/'), userId });
     if (!out.ok) return res.status(out.code === 404 ? 404 : 200).json(ApiResponse('0', out.message, out.data));

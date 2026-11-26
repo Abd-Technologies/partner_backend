@@ -9,6 +9,7 @@ module.exports = (sequelize, DataTypes) => {
     PriceDurationId:    { type: DataTypes.INTEGER, allowNull: true },
     UserId:             { type: DataTypes.INTEGER, allowNull: true },
     phone:              { type: DataTypes.STRING(32), allowNull: true },
+    email:              { type: DataTypes.STRING(160), allowNull: true },
     crmLeadId:          { type: DataTypes.INTEGER, allowNull: true },
     listPrice:          { type: DataTypes.INTEGER, allowNull: false },
     paidAmount:         { type: DataTypes.INTEGER, allowNull: false },

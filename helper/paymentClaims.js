@@ -15,22 +15,29 @@ const { Op } = require("sequelize");
 
 const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
 
+const normEmail = (e) => String(e || "").trim().toLowerCase();
+
 async function claimFor(user) {
   const tail = last10(user && user.phone);
-  if (!user || !user.id || tail.length !== 10) return { claimed: 0, started: 0 };
+  const email = normEmail(user && user.email);
+  if (!user || !user.id || (tail.length !== 10 && !email.includes("@"))) return { claimed: 0, started: 0 };
   const { MagicPaymentLink, PlanImage } = require("../models");
   const links = await MagicPaymentLink.findAll({
     where: {
       UserId: null,
       status: "redeemed",
       redeemedPlanImageId: { [Op.ne]: null },
-      phone: { [Op.ne]: null },
+      [Op.or]: [{ phone: { [Op.ne]: null } }, { email: { [Op.ne]: null } }],
     },
     order: [["redeemedAt", "ASC"]],
   });
+  // Hers if the payment request's phone OR email matches the account.
+  const isHers = (l) =>
+    (tail.length === 10 && last10(l.phone) === tail) ||
+    (email.includes("@") && normEmail(l.email) === email);
   let claimed = 0;
   let started = 0;
-  for (const link of links.filter((l) => last10(l.phone) === tail)) {
+  for (const link of links.filter(isHers)) {
     const img = await PlanImage.findOne({ where: { id: link.redeemedPlanImageId, UserId: null } });
     if (!img) continue;
     // Claim it (once): another process may be doing the same right now.
@@ -55,6 +62,34 @@ async function claimFor(user) {
   return { claimed, started };
 }
 
+/**
+ * The app account a payment link belongs to, when there's exactly one:
+ * phone (last 10 digits) or email. Ambiguous (two accounts share the
+ * number) or none → null, and the slip waits for signup / the next login.
+ */
+async function findAccountFor(link) {
+  try {
+    const { User } = require("../models");
+    const tail = last10(link && link.phone);
+    const email = normEmail(link && link.email);
+    const either = [];
+    if (tail.length === 10) either.push({ phone: { [Op.like]: `%${tail}` } });
+    if (email.includes("@")) either.push({ email });
+    if (!either.length) return null;
+    const users = await User.findAll({
+      where: { [Op.or]: either, userType: { [Op.in]: ["User", "user"] } },
+      attributes: ["id", "phone", "email"],
+      limit: 3,
+    });
+    const hits = users.filter((u) =>
+      (tail.length === 10 && last10(u.phone) === tail) || (email.includes("@") && normEmail(u.email) === email));
+    return hits.length === 1 ? hits[0].id : null;
+  } catch (e) {
+    console.error("[paymentClaims] findAccountFor:", e.message);
+    return null;
+  }
+}
+
 /** User afterCreate: run after the signup is committed, never fail it. */
 function onUserCreated(user, options) {
   const run = () => claimFor(user).catch((e) => console.error("[paymentClaims]", e.message));
@@ -63,4 +98,4 @@ function onUserCreated(user, options) {
   else setImmediate(run);
 }
 
-module.exports = { claimFor, onUserCreated, last10 };
+module.exports = { claimFor, onUserCreated, findAccountFor, last10 };
