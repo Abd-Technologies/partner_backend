@@ -81,6 +81,66 @@ router.post("/crm/payment-claims/run", verifyCrmSigned, asyncMiddleware(async (r
   res.json(require("../helper/ApiResponse")("1", r.started ? "Plan started" : r.claimed ? "Slip attached" : "Nothing to start", r));
 }));
 
+// POST /internal/crm/test-reset { phone, email? } — TEST ONLY (Nov 2026).
+// Wipes one test customer so the WhatsApp → payment → signup flow can be
+// run again: her app account(s) + plans, every payment link for the phone /
+// email and the slips on them. Refused unless the phone is listed in
+// TEST_RESET_PHONES (comma list) in this backend's .env.
+router.post("/crm/test-reset", verifyCrmSigned, asyncMiddleware(async (req, res) => {
+  const R = require("../helper/ApiResponse");
+  const { Op } = require("sequelize");
+  const { User, UserPlan, MagicPaymentLink, PlanImage } = require("../models");
+  const tail = String(req.body?.phone || "").replace(/\D/g, "").slice(-10);
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const allowed = String(process.env.TEST_RESET_PHONES || "").split(",").map((p) => p.replace(/\D/g, "").slice(-10)).filter(Boolean);
+  if (tail.length !== 10 || !allowed.includes(tail)) {
+    return res.json(R("0", "Not a test number (add it to TEST_RESET_PHONES in the app backend .env)", {}));
+  }
+  const userOr = [{ phone: { [Op.like]: `%${tail}` } }];
+  if (email.includes("@")) userOr.push({ email });
+  const users = (await User.findAll({ where: { [Op.or]: userOr, userType: { [Op.in]: ["User", "user"] } }, attributes: ["id", "phone", "email"] }))
+    .filter((u) => String(u.phone || "").replace(/\D/g, "").endsWith(tail) || (email && String(u.email || "").toLowerCase() === email));
+  const userIds = users.map((u) => u.id);
+  const linkOr = [{ phone: { [Op.like]: `%${tail}` } }];
+  if (email.includes("@")) linkOr.push({ email });
+  if (userIds.length) linkOr.push({ UserId: { [Op.in]: userIds } });
+  const links = await MagicPaymentLink.findAll({ where: { [Op.or]: linkOr } });
+  const linkIds = links.map((l) => l.id);
+  const imgOr = [];
+  if (linkIds.length) imgOr.push({ magicPaymentLinkId: { [Op.in]: linkIds } });
+  const redeemed = links.map((l) => l.redeemedPlanImageId).filter(Boolean);
+  if (redeemed.length) imgOr.push({ id: { [Op.in]: redeemed } });
+  if (userIds.length) imgOr.push({ UserId: { [Op.in]: userIds } });
+  const out = { users: userIds, payment_links: linkIds.length, slips: 0, plans: 0, errors: [] };
+  if (imgOr.length) out.slips = await PlanImage.destroy({ where: { [Op.or]: imgOr } }).catch((e) => { out.errors.push(`slips: ${e.message}`); return 0; });
+  if (linkIds.length) await MagicPaymentLink.destroy({ where: { id: { [Op.in]: linkIds } } }).catch((e) => out.errors.push(`links: ${e.message}`));
+  if (userIds.length) out.plans = await UserPlan.destroy({ where: { userId: { [Op.in]: userIds } } }).catch((e) => { out.errors.push(`plans: ${e.message}`); return 0; });
+  // Everything else that points at her account (cycle data, check-ins,
+  // screening, chat…) goes first, or the account row can't be deleted.
+  if (userIds.length) {
+    const seq = User.sequelize;
+    const [refs] = await seq.query(
+      `SELECT TABLE_NAME AS t, COLUMN_NAME AS c FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'Users' AND TABLE_NAME <> 'Users'`
+    );
+    out.child_rows = {};
+    for (let pass = 0; pass < 3; pass++) { // a few passes: children of children
+      for (const { t, c } of refs) {
+        try {
+          const [r] = await seq.query(`DELETE FROM \`${t}\` WHERE \`${c}\` IN (:ids)`, { replacements: { ids: userIds } });
+          const n = r?.affectedRows ?? 0;
+          if (n) out.child_rows[`${t}.${c}`] = (out.child_rows[`${t}.${c}`] || 0) + n;
+        } catch (_) { /* a grandchild still points here — next pass */ }
+      }
+    }
+  }
+  for (const u of users) {
+    await u.destroy().catch((e) => out.errors.push(`user ${u.id}: ${e.message}`));
+  }
+  console.log("🧪 [test-reset]", tail, out);
+  res.json(R(out.errors.length ? "0" : "1", out.errors.length ? `Partly reset: ${out.errors.join("; ").slice(0, 400)}` : "Reset", out));
+}));
+
 router.get("/crm/customers", verifyCrmSigned, asyncMiddleware(async (req, res) => {
   const { User } = require("../models");
   const { Op } = require("sequelize");
