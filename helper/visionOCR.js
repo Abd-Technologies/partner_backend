@@ -231,6 +231,15 @@ function parseSlipText(rawText) {
     const m = /(?:^|[^A-Z0-9])#\s?((?=[A-Z0-9\-]*\d)[A-Z0-9][A-Z0-9\-]{6,31})\b/i.exec(text);
     if (m) refNumber = m[1];
   }
+  // Nov 2026: same two-column problem, ID without a "#" (bank apps write
+  // "Transaction ID ... TEST20261126035" with the value in another column).
+  // Only when the slip has an ID label and EXACTLY ONE ID-like code remains
+  // after removing IBANs, phone numbers, account-style long digit runs,
+  // dates, times and amounts. Two or more → no guess (admin review).
+  // A reused reference is still caught by the duplicate check.
+  if (!refNumber && /\b(?:Transaction|Trans|Txn|Trx|Reference|Ref|TID|RRN|STAN)\b/i.test(text)) {
+    refNumber = soleIdLikeCode(text);
+  }
 
   return {
     amount,
@@ -350,6 +359,31 @@ async function extractSlipData(imagePath, expected = {}) {
     console.error('extractSlipData error:', err.message);
     return null;
   }
+}
+
+
+/**
+ * The one code on a slip that looks like a transaction ID, or null.
+ * 8–32 letters/digits/dashes with at least 6 digits, that is not an IBAN
+ * (PK + 2 digits), a phone (03xx / 92 3xx), a 14+ digit account number,
+ * a date or an amount.
+ */
+function soleIdLikeCode(text) {
+  const seen = new Set();
+  const re = /(?:^|[^A-Z0-9\-])((?=[A-Z0-9\-]*\d)[A-Z0-9][A-Z0-9\-]{7,31})(?![A-Z0-9])/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const tok = m[1].toUpperCase().replace(/-+$/, "");
+    const digits = tok.replace(/\D/g, "");
+    if (digits.length < 6) continue;
+    if (/^PK\d{2}[A-Z]{4}/.test(tok)) continue;                 // IBAN
+    if (/^(?:03\d{9}|923\d{9}|\+?923\d{9})$/.test(tok)) continue; // phone
+    if (/^\d{14,}$/.test(tok)) continue;                           // account number
+    if (/^\d{1,4}-\d{1,2}-\d{1,4}$/.test(tok)) continue;            // date
+    if (/^\d{1,3}(?:,\d{3})+$/.test(tok)) continue;                // amount
+    seen.add(tok);
+  }
+  return seen.size === 1 ? [...seen][0] : null;
 }
 
 module.exports = {
