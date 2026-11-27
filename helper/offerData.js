@@ -103,6 +103,111 @@ async function livePrices() {
   return rows;
 }
 
+// ── Static mode (config/offers.json → "static") ──────────────────
+// Set while the live prices / timetable are not wired up. When
+// offer.static.plans exists, nothing here touches the database.
+const MONTH_LABEL = (m) => (m === 1 ? '1 Month' : m + ' Months');
+
+function staticPackages(offer) {
+  const st = offer.static || {};
+  const cur = st.currency || 'PKR';
+  return (st.plans || []).filter((p) => p && Array.isArray(p.packages) && p.packages.length).map((p, i) => ({
+    planId: p.id || `s${i + 1}`,
+    title: p.title || 'Fit Her plan',
+    description: p.description || '',
+    currency: p.currency || cur,
+    packages: p.packages.map((x) => {
+      const months = toInt(x.months) || 1;
+      const listPrice = toInt(x.was);
+      // "now" wins; without it the offer's own per-length price/percent applies.
+      let offerPrice = x.now == null ? offerPriceFor(offer, months, listPrice) : toInt(x.now);
+      if (offer.ended || !listPrice || offerPrice == null || offerPrice >= listPrice) offerPrice = null;
+      const pay = offerPrice != null ? offerPrice : listPrice;
+      return {
+        months,
+        label: x.label || MONTH_LABEL(months),
+        priceDurationId: x.priceDurationId || null,
+        listPrice, offerPrice, pay,
+        save: offerPrice != null ? listPrice - offerPrice : 0,
+        savePct: offerPrice != null ? Math.round(((listPrice - offerPrice) / listPrice) * 100) : 0,
+        perMonth: Math.round(pay / months),
+      };
+    }).filter((x) => x.listPrice).sort((a, b) => a.months - b.months),
+  })).filter((p) => p.packages.length);
+}
+
+/** Static timetable: classes as typed in the config, grouped by time of day. */
+function staticTimetable(offer) {
+  const st = offer.static || {};
+  const classes = (st.classes || []).map((c) => {
+    const t = moment.tz(normalizeSlotTime(c.time), SLOT_FORMAT, true, PKT);
+    const mins = t.isValid() ? t.hour() * 60 + t.minute() : 0;
+    return {
+      time: t.isValid() ? t.format(SLOT_FORMAT) : String(c.time || ''),
+      sortKey: mins,
+      part: partOfDay(Math.floor(mins / 60)),
+      type: c.type || 'Live class',
+      level: c.level || null,
+      trainer: c.trainer || null,
+      trainerImage: c.trainerImage ? fileUrl(c.trainerImage) : trainerPhoto(st, c.trainer),
+      bestFor: c.bestFor || null,
+      days: c.days || '',
+      staticDays: true,
+    };
+  }).sort((a, b) => a.sortKey - b.sortKey);
+  const trainers = (st.trainers || []).map((t) =>
+    (typeof t === 'string' ? { name: t, image: null } : { name: t.name, image: fileUrl(t.image) }));
+  return {
+    classes,
+    trainers,
+    total: classes.length,
+    perDay: toInt(st.classesPerDay) || classes.length,
+  };
+}
+function trainerPhoto(st, name) {
+  const t = (st.trainers || []).find((x) => x && typeof x === 'object' && x.name === name);
+  return t ? fileUrl(t.image) : null;
+}
+
+/** Numbers typed into config.stats. Anything left null is read live instead. */
+function staticProof(offer) {
+  const s = (offer.static && offer.static.stats) || {};
+  const n = (v) => (toInt(v) || null);
+  return {
+    womenThisWeek: n(s.womenThisWeek),
+    ratingAvg: s.rating ? Math.round(Number(s.rating) * 10) / 10 : null,
+    ratingCount: n(s.ratingCount),
+    membersJoined: n(s.membersJoined),
+    results: [],
+  };
+}
+/**
+ * Social proof for the hero. Static mode still shows REAL numbers: a value
+ * typed in config.stats wins, anything left null is read from the database,
+ * and if that read fails the line is simply left out (never invented).
+ */
+async function proof(offer) {
+  const typed = isStatic(offer) ? staticProof(offer) : null;
+  if (typed && typed.womenThisWeek != null && typed.ratingAvg != null) return typed;
+  let live = { womenThisWeek: null, ratingAvg: null, ratingCount: null, membersJoined: null, results: [] };
+  try {
+    live = await liveProof();
+  } catch (e) {
+    console.error('[offer] live proof unavailable:', e.message);
+  }
+  if (!typed) return live;
+  const ratingTyped = typed.ratingAvg != null;
+  return {
+    womenThisWeek: typed.womenThisWeek != null ? typed.womenThisWeek : live.womenThisWeek,
+    ratingAvg: ratingTyped ? typed.ratingAvg : live.ratingAvg,
+    ratingCount: ratingTyped ? typed.ratingCount : live.ratingCount,
+    membersJoined: typed.membersJoined != null ? typed.membersJoined : live.membersJoined,
+    results: live.results,
+  };
+}
+
+const isStatic = (offer) => !!(offer && offer.static && Array.isArray(offer.static.plans) && offer.static.plans.length);
+
 /**
  * [{ planId, title, description, currency, packages: [{ months, label,
  *    listPrice, offerPrice, save, savePct, perMonth, priceDurationId }] }]
@@ -110,6 +215,7 @@ async function livePrices() {
  * offerPrice is null (normal prices).
  */
 async function offerPackages(offer) {
+  if (isStatic(offer)) return staticPackages(offer);
   const rows = await livePrices();
   const want = String(offer.country || 'Pakistan').toLowerCase();
   const onlyPlans = Array.isArray(offer.planIds) && offer.planIds.length ? offer.planIds.map(Number) : null;
@@ -174,7 +280,8 @@ let _ttCache = { t: 0, data: null };
  * { classes: [{ time, sortKey, part, type, level, trainer, days[] }],
  *   perDay: max classes on one day, total: distinct times }
  */
-async function classTimetable() {
+async function classTimetable(offer) {
+  if (isStatic(offer)) return staticTimetable(offer);
   if (_ttCache.data && Date.now() - _ttCache.t < CACHE_MS) return _ttCache.data;
   const slots = await Slot.findAll({
     where: { trainerId: { [Op.ne]: null } },
@@ -233,11 +340,11 @@ let _proofCache = { t: 0, data: null };
  * Each part is null/empty when the table is missing or the number is too
  * small to be worth showing; the page then leaves that line out.
  */
-async function proof() {
+async function liveProof() {
   if (_proofCache.data && Date.now() - _proofCache.t < 5 * CACHE_MS) return _proofCache.data;
   const since7 = new Date(Date.now() - 7 * 86400000);
   const since90 = new Date(Date.now() - 90 * 86400000);
-  const out = { womenThisWeek: null, ratingAvg: null, ratingCount: null, results: [] };
+  const out = { womenThisWeek: null, ratingAvg: null, ratingCount: null, membersJoined: null, results: [] };
   try {
     const n = await ClassPresence.count({ where: { joinedAt: { [Op.gte]: since7 } }, distinct: true, col: 'userId' });
     if (n >= 20) out.womenThisWeek = n;
@@ -267,7 +374,7 @@ function nextClass(classes, now = new Date()) {
     const d = pk.clone().add(add, 'days');
     const wd = d.format('dddd');
     const mins = add === 0 ? pk.hour() * 60 + pk.minute() : -1;
-    const c = classes.find((x) => x.sortKey > mins && (!x.days.length || x.days.includes(wd)));
+    const c = classes.find((x) => x.sortKey > mins && (x.staticDays || !x.days.length || x.days.includes(wd)));
     if (c) return { when: add === 0 ? 'Today' : add === 1 ? 'Tomorrow' : wd, time: c.time, type: c.type, trainer: c.trainer, trainerImage: c.trainerImage };
   }
   return null;
@@ -275,6 +382,7 @@ function nextClass(classes, now = new Date()) {
 
 /** "Mon–Sat", "Mon, Wed, Fri", "Every day", or "" */
 function daysLabel(days) {
+  if (typeof days === 'string') return days; // static config: already written out
   if (!days || !days.length) return '';
   if (days.length === 7) return 'Every day';
   const idx = days.map((d) => WEEK.indexOf(d)).sort((a, b) => a - b);
@@ -284,4 +392,4 @@ function daysLabel(days) {
   return idx.map(short).join(', ');
 }
 
-module.exports = { loadOffer, offerPackages, classTimetable, daysLabel, offerPriceFor, proof, nextClass, fileUrl };
+module.exports = { loadOffer, offerPackages, classTimetable, daysLabel, offerPriceFor, proof, nextClass, fileUrl, isStatic };
