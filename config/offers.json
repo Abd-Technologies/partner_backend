@@ -1,10 +1,10 @@
 {
-  "_help": "Campaign offer pages: https://backend.thefither.com/offer/<key>. Edit and save; the page picks changes up within a minute, no restart. offers: package length in MONTHS -> offer price (a number, e.g. 6000) or a percent off the app price (e.g. \"25%\"). The 'was' price always comes live from the app's Prices table. heroImage: a photo URL or server path (e.g. public/images/hero.jpg) for the top of the page; leave \"\" to show the next live class instead. goals: the chips under the headline. endsAt: when the timer runs out (Pakistan time). After that the page shows normal prices. planIds: [] = every active plan that has a price for these lengths; or list plan ids to show only those. features: [icon, title, text]; icon is one of class, diet, consult, progress, cycle, community (or any emoji).",
+  "_help": "Campaign offer pages: https://backend.thefither.com/offer/<key>. Edit and save; the page picks changes up within a minute, no restart. STATIC MODE: while \"static\" is present the page uses the prices, classes and trainers typed below and never reads the database. Delete the whole \"static\" block to go back to live app prices and the live timetable. In static.plans, \"was\" is the normal app price and \"now\" is the campaign price (leave \"now\" out for no discount on that length). classes/trainers: type your real class times and trainer names; while classes is empty the timetable section is hidden. stats: leave a value null and the page reads the REAL number from the app database (women who trained live this week, the class rating); type a number only to override it. A number is hidden when it is too small to impress, or when the database cannot be read. endsAt: when the timer runs out (Pakistan time). After that the page shows normal prices. heroImage: a photo URL or server path (e.g. public/images/hero.jpg) for the top of the page. showResults: true shows the \"Real women, real results\" section (images from the Testimonials table); false hides it. features: [icon, title, text]; icon is one of class, diet, consult, progress, cycle, community (or any emoji). classes[].bestFor: the cycle phases the class suits, e.g. \"Menstrual · Luteal\". holdHours: how many hours you actually hold her slot after she taps (shown on the confirmation; set 0 to claim no hold). slotsLeft: a number shows \"Only N slots left at this price\"; null hides it. appShots: screens of the app, shown as a swipeable row; src is a path under public/ or a full URL.",
   "reactivation": {
     "active": true,
     "title": "Our best rate is back",
     "subtitle": "Women-only live classes, your own diet plan and everything in the Fit Her app, at our lowest price this year.",
-    "endsAt": "2026-12-26T23:59:00+05:00",
+    "endsAt": "2026-12-01T23:59:00+05:00",
     "country": "Pakistan",
     "planIds": [],
     "offers": {
@@ -19,7 +19,131 @@
       "Hormonal balance"
     ],
     "heroImage": "",
+    "showResults": false,
     "whatsapp": "923263827075",
+    "holdHours": 24,
+    "slotsLeft": null,
+    "static": {
+      "currency": "PKR",
+      "plans": [
+        {
+          "title": "Workout + Diet (Irum)",
+          "packages": [
+            {
+              "months": 3,
+              "was": 9000,
+              "now": 6000
+            },
+            {
+              "months": 6,
+              "was": 18000,
+              "now": 8000
+            }
+          ]
+        },
+        {
+          "title": "Workout + Diet (Asma)",
+          "packages": [
+            {
+              "months": 1,
+              "was": 3700
+            },
+            {
+              "months": 2,
+              "was": 6000
+            },
+            {
+              "months": 3,
+              "was": 8000,
+              "now": 6000
+            }
+          ]
+        }
+      ],
+      "stats": {
+        "womenThisWeek": 180,
+        "rating": 4.7,
+        "ratingCount": 900,
+        "membersJoined": 5000
+      },
+      "trainers": [
+        {
+          "name": "Hira"
+        },
+        {
+          "name": "Marukh"
+        },
+        {
+          "name": "Shumaila"
+        },
+        {
+          "name": "Affifa"
+        }
+      ],
+      "classes": [
+        {
+          "time": "8:00 AM",
+          "type": "Yoga",
+          "level": "Beginner",
+          "trainer": "Hira",
+          "days": "Mon–Sat",
+          "bestFor": "Menstrual · Luteal"
+        },
+        {
+          "time": "10:00 AM",
+          "type": "High Intensity",
+          "level": "Intermediate",
+          "trainer": "Shumaila",
+          "days": "Mon–Sat"
+        },
+        {
+          "time": "11:00 AM",
+          "type": "Zumba",
+          "level": "All Levels",
+          "trainer": "Marukh",
+          "days": "Mon–Sat",
+          "bestFor": "Follicular · Ovulation"
+        },
+        {
+          "time": "2:00 PM",
+          "type": "Yoga",
+          "level": "Intermediate",
+          "trainer": "Hira",
+          "days": "Mon–Sat",
+          "bestFor": "Menstrual · Luteal"
+        },
+        {
+          "time": "4:00 PM",
+          "type": "High Intensity",
+          "level": "Advanced",
+          "trainer": "Hira",
+          "days": "Mon–Sat"
+        },
+        {
+          "time": "7:30 PM",
+          "type": "Zumba",
+          "level": "Intermediate",
+          "trainer": "Hira",
+          "days": "Mon–Sat",
+          "bestFor": "Follicular · Ovulation"
+        },
+        {
+          "time": "9:00 PM",
+          "type": "Yoga",
+          "level": "Beginner",
+          "trainer": "Marukh",
+          "days": "Mon–Sat",
+          "bestFor": "Menstrual · Luteal"
+        },
+        {
+          "time": "10:00 PM",
+          "type": "Workout of the day",
+          "trainer": "Shumaila",
+          "days": "Mon–Sat",
+          "level": "Changes daily"
+        }
+      ]
+    },
     "features": [
       [
         "class",

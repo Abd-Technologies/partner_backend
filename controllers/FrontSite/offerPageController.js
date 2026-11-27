@@ -4,7 +4,7 @@
  *
  * Campaign offer page sent on WhatsApp. Everything shown is real, read live:
  *   - packages: the app's own price struck out + the campaign price
- *   - proof: women who trained live this week, average class rating,
+ *   - proof: average class rating and how many classes it covers,
  *     result images from the Testimonials table (each hidden when too small)
  *   - trainers with their photos, the class timetable, the next live class
  *   - a countdown to the offer's end (config/offers.json → endsAt)
@@ -74,12 +74,12 @@ async function offerPage(req, res) {
 
   let plans = [];
   let tt = { classes: [], trainers: [], total: 0, perDay: 0 };
-  let pr = { womenThisWeek: null, ratingAvg: null, ratingCount: null, results: [] };
+  let pr = { womenThisWeek: null, ratingAvg: null, ratingCount: null, membersJoined: null, results: [] };
   try {
     [plans, tt, pr] = await Promise.all([
       offerPackages(offer),
-      classTimetable().catch((e) => { console.error('[offer] timetable:', e.message); return tt; }),
-      proof().catch((e) => { console.error('[offer] proof:', e.message); return pr; }),
+      classTimetable(offer).catch((e) => { console.error('[offer] timetable:', e.message); return tt; }),
+      proof(offer).catch((e) => { console.error('[offer] proof:', e.message); return pr; }),
     ]);
   } catch (e) {
     console.error('[offer] packages:', e.message);
@@ -93,9 +93,16 @@ async function offerPage(req, res) {
   const features = Array.isArray(offer.features) ? offer.features : [];
   const goals = Array.isArray(offer.goals) ? offer.goals.slice(0, 5) : [];
   const heroImage = offer.heroImage ? fileUrl(offer.heroImage) : null;
+  // "Book my slot" only promises what you keep: hold_hours is how long you
+  // actually hold her place. 0 or missing = no hold is claimed.
+  const holdHours = Math.max(0, Math.min(168, parseInt(offer.holdHours, 10) || 0));
+  const slotsLeft = parseInt(offer.slotsLeft, 10) > 0 ? parseInt(offer.slotsLeft, 10) : null;
+  const shots = (Array.isArray(offer.appShots) ? offer.appShots : [])
+    .map((x) => ({ src: fileUrl(x.src), caption: x.caption || '' })).filter((x) => x.src).slice(0, 6);
   const next = nextClass(tt.classes);
   const trainers = (tt.trainers || []).slice(0, 8);
-  const allResults = (pr.results || []).slice(0, 8);
+  // "Real women, real results" stays hidden until config/offers.json says showResults: true.
+  const allResults = offer.showResults === true ? (pr.results || []).slice(0, 8) : [];
   // Full rows of 4 on desktop; 1-3 are shown as they are.
   const results = allResults.length >= 4 ? allResults.slice(0, Math.floor(allResults.length / 4) * 4) : allResults;
 
@@ -123,11 +130,30 @@ async function offerPage(req, res) {
     name,
   };
 
-  // Proof lines: only what is real and big enough.
-  const proofBits = [];
-  if (pr.womenThisWeek) proofBits.push(`<li><b>${pr.womenThisWeek.toLocaleString('en-US')}</b><span>women trained live this week</span></li>`);
-  if (pr.ratingAvg) proofBits.push(`<li><b>${pr.ratingAvg.toFixed(1)}<i class="star" aria-hidden="true">★</i></b><span>from ${pr.ratingCount.toLocaleString('en-US')} class ratings</span></li>`);
-  if (tt.perDay) proofBits.push(`<li><b>${tt.perDay}</b><span>live classes every day</span></li>`);
+  // One proof line, not a row of tiles. Members rate each class they attend,
+  // so the rating is the only number here that is both ours and checkable.
+  // Headcounts are deliberately left out: beside the class timetable they
+  // invite a division that misrepresents how full a class actually is.
+  // Social proof: faces + a crowd count + the real class rating. The count is
+  // a floor the business can defend (membersJoined in config); the rating and
+  // its sample size are the DB's own numbers. Any part left null is dropped.
+  let socialHtml = '';
+  {
+    const starPct = pr.ratingAvg ? Math.max(0, Math.min(100, (pr.ratingAvg / 5) * 100)) : 0;
+    const joined = pr.membersJoined
+      ? `<b class="joinNum">Joined by ${pr.membersJoined.toLocaleString('en-US')}+ women</b>` : '';
+    const starRow = pr.ratingAvg
+      ? `<span class="stars" aria-hidden="true">★★★★★<i style="width:${starPct.toFixed(1)}%">★★★★★</i></span>` : '';
+    const subTxt = (pr.ratingAvg && pr.ratingCount)
+      ? `<span class="socialSub"><b>${pr.ratingAvg.toFixed(1)}</b> from ${pr.ratingCount.toLocaleString('en-US')} class ratings</span>`
+      : '';
+    if (joined || starRow) {
+      socialHtml = `<div class="social">
+        <span class="faces" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="socialTxt">${joined}${starRow ? `<span class="socialRow">${starRow}${subTxt}</span>` : subTxt}</span>
+      </div>`;
+    }
+  }
 
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.set('Cache-Control', 'no-store');
@@ -196,12 +222,21 @@ h1{font-size:clamp(30px,8.2vw,58px);line-height:1.02;font-weight:800;letter-spac
 @media(min-width:900px){.goals{flex-wrap:wrap;overflow:visible;margin-right:0;padding-right:0;gap:8px;margin-top:18px}}
 .goals li{white-space:nowrap;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:999px;border:1px solid rgba(185,211,191,.4);color:#fff}
 .goals li.lead{border:0;padding-left:0;color:var(--on-dark);font-weight:400}
-.stats{list-style:none;display:grid;grid-template-columns:repeat(var(--n),1fr);margin-top:18px;padding-top:14px;border-top:1px solid rgba(185,211,191,.2);max-width:460px}
-.stats li{padding-right:10px;min-width:0}
-.stats li+li{border-left:1px solid rgba(185,211,191,.2);padding-left:12px}
-.stats b{display:flex;align-items:center;gap:4px;font-size:22px;font-weight:800;color:#fff;line-height:1.1}
-.stats b .star{color:#F5C451;font-size:16px}
-.stats span{display:block;font-size:12px;line-height:1.35;color:var(--on-dark);margin-top:3px}
+.social{display:flex;align-items:center;gap:12px;margin-top:18px;padding-top:16px;border-top:1px solid rgba(185,211,191,.2);max-width:440px}
+.faces{display:inline-flex;flex:none}
+.faces i{width:34px;height:34px;border-radius:50%;border:2px solid var(--forest);margin-left:-11px;background:#cdd8e8}
+.faces i:first-child{margin-left:0}
+.faces i:nth-child(1){background:linear-gradient(135deg,#7FB3FF,#9FC2FF)}
+.faces i:nth-child(2){background:linear-gradient(135deg,#9E8BFF,#B6A6FF)}
+.faces i:nth-child(3){background:linear-gradient(135deg,#8FD6B0,#A8E0C2)}
+.faces i:nth-child(4){background:linear-gradient(135deg,#F3B7C9,#F7C9D6)}
+.socialTxt{min-width:0;display:flex;flex-direction:column;gap:4px}
+.joinNum{color:#fff;font-weight:700;font-size:15px;line-height:1.2}
+.socialRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stars{position:relative;display:inline-block;color:rgba(185,211,191,.28);font-size:16px;letter-spacing:0;line-height:1;flex:none}
+.stars i{position:absolute;inset:0;overflow:hidden;white-space:nowrap;font-style:normal;color:#F5C451}
+.socialSub{font-size:13px;line-height:1.4;color:var(--on-dark)}
+.socialSub b{color:#fff;font-weight:700}
 .next{display:flex;align-items:center;gap:14px;margin-top:18px;background:var(--forest);color:#fff;border-radius:20px;padding:12px 18px 12px 12px;max-width:440px}
 .next .av{--s:52px;border:2px solid var(--leaf)}
 .next small{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--on-dark)}
@@ -263,7 +298,8 @@ h2.sec{font-size:clamp(22px,5.5vw,28px);font-weight:800;letter-spacing:-.015em;l
 .results figure{scroll-snap-align:start;border-radius:22px;overflow:hidden;background:var(--paper);aspect-ratio:4/5}
 .results img{width:100%;height:100%;object-fit:cover}
 
-.team{list-style:none;display:flex;gap:18px;overflow-x:auto;margin-top:18px;padding-bottom:6px}
+.team{list-style:none;display:flex;gap:18px;overflow-x:auto;margin-top:14px;padding:5px 0 10px;scrollbar-width:none}
+.team::-webkit-scrollbar{display:none}
 .team li{text-align:center;font-size:13px;font-weight:600;flex:none;width:76px}
 .team .av{--s:72px;border:3px solid var(--paper);box-shadow:0 0 0 2px var(--leaf);margin-bottom:8px}
 
@@ -286,6 +322,7 @@ h2.sec{font-size:clamp(22px,5.5vw,28px);font-weight:800;letter-spacing:-.015em;l
 .tt .t{font-weight:800;font-variant-numeric:tabular-nums;font-size:14px}
 .tt .c{font-size:14px;font-weight:600;line-height:1.35}
 .tt .c small{display:block;font-weight:400;color:var(--muted);font-size:12.5px}
+.tt .c small.bf{color:var(--leaf-ink);font-weight:600}
 .tt .av{--s:32px}
 
 .steps{list-style:none;margin-top:18px;display:grid;gap:14px;counter-reset:s}
@@ -311,7 +348,28 @@ main{padding-bottom:120px}
 .bar .cta{width:auto;margin:0;padding:13px 18px;font-size:15px;box-shadow:none}
 @media(min-width:900px){.bar{display:none}}
 
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.was path{stroke-dashoffset:0}}
+.shots{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(188px,58%);gap:14px;overflow-x:auto;scroll-snap-type:x mandatory;margin:18px -18px 0;padding:0 18px 10px;scrollbar-width:none}
+.shots::-webkit-scrollbar{display:none}
+@media(min-width:900px){.shots{grid-auto-flow:row;grid-template-columns:repeat(5,1fr);grid-auto-columns:auto;overflow:visible;margin:20px 0 0;padding:0}}
+.shots figure{scroll-snap-align:start;min-width:0}
+.shots img{width:100%;height:auto;border-radius:20px;background:var(--forest);box-shadow:0 16px 32px -20px rgba(22,50,32,.7)}
+.shots figcaption{font-size:13px;font-weight:600;line-height:1.35;margin-top:10px}
+.slots{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;font-size:13px;font-weight:600;color:var(--rose)}
+.done{position:fixed;inset:0;z-index:60;background:rgba(10,26,16,.55);display:grid;place-items:center;padding:20px;animation:fadeIn .2s both}
+.done[hidden]{display:none}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.done .card{background:var(--paper);border-radius:28px;padding:30px 22px 22px;max-width:380px;width:100%;text-align:center;animation:pop .35s cubic-bezier(.2,.8,.3,1) both}
+@keyframes pop{from{opacity:0;transform:translateY(16px) scale(.96)}to{opacity:1;transform:none}}
+.tick{width:66px;height:66px;margin:0 auto 14px;display:block;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.tick circle{stroke:var(--leaf);stroke-width:2.5;stroke-dasharray:145;stroke-dashoffset:145;animation:draw .5s ease-out .05s forwards}
+.tick path{stroke:var(--leaf-ink);stroke-width:4;stroke-dasharray:40;stroke-dashoffset:40;animation:draw .3s ease-out .45s forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+.done h2{font-size:21px;font-weight:800;line-height:1.2}
+.done p{font-size:14.5px;color:var(--muted);margin-top:8px}
+.done .hold{font-weight:600;color:var(--forest)}
+.done .cta{margin-top:18px}
+.ghostb{display:block;width:100%;margin-top:10px;border:0;background:none;font:inherit;font-size:13.5px;font-weight:600;color:var(--muted);padding:10px;cursor:pointer;min-height:44px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.was path{stroke-dashoffset:0}.tick circle,.tick path{stroke-dashoffset:0}}
 ${wheelCss}
 </style>
 </head>
@@ -337,7 +395,7 @@ ${introHtml(LOGO_ON_LIGHT)}
       <h1 class="rise" style="animation-delay:.18s">${esc(ended ? 'Plans and live classes' : offer.title || 'Our best rate is back')}</h1>
       <p class="sub rise" style="animation-delay:.26s">${esc(ended ? 'Women-only live classes and your own diet plan, all in the Fit Her app.' : offer.subtitle || '')}</p>
       ${goals.length ? `<ul class="goals"><li class="lead">Made for</li>${goals.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
-      ${proofBits.length ? `<ul class="stats" style="--n:${proofBits.length}">${proofBits.join('')}</ul>` : ''}
+      ${socialHtml}
     </div>
 
     <div class="picker-slot">
@@ -348,12 +406,13 @@ ${introHtml(LOGO_ON_LIGHT)}
         <div class="pkgs" id="pkgs" role="radiogroup" aria-label="Package">
           ${plans.length ? '' : '<p class="empty">Packages are being updated. Message us on WhatsApp for today\'s prices.</p>'}
         </div>
+        ${!ended && slotsLeft ? `<p class="slots"><span aria-hidden="true">\u25CF</span>Only ${slotsLeft} slot${slotsLeft === 1 ? '' : 's'} left at this price</p>` : ''}
         ${!ended && offer.endsAt && anyDiscount ? '<p class="ends"><span aria-hidden="true"></span>Offer price ends in <b id="pd">soon</b></p>' : ''}
         <a class="cta" id="cta" href="#" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2Zm0 18.2a8.2 8.2 0 0 1-4.2-1.2l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1 1 12 20.2Zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8s-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1a6.7 6.7 0 0 1-3.3-2.9c-.3-.4.2-.4.7-1.4.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 0 0-.7.3 3 3 0 0 0-.9 2.2 5.2 5.2 0 0 0 1.1 2.8 12 12 0 0 0 4.6 4c1.7.7 2.4.8 3.2.7a2.8 2.8 0 0 0 1.9-1.3 2.3 2.3 0 0 0 .2-1.3c-.1-.1-.3-.2-.5-.3Z"/></svg>
-          <span id="ctaText">Claim on WhatsApp</span>
+          <span id="ctaText">Book my slot</span>
         </a>
-        <p class="fine">Opens WhatsApp with your package written in. Our team sends your payment link.</p>
+        <p class="fine">Opens WhatsApp with your package written in. We reply with your payment details.</p>
       </div>
     </div>
   </div>
@@ -364,6 +423,12 @@ ${introHtml(LOGO_ON_LIGHT)}
     <h2 class="sec" id="res">Real women, real results</h2>
     <p class="lead">Shared by Fit Her members.</p>
     <div class="results">${results.map((u, i) => `<figure><img src="${esc(u)}" alt="Fit Her member result ${i + 1}" loading="lazy" onerror="this.parentNode.remove()"></figure>`).join('')}</div>
+  </section>` : ''}
+
+  ${shots.length ? `<section aria-labelledby="app">
+    <h2 class="sec" id="app">This is what you get back</h2>
+    <p class="lead">Your plan, your classes and your progress, all in one app. Swipe to look around.</p>
+    <div class="shots">${shots.map((x) => `<figure><img src="${esc(x.src)}" alt="${esc(x.caption)}" loading="lazy" width="430" height="836" onerror="this.parentNode.remove()">${x.caption ? `<figcaption>${esc(x.caption)}</figcaption>` : ''}</figure>`).join('')}</div>
   </section>` : ''}
 
   ${trainers.length > 1 ? `<section aria-labelledby="team">
@@ -378,7 +443,8 @@ ${introHtml(LOGO_ON_LIGHT)}
     ${next ? `<div class="next">${avatar(next.trainer || next.type, next.trainerImage)}<div><small>Next live class, ${esc(next.when.toLowerCase() === 'today' || next.when.toLowerCase() === 'tomorrow' ? next.when.toLowerCase() : 'on ' + next.when)} at ${esc(next.time)}</small><b>${esc(next.type)}${next.trainer ? ` with ${esc(next.trainer)}` : ''}</b></div></div>` : ''}
     <div class="tt">${parts.map((g) => `<div class="grp"><h3>${icon(g.part)}${g.part}</h3><ol>${g.rows.map((c) => {
       const meta = [c.level, daysLabel(c.days), c.trainer ? `with ${c.trainer}` : null].filter(Boolean).join(', ');
-      return `<li><span class="t">${esc(c.time)}</span><span class="c">${esc(c.type)}${meta ? `<small>${esc(meta)}</small>` : ''}</span>${c.trainer ? avatar(c.trainer, c.trainerImage) : '<span></span>'}</li>`;
+      const best = c.bestFor ? `<small class="bf">Best for ${esc(c.bestFor)}</small>` : '';
+      return `<li><span class="t">${esc(c.time)}</span><span class="c">${esc(c.type)}${meta ? `<small>${esc(meta)}</small>` : ''}${best}</span>${c.trainer ? avatar(c.trainer, c.trainerImage) : '<span></span>'}</li>`;
     }).join('')}</ol></div>`).join('')}</div>
   </section>` : ''}
 
@@ -404,15 +470,29 @@ ${introHtml(LOGO_ON_LIGHT)}
     <img class="close-logo" src="${LOGO_ON_DARK}" alt="Fit Her" width="122" height="18">
     <h2>${ended ? 'Ready when you are' : name ? `${esc(name)}, your spot is waiting` : 'Your spot is waiting'}</h2>
     <p>${ended ? 'Message us and we will help you pick a plan.' : 'This price goes back up when the timer ends.'}</p>
-    <a class="cta" id="cta2" href="#" target="_blank" rel="noopener"><span id="cta2Text">Claim on WhatsApp</span></a>
+    <a class="cta" id="cta2" href="#" target="_blank" rel="noopener"><span id="cta2Text">Book my slot</span></a>
   </div>` : ''}
 
   <footer><img src="${LOGO_ON_LIGHT}" alt="Fit Her" width="107" height="15"><p>Built around every phase of you.</p><p>Prices in ${esc((plans[0] && plans[0].currency) || 'PKR')}.</p></footer>
 </main>
 
+<div class="done" id="done" hidden>
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="doneTitle">
+    <svg class="tick" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="23"/><path d="M15 27l8 8 15-16"/></svg>
+    <h2 id="doneTitle">${ended ? 'Message sent' : `Your slot is held${name ? `, ${esc(name)}` : ''}`}</h2>
+    <p>Send the WhatsApp message to confirm it. We reply with your payment details.</p>
+    ${holdHours ? `<p class="hold">We hold your slot for ${holdHours} hour${holdHours === 1 ? '' : 's'}.</p>` : ''}
+    <a class="cta" id="doneWa" href="#" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2Zm0 18.2a8.2 8.2 0 0 1-4.2-1.2l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1 1 12 20.2Zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8s-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1a6.7 6.7 0 0 1-3.3-2.9c-.3-.4.2-.4.7-1.4.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 0 0-.7.3 3 3 0 0 0-.9 2.2 5.2 5.2 0 0 0 1.1 2.8 12 12 0 0 0 4.6 4c1.7.7 2.4.8 3.2.7a2.8 2.8 0 0 0 1.9-1.3 2.3 2.3 0 0 0 .2-1.3c-.1-.1-.3-.2-.5-.3Z"/></svg>
+      Open WhatsApp
+    </a>
+    <button class="ghostb" id="doneBack" type="button">Choose a different package</button>
+  </div>
+</div>
+
 <div class="bar" id="bar" aria-hidden="true">
   <div class="sum"><span id="barLen"></span><b id="barPrice"></b></div>
-  <a class="cta" id="barCta" href="#" target="_blank" rel="noopener" tabindex="-1">Claim on WhatsApp</a>
+  <a class="cta" id="barCta" href="#" target="_blank" rel="noopener" tabindex="-1">Book my slot</a>
 </div>
 
 <script>
@@ -459,7 +539,8 @@ ${introHtml(LOGO_ON_LIGHT)}
   function updateCta(){
     var p=D.plans[plan], url=waLink();
     var small=window.innerWidth<360;
-    var txt=sel?((small?'Claim for ':'Get '+sel.label+' for ')+fmt(sel.pay,p.currency)):'Ask us on WhatsApp';
+    var txt=sel?('Book my slot \u00B7 '+fmt(sel.pay,p.currency)):'Ask us on WhatsApp';
+    if(small&&sel) txt='Book \u00B7 '+fmt(sel.pay,p.currency);
     $('ctaText').textContent=txt; $('cta').href=url; $('barCta').href=url;
     if($('cta2')){ $('cta2').href=url; $('cta2Text').textContent=txt; }
     $('barLen').textContent=sel?sel.label+(sel.offer!=null?', '+sel.pct+'% off':''):'';
@@ -473,6 +554,22 @@ ${introHtml(LOGO_ON_LIGHT)}
     });
   });
   if(D.plans.length) render(); else { $('cta').href=D.wa?'https://wa.me/'+D.wa:'#'; }
+
+  // Tapping any claim button: WhatsApp opens as a normal link (never blocked),
+  // and the confirmation shows behind it, so it is there when she comes back.
+  var done=$('done'), picker=$('pick');
+  function showDone(){
+    if(!done||!D.wa||!sel) return;
+    $('doneWa').href=waLink();
+    done.hidden=false;
+    try{ $('doneWa').focus({preventScroll:true}); }catch(e){}
+  }
+  ['cta','cta2','barCta'].forEach(function(id){ var el=$(id); if(el) el.addEventListener('click',showDone); });
+  if(done){
+    $('doneBack').addEventListener('click',function(){ done.hidden=true; if(picker) picker.scrollIntoView({block:'center'}); });
+    done.addEventListener('click',function(e){ if(e.target===done) done.hidden=true; });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&!done.hidden) done.hidden=true; });
+  }
 
   // Claim bar on phones whenever the main claim button is off screen
   // (before she scrolls to it, and after she scrolls past it).
